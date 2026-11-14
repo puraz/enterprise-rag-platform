@@ -17,8 +17,16 @@ from typing import Any
 from pydantic import BaseModel
 
 from rag_contracts.enums import (
+    BlobStatus,
+    ConfidentialityLevel,
+    DocumentFormat,
+    DocumentStatus,
+    DocumentVersionStatus,
+    KnowledgeBaseStatus,
+    KnowledgeBaseVisibility,
     MembershipStatus,
     PlatformRole,
+    SourceType,
     TenantRole,
     TenantStatus,
     UserStatus,
@@ -48,6 +56,15 @@ EXPORTED_ENUMS: dict[str, type[str]] = {
     "TenantRole": TenantRole,
     "PlatformRole": PlatformRole,
     "MembershipStatus": MembershipStatus,
+    # ---- 知识库/文档域（rag_contracts.enums.documents）----
+    "KnowledgeBaseStatus": KnowledgeBaseStatus,
+    "KnowledgeBaseVisibility": KnowledgeBaseVisibility,
+    "ConfidentialityLevel": ConfidentialityLevel,
+    "DocumentStatus": DocumentStatus,
+    "DocumentVersionStatus": DocumentVersionStatus,
+    "DocumentFormat": DocumentFormat,
+    "SourceType": SourceType,
+    "BlobStatus": BlobStatus,
 }
 
 

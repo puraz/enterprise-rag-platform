@@ -5,9 +5,21 @@ from rag_db.repositories.identity import (
     TenantRepository,
     UserRepository,
 )
+from rag_db.repositories.knowledge import (
+    BlobRepository,
+    DocumentRepository,
+    KnowledgeBaseRepository,
+    claim_documents_for_processing,
+    count_orphan_blobs,
+)
 
 __all__ = [
+    "BlobRepository",
+    "DocumentRepository",
+    "KnowledgeBaseRepository",
     "MembershipRepository",
     "TenantRepository",
     "UserRepository",
+    "claim_documents_for_processing",
+    "count_orphan_blobs",
 ]

@@ -148,6 +148,106 @@ export type MembershipStatus =
   | "suspended"
   | "removed";
 
+/** 知识库状态。 */
+export type KnowledgeBaseStatus =
+  | "active"
+  | "archived"
+  | "deleted";
+
+/**
+ * 知识库可见范围。
+ * 这是**库级**的粗粒度控制；文档级的 ACL 与密级是更细的一层（A7 实现）。
+ * 两层并存的原因：绝大多数场景只需库级控制（整个部门库），
+ * 逐文档配 ACL 成本太高；但敏感文档确实需要单独收紧。
+ */
+export type KnowledgeBaseVisibility =
+  | "private"
+  | "tenant"
+  | "department";
+
+/**
+ * 密级。数值越大越敏感。
+ * 密级与 ACL 是**正交**的两道门：
+ * - ACL 回答"你能不能看这个库/文档"；
+ * - 密级回答"你这个人的密级够不够"。
+ * 缺任何一道都会出事：只有 ACL 时，"有权限的人"可能是实习生；
+ * 只有密级时，"够级的人"可能不在这个部门。
+ */
+export type ConfidentialityLevel =
+  | "public"
+  | "internal"
+  | "confidential"
+  | "secret";
+
+/**
+ * 文档处理状态机。
+ * 完整流转：
+ * PENDING ──▶ PARSING ──▶ CHUNKING ──▶ EMBEDDING ──▶ INDEXING ──▶ READY
+ * │           │           │            │            │
+ * └───────────┴───────────┴────────────┴────────────┴──▶ FAILED
+ * │
+ * (重试) ──▶ PENDING
+ * 约束（A3-4 的任务表会用同样的状态集）：
+ * - 只有 READY 的文档能参与检索；
+ * - FAILED 的文档保留原始 blob，允许重试而不必重新上传；
+ * - 状态流转必须走乐观锁（`version`），否则并发重试会互相覆盖。
+ */
+export type DocumentStatus =
+  | "pending"
+  | "parsing"
+  | "chunking"
+  | "embedding"
+  | "indexing"
+  | "ready"
+  | "failed";
+
+/**
+ * 文档版本状态。
+ * 与 `DocumentStatus` 分开：文档整体状态取"当前版本"的状态，
+ * 但历史版本有独立生命周期（可能已归档、已被新版本取代）。
+ */
+export type DocumentVersionStatus =
+  | "processing"
+  | "ready"
+  | "failed"
+  | "superseded";
+
+/**
+ * 文档格式。决定用哪个 parser 实现。
+ * 新增格式时必须同步：
+ * 1. `rag_api.parsers` 下的解析器实现；
+ * 2. 前端上传组件的 `accept` 白名单；
+ * 3. 本文档的注释（说明该格式的已知坑）。
+ */
+export type DocumentFormat =
+  | "pdf"
+  | "docx"
+  | "pptx"
+  | "xlsx"
+  | "csv"
+  | "markdown"
+  | "html"
+  | "text"
+  | "image";
+
+/** 文档来源类型。决定解析与去重策略的差异。 */
+export type SourceType =
+  | "upload"
+  | "url"
+  | "connector"
+  | "api";
+
+/**
+ * 物理文件状态。
+ * 单独设状态的原因：上传可能中断、校验可能失败、对象存储可能丢文件。
+ * 文档版本引用一个 blob 时，必须确认它真的可用。
+ */
+export type BlobStatus =
+  | "pending"
+  | "complete"
+  | "missing"
+  | "deleted";
+
 // =========================== 数据模型 ===========================
 
 /** 统一错误响应体。所有非 2xx 响应都必须是这个形状。 */

@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, MetaData, func
+from sqlalchemy import DateTime, ForeignKey, Integer, MetaData, func
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -82,16 +82,48 @@ class TenantScopedMixin:
     """租户隔离字段。
 
     所有租户内资源都必须有 tenant_id，且：
+    - 有外键约束（`ON DELETE CASCADE`：删租户时业务数据一并清理）；
     - 有索引（过滤条件第一列）；
-    - 有 RLS 策略（A3 建立）；
+    - 有 RLS 策略（A3-6 建立）；
     - **由服务端注入**，绝不接受请求参数里的 tenant_id。
+
+    为什么必须有外键：
+    没有 FK 时，一个手滑的 tenant_id 会创造出"不属于任何租户"的孤儿数据。
+    这类数据既不会被 RLS 过滤掉（RLS 按 tenant_id 匹配，孤儿行匹配不上任何人），
+    也不会随租户删除而清理，最终在库里越积越多且没人能访问——
+    存储成本和审计风险都在，但对业务隐形。
 
     这里只定义列，RLS 策略在迁移里创建。
     """
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
-        PGUUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
         comment="租户 ID（服务端从 token 注入，不取请求参数）",
+    )
+
+
+class OptimisticLockMixin:
+    """乐观锁版本号。
+
+    用法：`UPDATE ... SET version = version + 1 WHERE id = :id AND version = :expected`
+    受影响行数为 0 表示并发冲突，调用方重新读取后决定重试或报冲突。
+
+    为什么不用悲观锁（SELECT FOR UPDATE）：
+    问答/上传这类操作耗时可能到秒级，持锁会阻塞同文档的其它操作，
+    在高并发下很快演变成锁等待队列。乐观锁只在实际冲突时才失败，
+    绝大多数场景零等待。
+
+    这个列**必须由业务代码显式自增**，不能靠 onupdate 自动处理——
+    onupdate 无法区分"并发修改"和"顺序修改"，乐观锁的价值就在于
+    "期望版本不符就失败"。
+    """
+
+    version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+        comment="乐观锁版本号，每次更新 +1",
     )

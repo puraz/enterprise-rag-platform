@@ -7,13 +7,20 @@
 按域分组，新增模型时加进对应分组。
 """
 
+from rag_db.models.blob import Blob
+from rag_db.models.document import Document, DocumentVersion
 from rag_db.models.health import SchemaHealth
+from rag_db.models.knowledge import KnowledgeBase
 from rag_db.models.membership import TenantMembership
 from rag_db.models.tenant import Tenant
 from rag_db.models.user import IdentityLink, User
 
 __all__ = [
+    "Blob",
+    "Document",
+    "DocumentVersion",
     "IdentityLink",
+    "KnowledgeBase",
     "SchemaHealth",
     "Tenant",
     "TenantMembership",

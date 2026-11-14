@@ -145,6 +145,100 @@
         "removed"
       ],
       "description": "成员关系状态。\n\n    与 `UserStatus` 分开：用户可以是 active，但在这个租户里被移除。\n    把两者合成一个字段会导致「禁用某人」和「从租户移除某人」无法区分。"
+    },
+    "KnowledgeBaseStatus": {
+      "title": "KnowledgeBaseStatus",
+      "type": "string",
+      "enum": [
+        "active",
+        "archived",
+        "deleted"
+      ],
+      "description": "知识库状态。"
+    },
+    "KnowledgeBaseVisibility": {
+      "title": "KnowledgeBaseVisibility",
+      "type": "string",
+      "enum": [
+        "private",
+        "tenant",
+        "department"
+      ],
+      "description": "知识库可见范围。\n\n    这是**库级**的粗粒度控制；文档级的 ACL 与密级是更细的一层（A7 实现）。\n    两层并存的原因：绝大多数场景只需库级控制（整个部门库），\n    逐文档配 ACL 成本太高；但敏感文档确实需要单独收紧。"
+    },
+    "ConfidentialityLevel": {
+      "title": "ConfidentialityLevel",
+      "type": "string",
+      "enum": [
+        "public",
+        "internal",
+        "confidential",
+        "secret"
+      ],
+      "description": "密级。数值越大越敏感。\n\n    密级与 ACL 是**正交**的两道门：\n    - ACL 回答\"你能不能看这个库/文档\"；\n    - 密级回答\"你这个人的密级够不够\"。\n    缺任何一道都会出事：只有 ACL 时，\"有权限的人\"可能是实习生；\n    只有密级时，\"够级的人\"可能不在这个部门。"
+    },
+    "DocumentStatus": {
+      "title": "DocumentStatus",
+      "type": "string",
+      "enum": [
+        "pending",
+        "parsing",
+        "chunking",
+        "embedding",
+        "indexing",
+        "ready",
+        "failed"
+      ],
+      "description": "文档处理状态机。\n\n    完整流转：\n\n        PENDING ──▶ PARSING ──▶ CHUNKING ──▶ EMBEDDING ──▶ INDEXING ──▶ READY\n           │           │           │            │            │\n           └───────────┴───────────┴────────────┴────────────┴──▶ FAILED\n                                                                  │\n                                                              (重试) ──▶ PENDING\n\n    约束（A3-4 的任务表会用同样的状态集）：\n    - 只有 READY 的文档能参与检索；\n    - FAILED 的文档保留原始 blob，允许重试而不必重新上传；\n    - 状态流转必须走乐观锁（`version`），否则并发重试会互相覆盖。"
+    },
+    "DocumentVersionStatus": {
+      "title": "DocumentVersionStatus",
+      "type": "string",
+      "enum": [
+        "processing",
+        "ready",
+        "failed",
+        "superseded"
+      ],
+      "description": "文档版本状态。\n\n    与 `DocumentStatus` 分开：文档整体状态取\"当前版本\"的状态，\n    但历史版本有独立生命周期（可能已归档、已被新版本取代）。"
+    },
+    "DocumentFormat": {
+      "title": "DocumentFormat",
+      "type": "string",
+      "enum": [
+        "pdf",
+        "docx",
+        "pptx",
+        "xlsx",
+        "csv",
+        "markdown",
+        "html",
+        "text",
+        "image"
+      ],
+      "description": "文档格式。决定用哪个 parser 实现。\n\n    新增格式时必须同步：\n    1. `rag_api.parsers` 下的解析器实现；\n    2. 前端上传组件的 `accept` 白名单；\n    3. 本文档的注释（说明该格式的已知坑）。"
+    },
+    "SourceType": {
+      "title": "SourceType",
+      "type": "string",
+      "enum": [
+        "upload",
+        "url",
+        "connector",
+        "api"
+      ],
+      "description": "文档来源类型。决定解析与去重策略的差异。"
+    },
+    "BlobStatus": {
+      "title": "BlobStatus",
+      "type": "string",
+      "enum": [
+        "pending",
+        "complete",
+        "missing",
+        "deleted"
+      ],
+      "description": "物理文件状态。\n\n    单独设状态的原因：上传可能中断、校验可能失败、对象存储可能丢文件。\n    文档版本引用一个 blob 时，必须确认它真的可用。"
     }
   },
   "models": {
