@@ -2,7 +2,11 @@
 .DEFAULT_GOAL := help
 UV ?= uv
 
-.PHONY: help sync lint fmt typecheck test check config check-deps test-int test-all
+.PHONY: help sync lint fmt typecheck test check config check-deps test-int test-all \
+        migrate migrate-new migrate-down migrate-check
+
+# 迁移统一在 packages/db 下执行（alembic.ini 在那里）
+ALEMBIC ?= $(UV) run alembic -c packages/db/alembic.ini
 
 help:  ## 显示可用命令
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -32,6 +36,19 @@ test-all:  ## 全量测试（单测 + 集成）
 
 check-deps:  ## 检查 PG / Redis / pgvector 连通性
 	$(UV) run python scripts/check_deps.py
+
+migrate:  ## 升级到最新版本
+	$(ALEMBIC) upgrade head
+
+migrate-new:  ## 生成新迁移，用法：make migrate-new name=add_documents
+	@test -n "$(name)" || (echo "用法: make migrate-new name=描述" && exit 1)
+	$(ALEMBIC) revision --autogenerate -m "$(name)"
+
+migrate-down:  ## 回退一个版本
+	$(ALEMBIC) downgrade -1
+
+migrate-check:  ## 检查模型与迁移是否漂移（有未生成的变更则失败）
+	@$(ALEMBIC) check || (echo "" && echo "模型与迁移不一致，请运行 make migrate-new name=xxx" && exit 1)
 
 config:  ## 打印当前生效配置（密钥脱敏）
 	$(UV) run python scripts/show_config.py

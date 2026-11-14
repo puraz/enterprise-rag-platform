@@ -6,13 +6,16 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "rag-core",
     "rag-contracts",
+    # api 通过仓储层访问数据，不直接写 SQL
+    "rag-db",
 ]
 
-# 告诉 uv：这两个依赖来自同 workspace 的本地目录，不要跑去 PyPI 找。
+# 告诉 uv：这些依赖来自同 workspace 的本地目录，不要跑去 PyPI 找。
 # 显式声明比依赖自动推断可靠——推断规则各版本行为不一致，写死最稳。
 [tool.uv.sources]
 rag-core = { workspace = true }
 rag-contracts = { workspace = true }
+rag-db = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

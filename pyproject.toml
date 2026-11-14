@@ -21,6 +21,7 @@ dev = [
     "pytest-cov>=6.0",
     "ruff>=0.9",
     "mypy>=1.14",
+    "alembic>=1.20.1",
 ]
 
 # ------------------------------- ruff -------------------------------
@@ -43,11 +44,19 @@ ignore = [
     "RUF003",  # 注释里的歧义 Unicode 字符
 ]
 
+# Alembic 自动生成的迁移文件由生成器决定格式，ruff format 不参与，
+# 否则每次 autogenerate 都要手工重新格式化，且两者会反复互相覆盖。
+[tool.ruff.format]
+exclude = ["packages/db/alembic/versions/*.py"]
+
 [tool.ruff.lint.isort]
-known-first-party = ["rag_core", "rag_contracts", "rag_api", "rag_worker"]
+known-first-party = ["rag_core", "rag_contracts", "rag_db", "rag_api", "rag_worker"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S105", "S106"]  # 测试 fixture 里的假密码/假 token 不算泄密
+# Alembic 自动生成的迁移文件：不手改（改了会与生成器逻辑冲突，
+# 下次 autogenerate 覆盖），因此不对其做格式/行长要求。
+"packages/db/alembic/versions/*.py" = ["E501", "W291", "I001"]
 # 错误码枚举的成员名含 TOKEN（AUTH_TOKEN_EXPIRED 等），
 # bandit 的 S105 会把它误判成硬编码密码。这些是契约常量，不是密钥。
 "packages/contracts/src/rag_contracts/errors/codes.py" = ["S105"]

@@ -117,6 +117,28 @@ class Settings(BaseSettings):
         return data
 
 
+def find_project_root(start: Path | None = None) -> Path:
+    """向上查找仓库根目录。
+
+    为什么必须这么做：`.env` 在仓库根，但命令可能从任意子目录执行
+    （`packages/db` 下跑 alembic、`apps/api` 下跑 uvicorn、IDE 里跑测试）。
+    只看 `Path.cwd()` 会导致找不到 `.env`，然后**静默退回代码默认值**
+    ——表现是"连到了错误的库/用了默认密码"，报错信息完全指不到根因。
+
+    生产环境（容器/sytemd）通常没有仓库结构：找不到标记目录时
+    原样返回起始目录，此时只靠进程环境变量，这是正确的行为——
+    生产配置必须由平台注入，不该依赖文件。
+
+    标记：同时有 pyproject.toml 与 uv.lock（uv workspace 的两个特征文件）。
+    只认 pyproject.toml 会在子包里误判（每个子包都有自己的 pyproject.toml）。
+    """
+    current = (start or Path.cwd()).resolve()
+    for candidate in (current, *current.parents):
+        if (candidate / "pyproject.toml").is_file() and (candidate / "uv.lock").is_file():
+            return candidate
+    return current
+
+
 def load_env_files(project_root: Path | None = None) -> tuple[Path, ...]:
     """把 .env / .env.<RAG_ENV> 合并后注入进程环境。
 
@@ -124,9 +146,10 @@ def load_env_files(project_root: Path | None = None) -> tuple[Path, ...]:
     1. 用 os.environ.setdefault 注入 —— 真实环境变量永远赢，.env 只是开发便利；
     2. RAG_ENV 两趟读 —— 先看进程环境，再看 .env，否则无法确定加载哪个覆盖文件。
 
+    project_root 不传时自动向上查找仓库根，见 find_project_root 的说明。
     返回实际加载的文件列表，便于启动日志打印"本次生效的配置文件"。
     """
-    root = project_root if project_root is not None else Path.cwd()
+    root = project_root if project_root is not None else find_project_root()
 
     base_file = root / ".env"
     base_values: dict[str, str] = {}

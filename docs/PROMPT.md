@@ -103,10 +103,27 @@ packages/
               src/rag_core/{settings,logging,errors,db,redis,resilience}.py
   contracts/  pyproject.toml → 包名 rag-contracts → import rag_contracts
               src/rag_contracts/{api/,queue/,enums.py,errors.py}
+  db/         pyproject.toml → 包名 rag-db        → import rag_db
+              src/rag_db/{base.py,models/,repositories/}
+              alembic/ + alembic.ini             # 迁移唯一入口
 apps/
   api/        pyproject.toml → 包名 rag-api       → import rag_api
   worker/     pyproject.toml → 包名 rag-worker    → import rag_worker
 ```
+
+**为什么需要 `packages/db`（不能用 core 或 apps/api 顶替）**：
+ORM 模型与仓储（写 SQL 的那一层）必须被 **api 与 worker 同时使用**——worker 要改任务状态、
+写 chunk、读文档元数据。但「worker 禁止 import apps/api」是硬约束，而 core 又规定
+「不含任何业务概念」。三条约束叠加后，模型与仓储只能落在第三个共享包里。
+
+依赖方向（严格单向，工具会检查）：
+```
+contracts  ←  core  ←  db  ←  api / worker
+```
+- contracts 是叶子包，零内部依赖，才能单独用于生成前端 TS 类型；
+- core 只放横切基础设施，**不放 ORM 模型、不放仓储**；
+- db 依赖 contracts（枚举）与 core（异常/日志），被 api 与 worker 依赖；
+- api 与 worker **互不依赖**，只通过契约、数据库状态、队列消息通信。
 
 端边界的工具级保障：`apps/worker/pyproject.toml` **不声明**对 `rag-api` 的依赖，因此 worker 里 `import rag_api` 会直接 ModuleNotFoundError，不靠人自觉。环境变量统一 `RAG_` 前缀。
 

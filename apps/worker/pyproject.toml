@@ -4,15 +4,18 @@ version = "0.1.0"
 description = "Worker 端：解析 / 切分 / 向量化 / 索引重建 / 定时任务（独立进程、独立扩缩容）"
 requires-python = ">=3.12,<3.13"
 # 端边界第一层：这里故意不写 rag-api。生产镜像里它物理不存在。
+# worker 需要 rag-db 来读写任务/文档/chunk（共享数据访问层），
+# 但不能有 rag-api —— 那会让 worker 绕过 API 直接调业务逻辑。
 dependencies = [
     "rag-core",
     "rag-contracts",
+    "rag-db",
 ]
 
-# 同上：显式声明本地 workspace 来源，不依赖各版本不一致的自动推断。
 [tool.uv.sources]
 rag-core = { workspace = true }
 rag-contracts = { workspace = true }
+rag-db = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]
