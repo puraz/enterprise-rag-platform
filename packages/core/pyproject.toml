@@ -8,6 +8,8 @@ dependencies = [
     "pydantic-settings>=2.6",
     # 只为了读 .env 文件；不引入它就得自己写 ini 解析器
     "python-dotenv>=1.0",
+    # 结构化日志：原生支持 contextvars 合并与处理器链
+    "structlog>=24.4",
 ]
 
 [build-system]
