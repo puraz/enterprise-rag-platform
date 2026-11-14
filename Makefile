@@ -3,7 +3,7 @@
 UV ?= uv
 
 .PHONY: help sync lint fmt typecheck test check config check-deps test-int test-all \
-        migrate migrate-new migrate-down migrate-check
+        migrate migrate-new migrate-down migrate-check gen-contracts gen-contracts-check
 
 # 迁移统一在 packages/db 下执行（alembic.ini 在那里）
 ALEMBIC ?= $(UV) run alembic -c packages/db/alembic.ini
@@ -53,4 +53,11 @@ migrate-check:  ## 检查模型与迁移是否漂移（有未生成的变更则�
 config:  ## 打印当前生效配置（密钥脱敏）
 	$(UV) run python scripts/show_config.py
 
-check: lint typecheck test  ## 提交前全量自检
+gen-contracts:  ## 从 Pydantic 契约生成 JSON Schema 与前端 TS 类型
+	$(UV) run python packages/contracts/scripts/export_schema.py
+	$(UV) run python packages/contracts/scripts/gen_ts.py
+
+gen-contracts-check:  ## 检查生成产物是否与源头契约漂移
+	$(UV) run python packages/contracts/scripts/check_contracts_fresh.py
+
+check: lint typecheck gen-contracts-check test  ## 提交前全量自检（含契约漂移检查）
