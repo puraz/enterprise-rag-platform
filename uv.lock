@@ -352,6 +352,12 @@ requires-dist = [
 name = "rag-contracts"
 version = "0.1.0"
 source = { editable = "packages/contracts" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = ">=2.9" }]
 
 [[package]]
 name = "rag-core"
@@ -361,6 +367,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
+    { name = "rag-contracts" },
     { name = "structlog" },
 ]
 
@@ -369,6 +376,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "python-dotenv", specifier = ">=1.0" },
+    { name = "rag-contracts", editable = "packages/contracts" },
     { name = "structlog", specifier = ">=24.4" },
 ]
 

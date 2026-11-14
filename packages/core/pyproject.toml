@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "横切基础设施：配置 / 日志 / 异常 / DB / Redis / 韧性层（不含业务概念）"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    # 错误码/错误响应体是契约，core 的异常类要携带 ErrorCode
+    "rag-contracts",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     # 只为了读 .env 文件；不引入它就得自己写 ini 解析器
@@ -11,6 +13,9 @@ dependencies = [
     # 结构化日志：原生支持 contextvars 合并与处理器链
     "structlog>=24.4",
 ]
+
+[tool.uv.sources]
+rag-contracts = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

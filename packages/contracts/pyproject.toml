@@ -3,7 +3,10 @@ name = "rag-contracts"
 version = "0.1.0"
 description = "四端共享契约的唯一真相来源：Pydantic schema / 枚举 / 错误码 / 队列消息"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+    # 契约层用 Pydantic 定义对外 schema；不放任何内部依赖（必须是叶子包）
+    "pydantic>=2.9",
+]
 
 [build-system]
 requires = ["hatchling"]
