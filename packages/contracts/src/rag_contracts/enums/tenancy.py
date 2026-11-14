@@ -1,12 +1,7 @@
-"""四端共享枚举：租户、用户、角色的状态与取值。
+"""租户、用户、成员关系、平台角色枚举。
 
-为什么这些要放 contracts 而不是 rag_db：
-前端要按这些值渲染（状态标签、角色下拉框、按钮级权限判断），
-放 contracts 才能被 `make gen-contracts` 导出成 TS 联合类型。
-放 rag_db 里，前端就只能手写一份字符串常量——那就是漂移的起点。
-
-**加值必须向后兼容**：前端可能有 `switch` 分支，新增值会走到 default。
-所以新增状态值时要同步检查前端是否需要处理，不要只在后端加。
+对应模型：`rag_db.models.tenant` / `user` / `membership`。
+一个领域文件对应一组聚合，新增相关枚举直接加在这里。
 """
 
 from __future__ import annotations
@@ -28,7 +23,11 @@ class TenantStatus(StrEnum):
 
 
 class UserStatus(StrEnum):
-    """用户状态。"""
+    """用户全局状态。
+
+    注意与 `MembershipStatus` 的区别：这个字段管"这个人还能不能用"，
+    `MembershipStatus` 管"这个人在某个租户里是否生效"。
+    """
 
     ACTIVE = "active"
 
@@ -40,10 +39,9 @@ class UserStatus(StrEnum):
 
 
 class TenantRole(StrEnum):
-    """租户内角色。
+    """租户内角色，权限从高到低。
 
-    权限从高到低。**这是租户内的角色，不是平台角色**——
-    平台侧的超管看的是 `PlatformRole`，两者互不覆盖。
+    **这是租户内角色，不是平台角色**——平台侧看 `PlatformRole`，两者正交。
     """
 
     OWNER = "owner"
@@ -65,7 +63,7 @@ class TenantRole(StrEnum):
 class PlatformRole(StrEnum):
     """平台级角色（管理端）。
 
-    与 TenantRole **正交**：平台超管未必是任何租户的成员。
+    与 `TenantRole` 正交：平台超管未必是任何租户的成员。
     两者分开是因为「跨租户治理」和「租户内协作」是两种权力来源，
     混成一个字段会导致越权判断写成一团 if-else。
     """
@@ -86,14 +84,14 @@ class PlatformRole(StrEnum):
 class MembershipStatus(StrEnum):
     """成员关系状态。
 
-    与 UserStatus 分开：用户可以是 active，但在这个租户里被移除。
-    把两者合成一个字段会导致"禁用某人"和"从租户移除某人"无法区分。
+    与 `UserStatus` 分开：用户可以是 active，但在这个租户里被移除。
+    把两者合成一个字段会导致「禁用某人」和「从租户移除某人」无法区分。
     """
 
     ACTIVE = "active"
 
     SUSPENDED = "suspended"
-    """在该租户内暂停：保留成员关系但不授予权限（如临时出差/停职）。"""
+    """在该租户内暂停：保留成员关系但不授予权限（如临时停职）。"""
 
     REMOVED = "removed"
     """已移出：保留记录供审计，权限立即失效。"""

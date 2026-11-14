@@ -105,16 +105,19 @@ export type TenantStatus =
   | "suspended"
   | "deleted";
 
-/** 用户状态。 */
+/**
+ * 用户全局状态。
+ * 注意与 `MembershipStatus` 的区别：这个字段管"这个人还能不能用"，
+ * `MembershipStatus` 管"这个人在某个租户里是否生效"。
+ */
 export type UserStatus =
   | "active"
   | "disabled"
   | "pending";
 
 /**
- * 租户内角色。
- * 权限从高到低。**这是租户内的角色，不是平台角色**——
- * 平台侧的超管看的是 `PlatformRole`，两者互不覆盖。
+ * 租户内角色，权限从高到低。
+ * **这是租户内角色，不是平台角色**——平台侧看 `PlatformRole`，两者正交。
  */
 export type TenantRole =
   | "owner"
@@ -125,7 +128,7 @@ export type TenantRole =
 
 /**
  * 平台级角色（管理端）。
- * 与 TenantRole **正交**：平台超管未必是任何租户的成员。
+ * 与 `TenantRole` 正交：平台超管未必是任何租户的成员。
  * 两者分开是因为「跨租户治理」和「租户内协作」是两种权力来源，
  * 混成一个字段会导致越权判断写成一团 if-else。
  */
@@ -137,8 +140,8 @@ export type PlatformRole =
 
 /**
  * 成员关系状态。
- * 与 UserStatus 分开：用户可以是 active，但在这个租户里被移除。
- * 把两者合成一个字段会导致"禁用某人"和"从租户移除某人"无法区分。
+ * 与 `UserStatus` 分开：用户可以是 active，但在这个租户里被移除。
+ * 把两者合成一个字段会导致「禁用某人」和「从租户移除某人」无法区分。
  */
 export type MembershipStatus =
   | "active"

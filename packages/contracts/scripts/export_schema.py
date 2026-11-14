@@ -33,11 +33,16 @@ EXPORTED_MODELS: tuple[type[BaseModel], ...] = (
 
 # 需要导出的枚举。导出成 TS 字符串联合类型，而不是 TS enum
 # （TS enum 有运行时开销，且与字符串字面量类型不兼容）
+#
+# 枚举按业务域组织在 `rag_contracts.enums` 包内（tenancy.py / documents.py / …），
+# 新增域文件后必须把其中的枚举登记到这里——否则前端拿不到类型。
+# `tests/test_enums.py` 会自动扫描 enums 包校验是否漏登记，漏了会红。
 EXPORTED_ENUMS: dict[str, type[str]] = {
+    # ---- 错误码域（在 rag_contracts.errors，不是 enums 包）----
     "ErrorCode": ErrorCode,
     "ErrorCategory": ErrorCategory,
     "Severity": Severity,
-    # 租户/用户/角色枚举：前端要按这些值渲染状态标签与权限判断
+    # ---- 租户/身份域（rag_contracts.enums.tenancy）----
     "TenantStatus": TenantStatus,
     "UserStatus": UserStatus,
     "TenantRole": TenantRole,

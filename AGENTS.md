@@ -83,6 +83,11 @@ api 与 worker **互不依赖**，只通过契约、数据库状态、队列消�
 - Python 包：`rag_core` / `rag_contracts` / `rag_db` / `rag_api` / `rag_worker`（PEP 8 全小写下划线）
 - 发行包名：`rag-core` / `rag-contracts` / `rag-db` / `rag-api` / `rag-worker`
 - 配置类：`Settings`，子配置按域拆 `DatabaseSettings` / `RedisSettings` / `LLMSettings`
+- 枚举：`packages/contracts/src/rag_contracts/enums/` **按业务域分包**
+  （`tenancy.py` / `documents.py` / `tasks.py` …），一个域文件对应一组模型；
+  **禁止堆成单文件**。新增枚举后必须登记到 `export_schema.py` 的 `EXPORTED_ENUMS`，
+  否则前端拿不到类型（`tests/test_enums.py` 会自动扫描校验）。
+  错误码是例外，在 `rag_contracts.errors` 且值用 `DOMAIN.REASON` 大写格式。
 - 表名：`snake_case` 复数（`documents` / `chunks` / `audit_logs`）
 - 前端：组件 PascalCase 文件名，hook 用 `useXxx.ts`，其余 kebab-case
 
