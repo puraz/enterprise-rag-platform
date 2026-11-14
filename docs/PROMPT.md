@@ -87,10 +87,17 @@
 - 页面：仪表盘（QPS、P95、错误率、队列积压、成本与预算水位、越权拒绝数）、知识治理（文档台账、失败与死信重试、chunk 切分质量可视化、索引版本与 alias 状态、重建/回滚触发）、**模型与成本（多供应商调用量/token/花费，区分缓存命中计价，按租户-功能拆解，预算配额与路由规则配置，供应商健康与降级状态）**、**模型供应商管理（多供应商/多模型注册、能力标签、权重与优先级、密钥轮换、灰度与熔断配置）**、权限治理（用户/角色/权限点、ACL 与密级、组织结构、IdP 配置）、安全审计（审计检索、PII 规则、敏感词与拒答、注入命中记录、并发安全事件）、评估中心（黄金集、回归任务与报告、指标趋势、bad case 归因、judge 采样配置）、系统（限流规则、缓存命中率、健康检查、告警渠道）
 - 管理端自身分权：超管 / 平台运营 / 知识管理员 / 审计员；高危操作（重建索引、改权限、删库、换供应商）二次确认 + 强制审计 + 可双人复核
 
-## ⑤ 共享契约（packages/contracts）+ 共享底座（packages/core）
-**packages/contracts**：四端唯一真相来源，禁止各端各写一份：OpenAPI 生成的 TS 类型 + Pydantic schema、队列消息 schema、任务状态/错误码/权限点/引用结构枚举。前端类型**由后端 OpenAPI 自动生成**，不允许手写漂移。
+## ⑤ 共享契约（packages/contracts）+ 共享底座（packages/core）+ 数据层（packages/db）
+**packages/contracts**：四端唯一真相来源，禁止各端各写一份：Pydantic schema、队列消息 schema、任务状态/错误码/权限点/引用结构枚举。前端 TS 类型由 `make gen-contracts` 从这些 Pydantic 契约生成（Pydantic → JSON Schema → TS），生成产物入库并有 CI 漂移检查，不允许手写漂移。
+
+> 说明：生成链路的实现是 Pydantic → JSON Schema → 自研 TS 渲染器（`packages/contracts/scripts/`）。
+> 选它的原因：本机与 CI 都没有 Node，`openapi-typescript` 用不了；纯 Python 方案让"契约是否同步"
+> 能在后端 CI 独立校验。等 A4 有了完整 FastAPI app、且装了 Node，可再叠加 OpenAPI 生成，
+> 两条链路可并存——**不锁死**。
 
 **packages/core**：api 与 worker 共用的横切基础设施——配置(pydantic-settings 分层)、结构化日志 + contextvars、异常与错误码基类、DB 会话与连接池、Redis 客户端、`ResilientCaller` 韧性层、通用工具。**不含任何业务概念**，只被上层依赖，不反向依赖 api/worker。
+
+**packages/db**：ORM 模型 + 仓储(SQL) + Alembic 迁移。存在的理由是三方约束的交集：worker 必须读写业务表，但禁止 import apps/api，而 core 又不许含业务概念——模型与仓储只能落在第三个共享包。依赖方向 `contracts ← core ← db ← api/worker`。
 
 **Python 包组织（uv workspace + src/ 布局）**：
 
@@ -125,7 +132,15 @@ contracts  ←  core  ←  db  ←  api / worker
 - db 依赖 contracts（枚举）与 core（异常/日志），被 api 与 worker 依赖；
 - api 与 worker **互不依赖**，只通过契约、数据库状态、队列消息通信。
 
-端边界的工具级保障：`apps/worker/pyproject.toml` **不声明**对 `rag-api` 的依赖，因此 worker 里 `import rag_api` 会直接 ModuleNotFoundError，不靠人自觉。环境变量统一 `RAG_` 前缀。
+端边界的工具级保障（三层，缺一不可）：环境变量统一 `RAG_` 前缀。
+
+1. **依赖声明层**：`apps/worker/pyproject.toml` 不声明 `rag-api` —— 生产镜像构建时它物理不存在。
+2. **静态检查层**：`tests/test_workspace.py` 用 AST 扫 worker 源码，出现 `rag_api` 的 import 就失败。
+3. **运行层**：worker 镜像只装自己的依赖闭包。
+
+> **注意一个常见误解**：单靠第 1 层是**挡不住的**。uv workspace 把所有包装进同一个 `.venv`，
+> 开发期 worker 进程照样能 `import rag_api` 成功（已实测验证）。"模块不在生产镜像里"和
+> "开发时能 import" 可以同时成立，所以必须第 2 层做静态检查——不能指望 `ModuleNotFoundError` 当守卫。
 
 ---
 
@@ -308,7 +323,7 @@ contracts  ←  core  ←  db  ←  api / worker
 
 # 贯穿全程的工程约束（评审时按这些卡）
 
-- **端边界是硬约束**：跨端只走 API 或队列消息，禁止 import 另一端代码；共享只能进 contracts/ 或 core/ 公共层。每步都检查。
+- **端边界是硬约束**：跨端只走 API 或队列消息，禁止 import 另一端代码；共享只能进 contracts/、core/、db/ 公共层。每步都检查（静态 AST 检查，不靠自觉）。
 - **可插拔是硬验收法**：换 LLM 供应商、换向量库、换存储、换 IdP、换队列、换评估器，**各自只应动一个适配层文件 + 一行配置**；换前端框架不应动后端一行。凡是要写 `if provider == "xxx"` 的地方，一律改成能力匹配或策略注册。
 - **高可用验收法**：任一外部依赖挂掉，系统按降级链继续可用且有明确提示，不雪崩、不无限重试、不耗尽连接池。每个降级路径都要有对应的故障注入测试。
 - **并发安全验收法**：每条共享状态（配额、成本、任务状态、上传会话、缓存、索引版本）都要有一个并发用例证明它不会错；压测后数据对账必须通过。
@@ -316,7 +331,7 @@ contracts  ←  core  ←  db  ←  api / worker
 - 依赖倒置 + 工厂 + 配置注入，全部外部能力面向抽象；`ResilientCaller` 是唯一的重试/熔断入口。
 - 全异步 I/O（asyncpg / httpx / boto3 放线程池），CPU 密集（解析、OCR、embedding）隔离到进程池或独立 worker。
 - 全量类型注解，mypy 严格 + ruff 通过；前端 TS strict + eslint 通过。
-- 测试：单测 + testcontainers 起真实 PG/Redis/MinIO/Keycloak 的集成测 + **并发安全专项** + 检索金标准测试，覆盖 ≥70%；前端 vitest + playwright e2e。测试代码同样由你落盘，但每个用例在防什么必须讲清（一句话说明它挡住哪种事故）。
+- 测试：单测（`make test`，零外部依赖，任何机器可跑）+ 集成测（`make test-int`，连真实 PG/Redis；当前开发机无 Docker，直连本机实例；换到有 Docker 的环境再用 testcontainers，**测试代码不写两套**——连接信息统一从 `Settings` 读）+ **并发安全专项** + 检索金标准测试，覆盖 ≥70%；前端 vitest + playwright e2e。测试代码同样由你落盘，但每个用例在防什么必须讲清（一句话说明它挡住哪种事故）。
 - 每个模块 docstring；架构决策记 ADR（docs/adr/）。
 - 引入新库说明解决什么问题、有无更轻替代。
 - 全程中文输出，代码注释中文。

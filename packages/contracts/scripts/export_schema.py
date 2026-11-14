@@ -16,6 +16,13 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from rag_contracts.enums import (
+    MembershipStatus,
+    PlatformRole,
+    TenantRole,
+    TenantStatus,
+    UserStatus,
+)
 from rag_contracts.errors import ErrorCategory, ErrorCode, ErrorResponse, FieldError, Severity
 
 # 需要导出的模型。新增对外契约模型时加到这里。
@@ -30,6 +37,12 @@ EXPORTED_ENUMS: dict[str, type[str]] = {
     "ErrorCode": ErrorCode,
     "ErrorCategory": ErrorCategory,
     "Severity": Severity,
+    # 租户/用户/角色枚举：前端要按这些值渲染状态标签与权限判断
+    "TenantStatus": TenantStatus,
+    "UserStatus": UserStatus,
+    "TenantRole": TenantRole,
+    "PlatformRole": PlatformRole,
+    "MembershipStatus": MembershipStatus,
 }
 
 

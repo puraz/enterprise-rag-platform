@@ -4,9 +4,18 @@
 看不到它们（metadata 只包含被 import 过的模型），后果是"改了模型但
 生成不出迁移"，且没有任何报错。
 
-A3 按域拆文件后，继续在这里逐个 import。
+按域分组，新增模型时加进对应分组。
 """
 
 from rag_db.models.health import SchemaHealth
+from rag_db.models.membership import TenantMembership
+from rag_db.models.tenant import Tenant
+from rag_db.models.user import IdentityLink, User
 
-__all__ = ["SchemaHealth"]
+__all__ = [
+    "IdentityLink",
+    "SchemaHealth",
+    "Tenant",
+    "TenantMembership",
+    "User",
+]
