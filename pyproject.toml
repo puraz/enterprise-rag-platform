@@ -73,7 +73,13 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 # 显式指定，否则 pytest-asyncio 会发弃用警告且未来默认行为会变
 asyncio_default_fixture_loop_scope = "function"
-addopts = "-q --strict-markers"
+# --strict-markers 要求所有 marker 必须在此登记，写错 marker 名会直接报错
+addopts = "-q --strict-markers -m 'not integration'"
+markers = [
+    "integration: 需要真实 PG/Redis 的测试，用 -m integration 单独跑",
+    "concurrency: 并发安全专项测试，用 -m concurrency 单独跑",
+    "slow: 耗时较长的测试",
+]
 
 [tool.coverage.run]
 source = ["packages", "apps"]

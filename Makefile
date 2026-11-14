@@ -2,7 +2,7 @@
 .DEFAULT_GOAL := help
 UV ?= uv
 
-.PHONY: help sync lint fmt typecheck test check config
+.PHONY: help sync lint fmt typecheck test check config check-deps test-int test-all
 
 help:  ## 显示可用命令
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -21,8 +21,17 @@ fmt:  ## 自动修格式 + 可自动修的规则
 typecheck:  ## mypy 严格模式
 	$(UV) run mypy
 
-test:  ## 单元测试
+test:  ## 单元测试（默认排除 integration，无需外部依赖）
 	$(UV) run pytest
+
+test-int:  ## 集成测试（需真实 PG/Redis，先跑 make check-deps）
+	$(UV) run pytest -m integration
+
+test-all:  ## 全量测试（单测 + 集成）
+	$(UV) run pytest -m ""
+
+check-deps:  ## 检查 PG / Redis / pgvector 连通性
+	$(UV) run python scripts/check_deps.py
 
 config:  ## 打印当前生效配置（密钥脱敏）
 	$(UV) run python scripts/show_config.py

@@ -26,8 +26,9 @@ from rag_core.settings.redis import RedisSettings
 # RAG_ENV 要参与"选哪个 .env 文件"，所以常量单独暴露
 ENV_SELECTOR = "RAG_ENV"
 
-# 出现在模板里、必须视为"绝不允许进生产"的已知开发密钥
-DEV_SECRET_VALUES = frozenset({"rag_local_dev_only", "changeme", "password"})
+# 出现在模板里、必须视为"绝不允许进生产"的已知开发密钥。
+# 123456 这类弱口令同理：本地图省事可以，生产必须拦。
+DEV_SECRET_VALUES = frozenset({"rag_local_dev_only", "changeme", "password", "123456", "root"})
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 

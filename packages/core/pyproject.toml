@@ -12,6 +12,11 @@ dependencies = [
     "python-dotenv>=1.0",
     # 结构化日志：原生支持 contextvars 合并与处理器链
     "structlog>=24.4",
+    # DB：SQLAlchemy 2.0 async + asyncpg 驱动
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30",
+    # Redis 异步客户端（连 Valkey 也一样，协议兼容）
+    "redis>=5.2",
 ]
 
 [tool.uv.sources]
