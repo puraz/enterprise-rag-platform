@@ -3,7 +3,12 @@ name = "rag-core"
 version = "0.1.0"
 description = "横切基础设施：配置 / 日志 / 异常 / DB / Redis / 韧性层（不含业务概念）"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    # 只为了读 .env 文件；不引入它就得自己写 ini 解析器
+    "python-dotenv>=1.0",
+]
 
 [build-system]
 requires = ["hatchling"]

@@ -2,7 +2,7 @@
 .DEFAULT_GOAL := help
 UV ?= uv
 
-.PHONY: help sync lint fmt typecheck test check
+.PHONY: help sync lint fmt typecheck test check config
 
 help:  ## 显示可用命令
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -23,5 +23,8 @@ typecheck:  ## mypy 严格模式
 
 test:  ## 单元测试
 	$(UV) run pytest
+
+config:  ## 打印当前生效配置（密钥脱敏）
+	$(UV) run python scripts/show_config.py
 
 check: lint typecheck test  ## 提交前全量自检
