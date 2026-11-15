@@ -728,3 +728,51 @@ export interface AuditQueryResponse {
   /** 是否还有下一页 */
   has_more: boolean;
 }
+
+/** 一条引用：答案里的某个结论来自原文的哪个位置。 */
+export interface Citation {
+  /** 引用编号（从 1 开始）。答案正文里的 `[1]` 对应这个字段。 */
+  index: number;
+  /** 来源文档 ID */
+  document_id: string;
+  /** 文档标题（前端展示用，避免再查一次库） */
+  document_title: string;
+  /** 来源 chunk ID */
+  chunk_id: string;
+  /** chunk 在文档版本内的序号。引用可能跨多个 chunk 时按最小序号记。 */
+  chunk_index: number;
+  /** 页码（**从 1 开始**，与用户看到的页码一致）。非分页格式为 null。 */
+  page_no?: number | null;
+  /** 在文档纯文本中的起始字符偏移（含） */
+  char_start?: number | null;
+  /** 在文档纯文本中的结束字符偏移（不含） */
+  char_end?: number | null;
+  /** 版面坐标 {x0,y0,x1,y1}，单位 PDF point。只有 PDF 类画布式文档有；前端据此在原图上框选。 */
+  bbox?: Record<string, number> | null;
+  /** 章节路径（如 ['第三章', '3.2 报销流程']），用于面包屑展示 */
+  section_path?: string[];
+  /** 引用处的原文片段（截断到 300 字符）。坐标缺失或不准时，前端可据此在全文里搜索定位；也是人工审计「引用是否错配」的锚点。 */
+  quote: string;
+  /** 相关性分数，**余弦距离语义：0 最相关，2 最不相关**（越小越好）。不在此处转成相似度——两者语义相反，转换点越多越容易把排序搞反。 */
+  relevance_score?: number | null;
+}
+
+/**
+ * 带引用的答案。
+ * 这是**问答接口的成功响应体**（`POST /api/v1/chat` 之类）。
+ * 为什么 `citations` 可能是空列表：
+ * - 模型拒答（"根据现有资料无法回答"）；
+ * - 答案不需要引用（如"你好"这类寒暄）。
+ * 前端不能假设 `citations` 非空。**拒答时 `refused=True`**，
+ * 让前端能区分"拒答"与"回答了但没有引用"——这两者的 UI 处理完全不同。
+ */
+export interface AnswerWithCitations {
+  /** 答案正文。其中的 `[n]` 对应 citations 里的 index。 */
+  answer: string;
+  /** 是否为拒答（材料不足，没有编造）。**与「citations 为空」不等价**：答案可以没有引用但不是拒答。 */
+  refused?: boolean;
+  /** 引用列表，按 index 升序 */
+  citations?: Citation[];
+  /** 是否走了降级路径（如 reranker 挂→只用 RRF、主模型挂→备用模型）。降级时前端应给用户明确提示，不能悄悄降级。 */
+  degraded?: boolean;
+}

@@ -23,6 +23,7 @@ from rag_contracts.api.auth import (
     HealthResponse,
     LoginResponse,
 )
+from rag_contracts.api.citations import AnswerWithCitations, Citation
 from rag_contracts.api.pagination import PageMeta, PageRequest
 from rag_contracts.api.success import CreatedResource, TaskAccepted
 from rag_contracts.api.uploads import (
@@ -87,6 +88,12 @@ EXPORTED_MODELS: tuple[type[BaseModel], ...] = (
     CompleteUploadResponse,
     AuditLogItem,
     AuditQueryResponse,
+    # 引用契约（A12）。**必须导出**：前端要按 Citation 的字段渲染
+    # "点击引用跳原文"的交互，管理端要按它做引用审计。
+    # 不导出的话前端只能自己拼一个形状——`page_no` vs `page` 这类
+    # 字段名漂移只会在联调时暴露。
+    Citation,
+    AnswerWithCitations,
 )
 
 # 需要导出的枚举。导出成 TS 字符串联合类型，而不是 TS enum
