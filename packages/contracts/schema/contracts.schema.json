@@ -840,6 +840,55 @@
       },
       "title": "PageRequest",
       "type": "object"
+    },
+    "TaskAccepted": {
+      "description": "异步任务已接受的响应（对应 HTTP 202）。\n\n用于\"提交后立即返回、后台处理\"的接口：文档解析、索引重建、批量操作。\n\n**必须带 `task_id`**：前端靠它轮询 `GET /api/v1/tasks/{id}` 拿进度。\n没有 task_id 的 202 等于告诉前端\"等着吧\"，但它不知道等什么。",
+      "properties": {
+        "task_id": {
+          "description": "任务 ID，用于轮询进度",
+          "title": "Task Id",
+          "type": "string"
+        },
+        "status": {
+          "default": "pending",
+          "description": "任务初始状态",
+          "title": "Status",
+          "type": "string"
+        },
+        "poll_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "建议的轮询地址（绝对路径），前端可直接 GET",
+          "title": "Poll Url"
+        }
+      },
+      "required": [
+        "task_id"
+      ],
+      "title": "TaskAccepted",
+      "type": "object"
+    },
+    "CreatedResource": {
+      "description": "创建成功的响应基类（对应 HTTP 201）。\n\n子类声明具体资源字段；本类只约束\"必须能被定位\"。\n\n用法：\n\n    class DocumentCreated(CreatedResource):\n        title: str\n        format: str",
+      "properties": {
+        "id": {
+          "description": "新资源的 ID",
+          "title": "Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "CreatedResource",
+      "type": "object"
     }
   }
 }

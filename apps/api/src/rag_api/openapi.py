@@ -83,6 +83,20 @@ UPLOAD_ERRORS: ResponseSpec = {
 }
 
 
+# ---- 成功响应的标准状态码声明 ----
+# 这些不是"可选优化"，而是契约的一部分：
+# 前端要靠它判断"创建成功该跳转还是刷新列表"。
+
+CREATED: ResponseSpec = {201: {"description": "资源创建成功，Location 头给出新资源地址"}}
+"""POST 创建资源。配合 `status_code=201` 与 `response.headers["Location"]`。"""
+
+ACCEPTED: ResponseSpec = {202: {"description": "异步任务已接受，响应体含 task_id 供轮询"}}
+"""POST 触发异步任务（解析、重建索引、批量操作）。"""
+
+NO_CONTENT: ResponseSpec = {204: {"description": "操作成功，无返回内容"}}
+"""DELETE 或幂等确认。**不返回 body**，前端据此跳过 JSON 解析。"""
+
+
 def with_internal(errors: ResponseSpec) -> ResponseSpec:
     """给任意响应组补上 500 兜底。
 
@@ -110,3 +124,15 @@ ADMIN_ENDPOINT: ResponseSpec = with_internal(ADMIN_ERRORS)
 
 UPLOAD_ENDPOINT: ResponseSpec = with_internal(UPLOAD_ERRORS)
 """上传相关接口。"""
+
+# ---- 常用组合（成功 + 失败）----
+# 路由层直接 `responses={**TENANT_WRITE_ENDPOINT, **CREATED}` 即可。
+
+CREATE_ENDPOINT: ResponseSpec = {**TENANT_WRITE_ENDPOINT, **CREATED}
+"""租户内创建接口（POST，返回 201）。"""
+
+ASYNC_ENDPOINT: ResponseSpec = {**TENANT_WRITE_ENDPOINT, **ACCEPTED}
+"""租户内异步触发接口（POST，返回 202）。"""
+
+DELETE_ENDPOINT: ResponseSpec = {**TENANT_WRITE_ENDPOINT, **NO_CONTENT}
+"""租户内删除接口（DELETE，返回 204）。"""

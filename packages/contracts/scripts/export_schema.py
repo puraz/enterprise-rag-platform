@@ -23,6 +23,7 @@ from rag_contracts.api.auth import (
     LoginResponse,
 )
 from rag_contracts.api.pagination import PageMeta, PageRequest
+from rag_contracts.api.success import CreatedResource, TaskAccepted
 from rag_contracts.enums import (
     AuditAction,
     AuditOutcome,
@@ -67,6 +68,8 @@ EXPORTED_MODELS: tuple[type[BaseModel], ...] = (
     HealthResponse,
     PageMeta,
     PageRequest,
+    TaskAccepted,
+    CreatedResource,
 )
 
 # 需要导出的枚举。导出成 TS 字符串联合类型，而不是 TS enum

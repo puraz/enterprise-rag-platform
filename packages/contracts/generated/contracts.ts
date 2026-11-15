@@ -575,3 +575,31 @@ export interface PageRequest {
   /** 是否返回总条数（会触发额外 COUNT 查询） */
   include_total?: boolean;
 }
+
+/**
+ * 异步任务已接受的响应（对应 HTTP 202）。
+ * 用于"提交后立即返回、后台处理"的接口：文档解析、索引重建、批量操作。
+ * **必须带 `task_id`**：前端靠它轮询 `GET /api/v1/tasks/{id}` 拿进度。
+ * 没有 task_id 的 202 等于告诉前端"等着吧"，但它不知道等什么。
+ */
+export interface TaskAccepted {
+  /** 任务 ID，用于轮询进度 */
+  task_id: string;
+  /** 任务初始状态 */
+  status?: string;
+  /** 建议的轮询地址（绝对路径），前端可直接 GET */
+  poll_url?: string | null;
+}
+
+/**
+ * 创建成功的响应基类（对应 HTTP 201）。
+ * 子类声明具体资源字段；本类只约束"必须能被定位"。
+ * 用法：
+ * class DocumentCreated(CreatedResource):
+ * title: str
+ * format: str
+ */
+export interface CreatedResource {
+  /** 新资源的 ID */
+  id: string;
+}

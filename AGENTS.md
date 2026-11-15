@@ -82,11 +82,50 @@ api 与 worker **互不依赖**，只通过契约、数据库状态、队列消�
 
 ### 4.1 响应契约（前端对接的唯一形状）
 
-- **成功响应 = 裸数据**，不做 `{code, message, data}` 外层包裹。
-  错误靠 HTTP 状态码 + `ErrorResponse.code` 分支。
-- **错误响应唯一形状** = `rag_contracts.errors.ErrorResponse`：
-  `{code: int, code_name: str, message, request_id, fields, details}`。
-  FastAPI 默认的 `{"detail": ...}` 已由全局处理器转换，不得绕过。
+#### 成功响应：**无 `code`、无 `data` 包裹**
+
+```json
+// 详情 / 创建 / 更新
+200 {"id": "...", "title": "制度.pdf", "created_at": "2026-11-15T05:17:08Z"}
+
+// 列表
+200 {"items": [...], "meta": {"limit": 20, "offset": 0, "total": null, "has_more": true}}
+
+// 删除
+204 (空 body)
+```
+
+- **成功不带 `code`**：`code` 是失败原因，成功没有原因；HTTP 2xx 已表达成功。
+- **不包 `data` 层**：那是"成败都用 200"方案才需要的，用状态码区分成败时纯属噪音。
+- 只有三类形态：**单对象** / **分页集合** / **无内容**。不创造第四种。
+
+#### 状态码
+
+| 场景 | 状态码 |
+|---|---|
+| GET 详情/列表、PATCH/PUT | 200 |
+| POST 创建资源 | **201** + `Location` 头 + 资源对象 |
+| POST 触发异步任务 | **202** + `{task_id, poll_url}` |
+| DELETE | **204**（无 body） |
+
+#### 字段命名硬规则
+
+| 规则 | 正确 | 禁止 |
+|---|---|---|
+| 全部 `snake_case` | `created_at` | `createdAt` |
+| 主键 `id` | `{"id": ...}` | `document_id` / `docId` |
+| 时间 `*_at` + ISO 8601 带时区 | `"2026-11-15T05:17:08Z"` | 时间戳 / 无时区 |
+| 列表 `items` | `{"items": [...]}` | `data` / `list` / `results` |
+| 布尔 `is_*`/`has_*`/`can_*` | `is_current` | `current` |
+| 计数 `*_count`（整数） | `chunk_count` | `chunks` |
+| 枚举值小写 snake_case | `"in_progress"` | `"InProgress"` |
+
+`tests/test_success_contract.py` 会检查所有这些规则。
+
+#### 失败响应：唯一形状 `ErrorResponse`
+
+`{code: int, code_name: str, message, request_id, fields, details}`。
+FastAPI 默认的 `{"detail": ...}` 已由全局处理器转换，不得绕过。
 - **每个路由必须声明 `responses=`**，否则 OpenAPI 里只有 200，
   前端生成 TS 时看不到错误类型。用 `rag_api/openapi.py` 的现成组合：
   `PUBLIC_ENDPOINT` / `AUTHENTICATED_ENDPOINT` / `TENANT_ENDPOINT` /
