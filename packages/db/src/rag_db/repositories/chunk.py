@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag_contracts.enums.retrieval import ChunkType
 from rag_db.models.chunk import Chunk, IndexVersion
+from rag_db.models.embedding import ChunkEmbedding
 
 
 class ChunkRepository:
@@ -51,12 +52,26 @@ class ChunkRepository:
         document_id: uuid.UUID,
         document_version_id: uuid.UUID,
         chunks: Sequence[dict[str, Any]],
+        index_version_id: uuid.UUID | None = None,
     ) -> int:
         """批量插入 chunk，返回插入条数。
 
         用 `add_all` + 一次 flush 而不是逐条 add/flush：
         一份文档可能有几百个 chunk，逐条往返会让切分步骤的耗时主要花在
         网络往返上（实测几百 chunk 从数秒降到百毫秒级）。
+
+        ## 向量写到旁表（A10）
+
+        `chunks` 表中**没有** embedding 列（A10 之后向量在
+        `chunk_embeddings` 旁表上）。但为了兼容"切分与向量化一步完成"
+        的调用方（以及测试），本方法接受块里的 `embedding` 字段，
+        并在 `index_version_id` 非空时写入旁表。
+
+        若块带 `embedding` 但没传 `index_version_id`，会**丢弃向量**
+        并告警——向量必须归属某个索引版本，否则检索永远查不到
+        （`chunk_embeddings.index_version_id` 是 NOT NULL）。
+        静默丢弃是刻意选择：切分 handler 的正常路径就是不带向量，
+        带向量只是"顺手一步到位"的便利路径。
 
         调用方负责提供完整字段（含 content_hash），
         这里不做业务校验 —— 校验在 chunker 与 service 层。
@@ -81,16 +96,30 @@ class ChunkRepository:
                 section_path=item.get("section_path", []),
                 token_count=item.get("token_count"),
                 chunk_metadata=item.get("chunk_metadata", {}),
-                # 向量与模型标识：切分阶段可能还没有（先入库后向量化），
-                # 也可能一步到位（切分与 embedding 在同一流水线阶段完成）
-                embedding=item.get("embedding"),
-                embedding_model=item.get("embedding_model"),
                 is_current=item.get("is_current", True),
             )
             for item in chunks
         ]
         self._session.add_all(rows)
         await self._session.flush()
+
+        # 旁表向量（仅当调用方提供了向量 + 索引版本）
+        if index_version_id is not None:
+            embedding_rows = [
+                ChunkEmbedding(
+                    tenant_id=tenant_id,
+                    chunk_id=row.id,
+                    index_version_id=index_version_id,
+                    embedding=item["embedding"],
+                    embedding_model=item.get("embedding_model") or "unknown",
+                )
+                for row, item in zip(rows, chunks, strict=True)
+                if item.get("embedding") is not None
+            ]
+            if embedding_rows:
+                self._session.add_all(embedding_rows)
+                await self._session.flush()
+
         return len(rows)
 
     async def list_by_version(
@@ -107,16 +136,37 @@ class ChunkRepository:
         return list(result.scalars())
 
     async def list_pending_embedding(
-        self, *, tenant_id: uuid.UUID, limit: int = 100
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        index_version_id: uuid.UUID,
+        limit: int = 100,
     ) -> list[Chunk]:
-        """扫描尚未向量化的 chunk（补偿任务用）。
+        """扫描在某索引版本下**还没有向量**的 chunk。
 
-        向量化可能因为供应商限流而部分失败，需要能续跑而不是整批重来。
+        向量化可能因为限流而部分失败，需要能续跑而不是整批重来。
+
+        **判据是"旁表里没有该版本的行"**，不是"chunks.embedding IS NULL"：
+        旁表方案下 `chunks.embedding` 是历史遗留列，不再更新；
+        真正的"是否已向量化"只由旁表决定。
         """
+        embedded_exists = (
+            select(ChunkEmbedding.chunk_id)
+            .where(
+                ChunkEmbedding.chunk_id == Chunk.id,
+                ChunkEmbedding.index_version_id == index_version_id,
+            )
+            .exists()
+        )
         result = await self._session.execute(
             select(Chunk)
-            .where(Chunk.tenant_id == tenant_id, Chunk.embedding.is_(None))
-            .order_by(Chunk.created_at)
+            .where(
+                Chunk.tenant_id == tenant_id,
+                Chunk.is_current.is_(True),
+                Chunk.chunk_level == 0,
+                ~embedded_exists,
+            )
+            .order_by(Chunk.document_id, Chunk.chunk_index)
             .limit(limit)
         )
         return list(result.scalars())
@@ -125,22 +175,45 @@ class ChunkRepository:
         self,
         *,
         updates: Sequence[tuple[uuid.UUID, list[float], str]],
+        index_version_id: uuid.UUID,
+        tenant_id: uuid.UUID,
     ) -> int:
-        """批量写入向量。updates 为 (chunk_id, embedding, model) 列表。
+        """把向量写入**旁表**（某个索引版本下）。
 
-        逐条 UPDATE 是有意的：不同 chunk 的向量长度相同但值不同，
-        无法用单条 UPDATE 表达。用 executemany（SQLAlchemy 的
-        `execute` 传 list）让驱动做批量绑定，避免 N 次网络往返。
+        用 `ON CONFLICT (chunk_id, index_version_id) DO UPDATE` 而不是纯 INSERT：
+
+        重派任务会对同一 chunk 同一版本再写一次。纯 INSERT 会撞唯一约束
+        （报错信息是"duplicate key"，但根因是"没做幂等"）。
+        DO UPDATE 让重跑安全，且不会产生重复行（重复行会让检索返回
+        同一 chunk 两次——引用重复）。
+
+        必须带 `tenant_id`：旁表是 RLS 表，写入时 RLS 会校验它。
         """
         if not updates:
             return 0
-        await self._session.execute(
-            update(Chunk),
-            [
-                {"id": chunk_id, "embedding": embedding, "embedding_model": model}
-                for chunk_id, embedding, model in updates
-            ],
+
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        rows = [
+            {
+                "tenant_id": tenant_id,
+                "chunk_id": chunk_id,
+                "index_version_id": index_version_id,
+                "embedding": embedding,
+                "embedding_model": model,
+            }
+            for chunk_id, embedding, model in updates
+        ]
+        stmt = pg_insert(ChunkEmbedding).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_chunk_embeddings_chunk_version",
+            set_={
+                "embedding": stmt.excluded.embedding,
+                "embedding_model": stmt.excluded.embedding_model,
+                "updated_at": func.now(),
+            },
         )
+        await self._session.execute(stmt)
         return len(updates)
 
     async def mark_version_chunks_stale(self, *, document_version_id: uuid.UUID) -> int:
@@ -182,51 +255,118 @@ class ChunkRepository:
         ef_search: int | None = None,
         iterative_scan: str = "relaxed_order",
         access_filter: Any = None,
+        index_version_ids: Sequence[uuid.UUID] | None = None,
+        candidate_multiplier: int = 4,
     ) -> list[tuple[Chunk, float]]:
-        """向量检索。返回 (chunk, cosine_distance) 列表，距离升序。
+        """向量检索（两段式）。返回 (chunk, cosine_distance)，距离升序。
 
-        参数说明：
+        ## 为什么必须两段式（A10 实测结论）
+
+        直觉写法是一条 JOIN：
+
+            SELECT c.* FROM chunks c JOIN chunk_embeddings ce ON ...
+            WHERE c.tenant_id = ? AND ...
+            ORDER BY ce.embedding <=> ? LIMIT 10
+
+        **这个写法用不上 HNSW 索引**。实测（20000 行 × 1024 维）：
+
+            JOIN 写法          → Hash Join + Seq Scan + Sort，282ms
+            纯旁表 HNSW        → Index Scan using hnsw，7.6ms（快 37 倍）
+
+        原因：`ORDER BY` 的距离项来自 JOIN 的右表，planner 无法把它
+        下推成"先走索引取 top-N 再 JOIN"，只能全表扫完再排序。
+        `enable_seqscan=off` 也救不回来（它只能禁用顺序扫描，
+        无法让 JOIN 变成嵌套循环 + 索引扫描）。
+
+        所以改成两段：
+          1. **只在旁表上**走 HNSW，取 `limit × candidate_multiplier` 个候选 ID；
+          2. 再按 ID 取 chunk 内容，并在此处应用 ACL/知识库过滤。
+
+        ## candidate_multiplier 为什么存在
+
+        第一段在旁表上无法应用 chunk 级的过滤（ACL、知识库、is_current），
+        只有拿到 chunk 行才知道。所以第一段必须**多取一些**，
+        第二段过滤后才有可能凑够 limit。
+
+        取 4 倍是经验值：ACL 过滤通常只排除少数文档；若过滤极严
+        （如只允许 1% 文档），4 倍也可能不够，此时应把 ACL 条件
+        下推到第一段（需要 chunk 表与旁表 JOIN，代价是失去索引——
+        取舍见 ADR 0002）。
+
+        ## 其他参数
+
         - `knowledge_base_ids`：限定检索范围。None 表示租户内全部。
-        - `max_distance`：距离上限，用于过滤明显不相关的结果
-          （余弦距离 > 0.4 通常已经无关，具体阈值要在 A11 用黄金集调）。
-        - `ef_search`：查询时候选列表大小。越大召回越高、越慢。
-          默认 40 是 pgvector 默认值；A11 压测时按召回率调。
+        - `max_distance`：距离上限（余弦距离 > 0.4 通常已无关）。
+        - `ef_search`：候选列表大小，越大召回越高、越慢。
         - `iterative_scan`：`relaxed_order` / `strict_order` / `off`。
-          见模块 docstring —— 多租户下过滤后召回的关键开关。
+        - `index_version_ids`：只查这些索引版本的向量。**零停机重建必须带**：
+          重建期间库里有两套向量，不过滤会返回重复内容且距离不可比。
 
-        **必须在同一事务内 SET LOCAL**：`SET LOCAL` 只影响当前事务，
-        避免污染连接池里的其它请求（用 `SET` 会泄漏到下一个借用者）。
+        **SET LOCAL 必须在本事务内**：避免污染连接池里的其它请求。
         """
-        # 扩展级 GUC：先确保 vector 类型已加载（SELECT 一次即可）
         if ef_search is not None:
             await self._session.execute(text(f"SET LOCAL hnsw.ef_search = {int(ef_search)}"))
         if iterative_scan != "off":
-            # 白名单校验，防 SQL 注入（这个值不能参数化，只能字符串拼接）
+            # 白名单校验：这个值不能参数化，只能字符串拼接
             if iterative_scan not in ("relaxed_order", "strict_order"):
                 raise ValueError(f"非法 iterative_scan 值: {iterative_scan}")
             await self._session.execute(text(f"SET LOCAL hnsw.iterative_scan = {iterative_scan}"))
 
-        # 余弦距离运算符 <=>：值越小越相似
-        distance = Chunk.embedding.cosine_distance(query_embedding).label("distance")
+        # ---- 第一段：旁表上走 HNSW ----
+        distance = ChunkEmbedding.embedding.cosine_distance(query_embedding).label("distance")
+        candidate_limit = max(limit * candidate_multiplier, limit)
+
+        stage_one = (
+            select(ChunkEmbedding.chunk_id, distance)
+            .where(ChunkEmbedding.tenant_id == tenant_id)
+            .order_by(distance)
+            .limit(candidate_limit)
+        )
+        if index_version_ids:
+            stage_one = stage_one.where(
+                ChunkEmbedding.index_version_id.in_(list(index_version_ids))
+            )
+        if max_distance is not None:
+            stage_one = stage_one.where(distance <= max_distance)
+
+        rows = list((await self._session.execute(stage_one)).all())
+        if not rows:
+            return []
+
+        # 保持第一段的相似度顺序（字典序会被打乱，那会让最终排序错）
+        ordered_ids = [row[0] for row in rows]
+        distance_by_id = {row[0]: float(row[1]) for row in rows}
+
+        # ---- 第二段：取内容并过滤 ----
+        #
+        # **ACL 过滤在这一段**：它是 chunk 级条件（依赖文档密级/ACL 表），
+        # 第一段在旁表上无法表达。这也是 candidate_multiplier 存在的原因。
         conditions = [
+            Chunk.id.in_(ordered_ids),
             Chunk.tenant_id == tenant_id,
             Chunk.is_current.is_(True),
-            Chunk.embedding.is_not(None),
+            # 父块不参与检索（small-to-big：父块只用于回填上下文）
+            Chunk.chunk_level == 0,
         ]
-        # **ACL 过滤必须进 WHERE**（不能查完再在 Python 里过滤）：
-        # - 查完再过滤会让分页错乱、越权内容进应用内存、浪费 I/O；
-        # - 检索返回的是文档内容本身，泄漏发生在答案里，比元数据泄漏更严重。
         if access_filter is not None:
             conditions.append(access_filter)
-
-        stmt = select(Chunk, distance).where(*conditions).order_by(distance).limit(limit)
         if knowledge_base_ids:
-            stmt = stmt.where(Chunk.knowledge_base_id.in_(knowledge_base_ids))
-        if max_distance is not None:
-            stmt = stmt.where(distance <= max_distance)
+            conditions.append(Chunk.knowledge_base_id.in_(list(knowledge_base_ids)))
 
-        result = await self._session.execute(stmt)
-        return [(row[0], float(row[1])) for row in result]
+        stage_two = select(Chunk).where(*conditions)
+        chunks = list((await self._session.execute(stage_two)).scalars())
+        by_id = {chunk.id: chunk for chunk in chunks}
+
+        # 按第一段的距离顺序组装，并截断到 limit
+        results: list[tuple[Chunk, float]] = []
+        for chunk_id in ordered_ids:
+            chunk = by_id.get(chunk_id)
+            if chunk is None:
+                continue  # 被第二段过滤掉（ACL / 知识库 / 非当前版本）
+            results.append((chunk, distance_by_id[chunk_id]))
+            if len(results) >= limit:
+                break
+        return results
 
     async def search_keyword(
         self,

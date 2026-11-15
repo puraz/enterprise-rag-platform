@@ -31,16 +31,22 @@ from typing import TYPE_CHECKING
 
 from rag_core.logging import get_logger
 from rag_worker.handlers.chunk import ChunkDocumentHandler
+from rag_worker.handlers.embed import EmbedDocumentHandler
 from rag_worker.handlers.parse import ParseDocumentHandler
 
 if TYPE_CHECKING:
+    from rag_adapters.providers.embedding import EmbeddingProvider
     from rag_adapters.storages import StorageBackend
     from rag_worker.engine import TaskHandler
 
 log = get_logger(__name__)
 
 
-def build_handlers(*, storages: dict[str, StorageBackend]) -> dict[str, TaskHandler]:
+def build_handlers(
+    *,
+    storages: dict[str, StorageBackend],
+    embedding_provider: EmbeddingProvider,
+) -> dict[str, TaskHandler]:
     """构造"任务类型 → handler"注册表。
 
     键用 `TaskType` 枚举的**值**（字符串），与数据库里存的一致。
@@ -52,6 +58,7 @@ def build_handlers(*, storages: dict[str, StorageBackend]) -> dict[str, TaskHand
     handlers: dict[str, TaskHandler] = {
         TaskType.PARSE_DOCUMENT.value: ParseDocumentHandler(storages=storages),
         TaskType.CHUNK_DOCUMENT.value: ChunkDocumentHandler(storages=storages),
+        TaskType.EMBED_DOCUMENT.value: EmbedDocumentHandler(provider=embedding_provider),
     }
 
     # 尚未实现的任务类型在这里显式列出，启动日志会打出"缺哪些"。

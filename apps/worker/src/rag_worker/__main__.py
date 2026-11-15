@@ -8,6 +8,7 @@
       ├─ setup_logging()           结构化日志 + PII 脱敏钩子
       ├─ Database / Redis          建连接池
       ├─ build_all_storages()      存储后端（S3 client 有连接池，必须单例）
+      ├─ build_embedding_provider()  **惰性**：构造不加载模型
       ├─ build_handlers()          任务注册表
       ├─ 注册信号处理              SIGTERM/SIGINT → 优雅退出
       ├─ engine.run_forever()      主循环
@@ -49,6 +50,7 @@ import signal
 import sys
 from typing import Any
 
+from rag_adapters.providers.factory import build_embedding_provider
 from rag_adapters.storages import build_all_storages
 from rag_core.db import Database
 from rag_core.logging import get_logger, setup_logging
@@ -115,6 +117,7 @@ async def run(settings: Settings) -> int:
 
     database = Database(settings)
     storages = build_all_storages(settings)
+    embedding_provider: Any = None
 
     try:
         # 启动期就探一次：连不上立刻以退出码 1 结束，
@@ -127,7 +130,24 @@ async def run(settings: Settings) -> int:
             rls_bypass_configured=settings.database.admin_user is not None,
         )
 
-        handlers = build_handlers(storages=storages)
+        # Embedding provider 是**惰性构造**：`LocalBGEEmbedding.__init__`
+        # 只存配置，不加载模型（见其 `_ensure_loaded`）。模型在首次
+        # embed 调用时才加载。
+        #
+        # 为什么这样设计：worker 可能只跑解析任务，不该为"可能用不到的
+        # 能力"付 2-5 秒加载时间与 2GB 内存。多副本时这个开销会乘上副本数。
+        embedding_provider = build_embedding_provider(settings)
+        log.info(
+            "embedding_provider_configured",
+            provider=embedding_provider.name,
+            dimension=embedding_provider.capabilities.dimension,
+            note="模型将在首次向量化时加载",
+        )
+
+        handlers = build_handlers(
+            storages=storages,
+            embedding_provider=embedding_provider,
+        )
         engine = WorkerEngine(
             settings=settings,
             worker_settings=settings.worker,
@@ -156,6 +176,15 @@ async def run(settings: Settings) -> int:
         # 用 suppress 是因为关闭失败不该覆盖上面的退出码。
         with contextlib.suppress(Exception):
             await database.close()
+        # 释放 embedding 模型（占 GPU 显存/内存）。不释放会让进程
+        # "退出中"卡住，或让同机其它进程拿不到显存。
+        #
+        # 判断非 None：provider 构造可能在 try 块内失败（配置错误），
+        # 此时不该再调用它的方法——suppress 会吞掉异常，掩盖真正的启动失败原因。
+        if embedding_provider is not None:
+            with contextlib.suppress(Exception):
+                await embedding_provider.aclose()
+
         for name, backend in storages.items():
             closer = getattr(backend, "aclose", None)
             if closer is not None:

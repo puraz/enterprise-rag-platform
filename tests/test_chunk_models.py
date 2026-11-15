@@ -130,6 +130,30 @@ async def _make_doc_chain(
     return doc_id, version_id
 
 
+async def _make_index_version(
+    session: AsyncSession, *, tenant_id: uuid.UUID, kb_id: uuid.UUID, tag: str = "test"
+) -> uuid.UUID:
+    """建一个 active 索引版本（A10 起向量必须归属版本才可检索）。"""
+    from rag_db.repositories.chunk import IndexVersionRepository
+
+    repo = IndexVersionRepository(session)
+    existing = await repo.get_active(knowledge_base_id=kb_id)
+    if existing is not None:
+        return existing.id
+    # tag 必须唯一：`uq_index_versions_kb_tag` 约束 (knowledge_base_id, version_tag)。
+    # 同一测试里给多个知识库建版本时，固定 tag 会撞约束。
+    version = await repo.create(
+        tenant_id=tenant_id,
+        knowledge_base_id=kb_id,
+        version_tag=f"{tag}-{kb_id.hex[:8]}",
+        embedding_model="test-model",
+        embedding_dim=1024,
+    )
+    await repo.activate(knowledge_base_id=kb_id, version_id=version.id)
+    await session.flush()
+    return version.id
+
+
 def _chunk_payload(index: int, content: str, embedding: list[float] | None) -> dict[str, object]:
     import hashlib
 
@@ -153,12 +177,14 @@ async def test_bulk_create_chunks(db_session: AsyncSession) -> None:
     doc_id, version_id = await _make_doc_chain(db_session, tenant_id, kb_id, user_id)
 
     repo = ChunkRepository(db_session)
+    iv_id = await _make_index_version(db_session, tenant_id=tenant_id, kb_id=kb_id)
     count = await repo.bulk_create(
         tenant_id=tenant_id,
         knowledge_base_id=kb_id,
         document_id=doc_id,
         document_version_id=version_id,
         chunks=[_chunk_payload(i, f"第 {i} 段内容", _vector(i + 1)) for i in range(5)],
+        index_version_id=iv_id,
     )
     assert count == 5
 
@@ -177,6 +203,7 @@ async def test_chunk_index_unique_per_version(db_session: AsyncSession) -> None:
     kb_id = await _make_kb(db_session, tenant_id, user_id)
     doc_id, version_id = await _make_doc_chain(db_session, tenant_id, kb_id, user_id)
     repo = ChunkRepository(db_session)
+    iv_id = await _make_index_version(db_session, tenant_id=tenant_id, kb_id=kb_id)
 
     await repo.bulk_create(
         tenant_id=tenant_id,
@@ -184,6 +211,7 @@ async def test_chunk_index_unique_per_version(db_session: AsyncSession) -> None:
         document_id=doc_id,
         document_version_id=version_id,
         chunks=[_chunk_payload(0, "内容 A", _vector(1))],
+        index_version_id=iv_id,
     )
     with pytest.raises(IntegrityError):
         await repo.bulk_create(
@@ -192,6 +220,7 @@ async def test_chunk_index_unique_per_version(db_session: AsyncSession) -> None:
             document_id=doc_id,
             document_version_id=version_id,
             chunks=[_chunk_payload(0, "内容 B", _vector(2))],
+            index_version_id=iv_id,
         )
 
 
@@ -239,6 +268,7 @@ async def test_vector_search_orders_by_distance(db_session: AsyncSession) -> Non
     kb_id = await _make_kb(db_session, tenant_id, user_id)
     doc_id, version_id = await _make_doc_chain(db_session, tenant_id, kb_id, user_id)
     repo = ChunkRepository(db_session)
+    iv_id = await _make_index_version(db_session, tenant_id=tenant_id, kb_id=kb_id)
 
     target = _vector(42)
     # 三个 chunk：一个与查询相同，两个随机
@@ -252,6 +282,7 @@ async def test_vector_search_orders_by_distance(db_session: AsyncSession) -> Non
             _chunk_payload(1, "无关 A", _vector(999)),
             _chunk_payload(2, "无关 B", _vector(777)),
         ],
+        index_version_id=iv_id,
     )
 
     results = await repo.search_vector(tenant_id=tenant_id, query_embedding=target, limit=3)
@@ -280,6 +311,9 @@ async def test_vector_search_isolates_tenants(db_session: AsyncSession) -> None:
 
     repo = ChunkRepository(db_session)
     shared_vector = _vector(123)
+    # 每个知识库一个索引版本：检索按版本过滤，不建版本就查不到向量
+    iv_a = await _make_index_version(db_session, tenant_id=tenant_a, kb_id=kb_a)
+    iv_b = await _make_index_version(db_session, tenant_id=tenant_b, kb_id=kb_b)
 
     await repo.bulk_create(
         tenant_id=tenant_a,
@@ -287,6 +321,7 @@ async def test_vector_search_isolates_tenants(db_session: AsyncSession) -> None:
         document_id=doc_a,
         document_version_id=ver_a,
         chunks=[_chunk_payload(0, "A 租户机密", shared_vector)],
+        index_version_id=iv_a,
     )
     await repo.bulk_create(
         tenant_id=tenant_b,
@@ -294,6 +329,7 @@ async def test_vector_search_isolates_tenants(db_session: AsyncSession) -> None:
         document_id=doc_b,
         document_version_id=ver_b,
         chunks=[_chunk_payload(0, "B 租户机密", shared_vector)],
+        index_version_id=iv_b,
     )
 
     results_a = await repo.search_vector(
@@ -320,12 +356,16 @@ async def test_vector_search_filters_by_knowledge_base(db_session: AsyncSession)
 
     repo = ChunkRepository(db_session)
     vec = _vector(555)
+    # 每个知识库一个索引版本（检索按版本过滤）
+    iv1 = await _make_index_version(db_session, tenant_id=tenant_id, kb_id=kb1)
+    iv2 = await _make_index_version(db_session, tenant_id=tenant_id, kb_id=kb2)
     await repo.bulk_create(
         tenant_id=tenant_id,
         knowledge_base_id=kb1,
         document_id=doc1,
         document_version_id=ver1,
         chunks=[_chunk_payload(0, "库1内容", vec)],
+        index_version_id=iv1,
     )
     await repo.bulk_create(
         tenant_id=tenant_id,
@@ -333,6 +373,7 @@ async def test_vector_search_filters_by_knowledge_base(db_session: AsyncSession)
         document_id=doc2,
         document_version_id=ver2,
         chunks=[_chunk_payload(0, "库2内容", vec)],
+        index_version_id=iv2,
     )
 
     results = await repo.search_vector(
@@ -378,6 +419,7 @@ async def test_vector_search_respects_max_distance(db_session: AsyncSession) -> 
     kb_id = await _make_kb(db_session, tenant_id, user_id)
     doc_id, version_id = await _make_doc_chain(db_session, tenant_id, kb_id, user_id)
     repo = ChunkRepository(db_session)
+    iv_id = await _make_index_version(db_session, tenant_id=tenant_id, kb_id=kb_id)
 
     target = _vector(1000)
     await repo.bulk_create(
@@ -389,6 +431,7 @@ async def test_vector_search_respects_max_distance(db_session: AsyncSession) -> 
             _chunk_payload(0, "接近", target),
             _chunk_payload(1, "很远", _vector(7)),
         ],
+        index_version_id=iv_id,
     )
 
     # 只允许很小的距离，应只剩"接近"
@@ -414,6 +457,7 @@ async def test_hnsw_index_is_used(db_session: AsyncSession) -> None:
     kb_id = await _make_kb(db_session, tenant_id, user_id)
     doc_id, version_id = await _make_doc_chain(db_session, tenant_id, kb_id, user_id)
     repo = ChunkRepository(db_session)
+    iv_id = await _make_index_version(db_session, tenant_id=tenant_id, kb_id=kb_id)
 
     await repo.bulk_create(
         tenant_id=tenant_id,
@@ -421,6 +465,7 @@ async def test_hnsw_index_is_used(db_session: AsyncSession) -> None:
         document_id=doc_id,
         document_version_id=version_id,
         chunks=[_chunk_payload(i, f"内容 {i}", _vector(i)) for i in range(20)],
+        index_version_id=iv_id,
     )
 
     # 强制不使用顺序扫描，看是否能走索引
@@ -451,6 +496,7 @@ async def test_keyword_search_finds_matching_chunk(db_session: AsyncSession) -> 
     kb_id = await _make_kb(db_session, tenant_id, user_id)
     doc_id, version_id = await _make_doc_chain(db_session, tenant_id, kb_id, user_id)
     repo = ChunkRepository(db_session)
+    iv_id = await _make_index_version(db_session, tenant_id=tenant_id, kb_id=kb_id)
 
     await repo.bulk_create(
         tenant_id=tenant_id,
@@ -461,6 +507,7 @@ async def test_keyword_search_finds_matching_chunk(db_session: AsyncSession) -> 
             _chunk_payload(0, "reimbursement policy details", _vector(1)),
             _chunk_payload(1, "vacation days and holidays", _vector(2)),
         ],
+        index_version_id=iv_id,
     )
 
     results = await repo.search_keyword(tenant_id=tenant_id, keywords=["reimbursement"], limit=10)
@@ -478,6 +525,7 @@ async def test_parent_child_expansion(db_session: AsyncSession) -> None:
     kb_id = await _make_kb(db_session, tenant_id, user_id)
     doc_id, version_id = await _make_doc_chain(db_session, tenant_id, kb_id, user_id)
     repo = ChunkRepository(db_session)
+    iv_id = await _make_index_version(db_session, tenant_id=tenant_id, kb_id=kb_id)
 
     # 先建父块
     await repo.bulk_create(
@@ -491,6 +539,7 @@ async def test_parent_child_expansion(db_session: AsyncSession) -> None:
                 "chunk_level": 1,
             }
         ],
+        index_version_id=iv_id,
     )
     parent = (await repo.list_by_version(document_version_id=version_id))[0]
 
@@ -506,6 +555,7 @@ async def test_parent_child_expansion(db_session: AsyncSession) -> None:
                 "parent_chunk_id": parent.id,
             }
         ],
+        index_version_id=iv_id,
     )
     all_chunks = await repo.list_by_version(document_version_id=version_id)
     child = next(c for c in all_chunks if c.chunk_index == 1)
@@ -596,6 +646,7 @@ async def test_list_pending_embedding(db_session: AsyncSession) -> None:
     kb_id = await _make_kb(db_session, tenant_id, user_id)
     doc_id, version_id = await _make_doc_chain(db_session, tenant_id, kb_id, user_id)
     repo = ChunkRepository(db_session)
+    iv_id = await _make_index_version(db_session, tenant_id=tenant_id, kb_id=kb_id)
 
     await repo.bulk_create(
         tenant_id=tenant_id,
@@ -606,9 +657,10 @@ async def test_list_pending_embedding(db_session: AsyncSession) -> None:
             _chunk_payload(0, "已向量化", _vector(1)),
             _chunk_payload(1, "未向量化", None),
         ],
+        index_version_id=iv_id,
     )
 
-    pending = await repo.list_pending_embedding(tenant_id=tenant_id)
+    pending = await repo.list_pending_embedding(tenant_id=tenant_id, index_version_id=iv_id)
     assert len(pending) == 1
     assert pending[0].content == "未向量化"
 
@@ -620,6 +672,7 @@ async def test_set_embeddings_batch(db_session: AsyncSession) -> None:
     kb_id = await _make_kb(db_session, tenant_id, user_id)
     doc_id, version_id = await _make_doc_chain(db_session, tenant_id, kb_id, user_id)
     repo = ChunkRepository(db_session)
+    iv_id = await _make_index_version(db_session, tenant_id=tenant_id, kb_id=kb_id)
 
     await repo.bulk_create(
         tenant_id=tenant_id,
@@ -630,7 +683,9 @@ async def test_set_embeddings_batch(db_session: AsyncSession) -> None:
     )
     chunks = await repo.list_by_version(document_version_id=version_id)
     updated = await repo.set_embeddings(
-        updates=[(c.id, _vector(c.chunk_index + 10), "bge-m3") for c in chunks]
+        updates=[(c.id, _vector(c.chunk_index + 10), "bge-m3") for c in chunks],
+        index_version_id=iv_id,
+        tenant_id=tenant_id,
     )
     assert updated == 3
 

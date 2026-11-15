@@ -281,6 +281,30 @@ class ChunkDocumentHandler:
         if not updated:
             raise _retryable_error("文档状态被并发修改，切分结果未回写（将重试）")
 
+        # ---- 入队向量化任务（同一事务）----
+        #
+        # **必须与状态推进同事务**：分两处写会出现"状态已 EMBEDDING 但任务没入队"
+        # 的窗口——文档永远卡在 EMBEDDING，且没有任何任务会来推进它。
+        # 这种卡死没有任何报错，只能靠人发现"这份文档一直是处理中"。
+        #
+        # 用幂等键（version 级）防止重复入队：切分任务重派时
+        # enqueue 返回已有任务而不是创建第二个。
+        from rag_contracts.enums import TaskType
+        from rag_db.repositories import TaskRepository
+
+        await TaskRepository(session).enqueue(
+            tenant_id=version.tenant_id,
+            task_type=TaskType.EMBED_DOCUMENT.value,
+            idempotency_key=f"embed:{document.id}:{version.id}",
+            payload={
+                "document_id": str(document.id),
+                "document_version_id": str(version.id),
+            },
+            document_id=document.id,
+            document_version_id=version.id,
+            knowledge_base_id=document.knowledge_base_id,
+        )
+
     async def _link_parents(
         self,
         session: AsyncSession,

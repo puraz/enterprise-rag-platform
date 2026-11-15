@@ -48,6 +48,8 @@ def build_engine(settings: Settings) -> AsyncEngine:
     - **server_settings**：asyncpg 特有的会话参数注入点。statement_timeout
       是**会话级**参数，必须在建连时设；不设的话一个忘记加 LIMIT 的
       查询能把连接占住直到 TCP 超时，池很快耗尽。
+      `random_page_cost` 也在这里设：它是 planner 的代价模型参数，
+      默认 4.0 假设机械硬盘，会让 HNSW 索引完全不被选中（实测慢 25 倍）。
     """
     return create_async_engine(
         settings.database.dsn.get_secret_value(),
@@ -62,6 +64,9 @@ def build_engine(settings: Settings) -> AsyncEngine:
                 "application_name": settings.app_name,
                 "statement_timeout": str(settings.database.statement_timeout_ms),
                 "lock_timeout": str(settings.database.lock_timeout_ms),
+                # SSD 环境的 planner 代价参数（见 DatabaseSettings 的说明）。
+                # 不设这个，向量索引会被 planner 无视——不报错，只是慢。
+                "random_page_cost": str(settings.database.random_page_cost),
             }
         },
     )

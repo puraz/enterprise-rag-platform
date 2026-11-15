@@ -370,6 +370,32 @@ class ParseDocumentHandler:
             # 用可重试类型：另一方完成后再来一次通常就成功了。
             raise ParseError("文档状态被并发修改，解析结果未回写（将重试）", retryable=True)
 
+        # ---- 入队切分任务（同一事务）----
+        #
+        # **必须与状态推进同事务**：分两处写会出现"状态已 CHUNKING 但任务
+        # 没入队"的窗口——文档永远卡在 CHUNKING，且没有任务会推进它。
+        # 这类卡死没有任何报错，只能靠人发现"这份文档一直是处理中"。
+        #
+        # 管线在这里串起来：parse → chunk → embed → ready。
+        # 每一环都由上一环的 handler 在同一事务里入队，不依赖外部编排。
+        from rag_contracts.enums import TaskType
+        from rag_db.repositories import TaskRepository
+
+        await TaskRepository(session).enqueue(
+            tenant_id=version.tenant_id,
+            task_type=TaskType.CHUNK_DOCUMENT.value,
+            # 幂等键含 version：重解析同一版本不会产生第二个切分任务；
+            # 但产生新版本时会有独立的任务（这是期望的）
+            idempotency_key=f"chunk:{document_id}:{version.id}",
+            payload={
+                "document_id": str(document_id),
+                "document_version_id": str(version.id),
+            },
+            document_id=document_id,
+            document_version_id=version.id,
+            knowledge_base_id=document.knowledge_base_id,
+        )
+
         log.info(
             "document_parsed",
             document_id=str(document_id),

@@ -502,3 +502,33 @@ FastAPI 默认的 `{"detail": ...}` 已由全局处理器转换，不得绕过�
   handler 先插全部块拿到 UUID，再回填 `parent_chunk_id`。
 - **向量化不进切分步骤**：`embedding` 留 NULL。一起做会让"向量服务临时故障"
   导致切分成果全部丢失；分开后可按 chunk 续跑（`list_pending_embedding`）。
+
+### 4.13 索引层规范（向量存储与零停机重建）
+
+- **向量必须放旁表**（`chunk_embeddings`），不能只放 `chunks.embedding` 单列。
+  一行只能存一个向量，"新旧两套向量并存"物理上做不到。
+  实测过的错误设计：回填时就地覆盖向量并改 `chunks.index_version_id`
+  → 该 chunk 立刻从旧版本查询里消失 → 回填完旧版本就空了
+  → 既有停机窗口又无法回滚。详见 docs/adr/0002-index-layer.md。
+- **HNSW 索引绝不能用部分索引**（`postgresql_where=...`）。
+  `embedding` 列本身 NOT NULL 也不行——"部分索引"这个形式本身
+  会让 HNSW 无法服务 `ORDER BY 向量`。实测：完整索引 4.2ms，
+  部分索引 131ms 且 `enable_seqscan=off` 也强制不了。**不报错，只是慢 30 倍**。
+- **`random_page_cost` 必须按存储介质设**：默认 4.0 是机械硬盘估算，
+  会让 planner 放弃 HNSW（191ms vs 7.6ms）。SSD 设 1.1，
+  已通过 `DatabaseSettings.random_page_cost` 注入每个连接。
+- **检索必须两段式**：先只在旁表上走 HNSW 取候选 ID，再按 ID 取内容并过滤。
+  一条 JOIN 会让 `ORDER BY` 距离项来自右表，planner 无法下推索引
+  （实测 282ms vs 2.0ms，慢 140 倍）。
+  `candidate_multiplier`（默认 4）用于补偿"第一段看不到 chunk 级过滤条件"。
+- **`chunk_embeddings` 的唯一约束是回填幂等的保证**：
+  `(chunk_id, index_version_id)` 唯一，回填用 `ON CONFLICT DO UPDATE`。
+  纯 INSERT 重派会撞约束，报错是"duplicate key"但根因是没做幂等。
+- **切换索引版本前必须硬校验回填完成度**（`chunk_count >= expected`）。
+  未完成就切换会让检索**静默丢失内容**——比切换失败严重得多。
+- **回填完成度以旁表 COUNT 为准**，不是计数器（计数器会滞后或重复累加）。
+- **旧版本向量在切换时不能删**：回滚靠它。回收要延迟观察。
+- **召回率不能用随机向量测**：1024 维随机单位向量的 top-10 与 top-40
+  距离差仅 0.017，边界无区分度，任何近似索引都复现不了。
+  `bench_hnsw.py` 只用于验证"索引被 planner 选中"与单查询延迟，
+  召回率必须用真实文档 + 黄金集（A15）。

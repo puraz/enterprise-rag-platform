@@ -48,6 +48,23 @@ class DatabaseSettings(BaseModel):
     statement_timeout_ms: int = Field(default=15_000, ge=0)
     lock_timeout_ms: int = Field(default=5_000, ge=0)
 
+    # ---- 查询规划器代价参数（A10 实测发现的关键项）----
+    #
+    # `random_page_cost` 默认 4.0 是给**机械硬盘**的估算（随机 I/O 比顺序贵 4 倍）。
+    # 在 SSD/NVMe 上这个假设过时，且后果很严重：
+    # pgvector 的 HNSW 索引扫描被估成"大量随机页读取"，
+    # planner 因此认为**顺序全表扫描 + 排序**更便宜，直接不用索引。
+    #
+    # 实测（20000 行 × 1024 维）：
+    #   random_page_cost=4.0  → Seq Scan + Sort，191ms
+    #   random_page_cost=1.1  → Index Scan using HNSW，7.6ms（快 25 倍）
+    #
+    # **这是"索引建对了但完全没生效"的典型故障**：没有报错、没有告警，
+    # 只是慢。只有 EXPLAIN 才能发现。
+    #
+    # 1.1 是 PostgreSQL 官方对 SSD 的推荐值。机械硬盘环境应显式设回 4.0。
+    random_page_cost: float = Field(default=1.1, gt=0)
+
     @property
     def dsn(self) -> SecretStr:
         """SQLAlchemy async 使用的完整 DSN（含密码）。

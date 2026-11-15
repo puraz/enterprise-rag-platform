@@ -533,14 +533,40 @@ class WorkerEngine:
 # ---------------------------------------------------------------- 错误处理辅助
 
 
+# 适配层异常 → 错误码名前缀。
+#
+# 适配层（parsers / storages / providers）**有意不继承 AppError**：
+# 它们不该依赖 core 的业务异常体系，否则换实现要改异常继承关系。
+# 但任务表里显示 `UNHANDLED_ParseError` 对排障毫无帮助——看不出
+# 是哪个阶段的失败。所以这里按类名映射成可读前缀。
+_ADAPTER_ERROR_PREFIXES: dict[str, str] = {
+    "ParseError": "PARSE",
+    "UnsupportedFormatError": "PARSE",
+    "StorageError": "STORAGE",
+    "ObjectNotFoundError": "STORAGE",
+    "EmbeddingProviderError": "EMBEDDING",
+    "LLMProviderError": "LLM",
+    "RerankerProviderError": "RERANKER",
+}
+
+
 def _error_code_of(exc: BaseException) -> str:
     """提取错误码（进 `tasks.error_code`）。
 
-    用码名而非数字：任务表是内部表，排障时 `DOC_PARSE_FAILED`
+    用码名而非数字：任务表是内部表，排障时 `PARSE_FAILED`
     比 `31005` 有用得多。
+
+    适配层异常没有 `code_name`（它们不继承 AppError），
+    但也不能笼统记成 `UNHANDLED_XxxError`——那样看不出失败发生在
+    解析、存储还是模型调用阶段。所以按类名映射成语义前缀。
     """
     if isinstance(exc, AppError):
         return exc.code_name
+    # 按类名精确比对：本工程内异常类名唯一，且用类名而非 import
+    # 可以避免 engine 反向依赖 adapters（engine 本不该认识具体实现）。
+    prefix = _ADAPTER_ERROR_PREFIXES.get(type(exc).__name__)
+    if prefix is not None:
+        return f"{prefix}_{type(exc).__name__}"
     return f"UNHANDLED_{type(exc).__name__}"
 
 
