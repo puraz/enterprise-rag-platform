@@ -28,8 +28,8 @@ from rag_db.repositories import UserRepository
 
 
 async def get_db(
-    principal: Principal = Depends(get_current_principal),  # noqa: B008
-    database: Database = Depends(get_database),  # noqa: B008
+    principal: Principal = Depends(get_current_principal),
+    database: Database = Depends(get_database),
 ) -> AsyncIterator[AsyncSession]:
     """带租户上下文的会话（业务接口默认用这个）。
 
@@ -44,7 +44,7 @@ async def get_db(
 
 
 async def get_session(
-    database: Database = Depends(get_database),  # noqa: B008
+    database: Database = Depends(get_database),
 ) -> AsyncIterator[AsyncSession]:
     """不带租户上下文的会话。
 
@@ -59,8 +59,8 @@ async def get_session(
 
 
 async def get_admin_db(
-    principal: Principal = Depends(get_current_principal),  # noqa: B008
-    database: Database = Depends(get_database),  # noqa: B008
+    principal: Principal = Depends(get_current_principal),
+    database: Database = Depends(get_database),
 ) -> AsyncIterator[AsyncSession]:
     """跨租户会话（BYPASSRLS 管理连接）。
 

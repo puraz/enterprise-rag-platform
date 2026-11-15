@@ -432,7 +432,8 @@ export type AuditAction =
   | "admin.index_rebuild"
   | "admin.permission_change"
   | "admin.provider_change"
-  | "admin.config_change";
+  | "admin.config_change"
+  | "admin.audit_query";
 
 /** 操作结果。 */
 export type AuditOutcome =
@@ -681,4 +682,49 @@ export interface CompleteUploadResponse {
   content_hash: string;
   /** 服务端确认的 MIME 类型 */
   content_type: string;
+}
+
+/** 一条审计记录。 */
+export interface AuditLogItem {
+  id: string;
+  /** 链内序号（同一租户内严格递增） */
+  seq: number;
+  /** 动作类型，见 AuditAction */
+  action: string;
+  /** 结果：success/denied/failed */
+  outcome: string;
+  /** 操作者 ID（用户删除后为 null，但记录保留） */
+  actor_user_id?: string | null;
+  /** 操作者邮箱快照（用户改名后仍可追溯） */
+  actor_email?: string | null;
+  /** 目标对象类型 */
+  target_type?: string | null;
+  /** 目标对象 ID */
+  target_id?: string | null;
+  /** 目标名称快照 */
+  target_name?: string | null;
+  /** 关联的请求 ID，可回查完整链路日志 */
+  request_id?: string | null;
+  /** 客户端 IP */
+  ip_address?: string | null;
+  /** 失败/拒绝时的错误码 */
+  error_code?: string | null;
+  /** 结构化详情（服务端已脱敏 PII，不含文档正文） */
+  details?: Record<string, unknown>;
+  /** 事件时间（UTC） */
+  created_at: string;
+}
+
+/**
+ * 审计查询响应。
+ * 扁平结构（与 A4 的分页契约一致）：`{items, total, limit, offset, has_more}`。
+ */
+export interface AuditQueryResponse {
+  items: AuditLogItem[];
+  /** 总条数。**默认 null**：审计表很大，COUNT(*) 需要全表扫描。管理端的页码器改为「加载更多」即可 */
+  total?: number | null;
+  limit: number;
+  offset: number;
+  /** 是否还有下一页 */
+  has_more: boolean;
 }

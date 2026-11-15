@@ -405,7 +405,8 @@
         "admin.index_rebuild",
         "admin.permission_change",
         "admin.provider_change",
-        "admin.config_change"
+        "admin.config_change",
+        "admin.audit_query"
       ],
       "description": "审计动作类型。\n\n    **命名规则**：`<资源>.<动词>`，全小写下划线连接资源名。\n    值是对外契约的一部分（管理端按此筛选），一旦发布不能改。"
     },
@@ -1186,6 +1187,358 @@
         "content_type"
       ],
       "title": "CompleteUploadResponse",
+      "type": "object"
+    },
+    "AuditLogItem": {
+      "description": "一条审计记录。",
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "seq": {
+          "description": "链内序号（同一租户内严格递增）",
+          "title": "Seq",
+          "type": "integer"
+        },
+        "action": {
+          "description": "动作类型，见 AuditAction",
+          "title": "Action",
+          "type": "string"
+        },
+        "outcome": {
+          "description": "结果：success/denied/failed",
+          "title": "Outcome",
+          "type": "string"
+        },
+        "actor_user_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "操作者 ID（用户删除后为 null，但记录保留）",
+          "title": "Actor User Id"
+        },
+        "actor_email": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "操作者邮箱快照（用户改名后仍可追溯）",
+          "title": "Actor Email"
+        },
+        "target_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "目标对象类型",
+          "title": "Target Type"
+        },
+        "target_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "目标对象 ID",
+          "title": "Target Id"
+        },
+        "target_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "目标名称快照",
+          "title": "Target Name"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "关联的请求 ID，可回查完整链路日志",
+          "title": "Request Id"
+        },
+        "ip_address": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "客户端 IP",
+          "title": "Ip Address"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "失败/拒绝时的错误码",
+          "title": "Error Code"
+        },
+        "details": {
+          "additionalProperties": true,
+          "description": "结构化详情（服务端已脱敏 PII，不含文档正文）",
+          "title": "Details",
+          "type": "object"
+        },
+        "created_at": {
+          "description": "事件时间（UTC）",
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "seq",
+        "action",
+        "outcome",
+        "created_at"
+      ],
+      "title": "AuditLogItem",
+      "type": "object"
+    },
+    "AuditQueryResponse": {
+      "$defs": {
+        "AuditLogItem": {
+          "description": "一条审计记录。",
+          "properties": {
+            "id": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            },
+            "seq": {
+              "description": "链内序号（同一租户内严格递增）",
+              "title": "Seq",
+              "type": "integer"
+            },
+            "action": {
+              "description": "动作类型，见 AuditAction",
+              "title": "Action",
+              "type": "string"
+            },
+            "outcome": {
+              "description": "结果：success/denied/failed",
+              "title": "Outcome",
+              "type": "string"
+            },
+            "actor_user_id": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "操作者 ID（用户删除后为 null，但记录保留）",
+              "title": "Actor User Id"
+            },
+            "actor_email": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "操作者邮箱快照（用户改名后仍可追溯）",
+              "title": "Actor Email"
+            },
+            "target_type": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "目标对象类型",
+              "title": "Target Type"
+            },
+            "target_id": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "目标对象 ID",
+              "title": "Target Id"
+            },
+            "target_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "目标名称快照",
+              "title": "Target Name"
+            },
+            "request_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "关联的请求 ID，可回查完整链路日志",
+              "title": "Request Id"
+            },
+            "ip_address": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "客户端 IP",
+              "title": "Ip Address"
+            },
+            "error_code": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "失败/拒绝时的错误码",
+              "title": "Error Code"
+            },
+            "details": {
+              "additionalProperties": true,
+              "description": "结构化详情（服务端已脱敏 PII，不含文档正文）",
+              "title": "Details",
+              "type": "object"
+            },
+            "created_at": {
+              "description": "事件时间（UTC）",
+              "format": "date-time",
+              "title": "Created At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "seq",
+            "action",
+            "outcome",
+            "created_at"
+          ],
+          "title": "AuditLogItem",
+          "type": "object"
+        }
+      },
+      "description": "审计查询响应。\n\n扁平结构（与 A4 的分页契约一致）：`{items, total, limit, offset, has_more}`。",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/AuditLogItem"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "total": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "总条数。**默认 null**：审计表很大，COUNT(*) 需要全表扫描。管理端的页码器改为「加载更多」即可",
+          "title": "Total"
+        },
+        "limit": {
+          "title": "Limit",
+          "type": "integer"
+        },
+        "offset": {
+          "title": "Offset",
+          "type": "integer"
+        },
+        "has_more": {
+          "description": "是否还有下一页",
+          "title": "Has More",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "items",
+        "limit",
+        "offset",
+        "has_more"
+      ],
+      "title": "AuditQueryResponse",
       "type": "object"
     }
   }

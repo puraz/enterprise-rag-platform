@@ -1,5 +1,6 @@
 """HTTP API 契约：请求/响应模型。前端 TS 类型由此生成。"""
 
+from rag_contracts.api.audit import AuditLogItem, AuditQueryResponse
 from rag_contracts.api.auth import (
     CurrentUserResponse,
     DevLoginRequest,
@@ -8,6 +9,8 @@ from rag_contracts.api.auth import (
 )
 
 __all__ = [
+    "AuditLogItem",
+    "AuditQueryResponse",
     "CurrentUserResponse",
     "DevLoginRequest",
     "HealthResponse",

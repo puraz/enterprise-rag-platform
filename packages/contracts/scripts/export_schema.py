@@ -16,6 +16,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from rag_contracts.api.audit import AuditLogItem, AuditQueryResponse
 from rag_contracts.api.auth import (
     CurrentUserResponse,
     DevLoginRequest,
@@ -84,6 +85,8 @@ EXPORTED_MODELS: tuple[type[BaseModel], ...] = (
     UploadSessionStatusResponse,
     CompleteUploadRequest,
     CompleteUploadResponse,
+    AuditLogItem,
+    AuditQueryResponse,
 )
 
 # 需要导出的枚举。导出成 TS 字符串联合类型，而不是 TS enum

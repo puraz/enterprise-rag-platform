@@ -161,13 +161,16 @@ def _safe_details(details: dict[str, Any] | None) -> dict[str, Any]:
     if not details:
         return {}
 
+    from rag_api.security.pii import redact_text
+
     safe: dict[str, Any] = {}
     for key, value in details.items():
         if isinstance(value, (bool, int, float)):
             safe[key] = value
         elif isinstance(value, str):
-            # 截断长字符串：审计里只需要标识符，不需要正文
-            safe[key] = value[:200]
+            # 截断长字符串后再脱敏：先截断避免对超长文本跑正则，
+            # 再脱敏保证 PII 不进审计表（保留 180 天，合规风险）
+            safe[key] = redact_text(value[:200])
         elif isinstance(value, (list, tuple)):
             safe[key] = [
                 item if isinstance(item, (bool, int, float)) else str(item)[:100]

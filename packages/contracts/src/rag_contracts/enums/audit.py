@@ -49,6 +49,9 @@ class AuditAction(StrEnum):
     ADMIN_PERMISSION_CHANGE = "admin.permission_change"
     ADMIN_PROVIDER_CHANGE = "admin.provider_change"
     ADMIN_CONFIG_CHANGE = "admin.config_change"
+    ADMIN_AUDIT_QUERY = "admin.audit_query"
+    """查询审计日志。**查询本身要留痕**：它是敏感操作，
+    能暴露"谁在什么时候看了什么文档"。"""
 
 
 class AuditOutcome(StrEnum):

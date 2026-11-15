@@ -73,8 +73,8 @@ def build_me_router() -> APIRouter:
         responses=AUTHENTICATED_ENDPOINT,
     )
     async def get_me(
-        principal: Principal = Depends(get_current_principal),  # noqa: B008
-        session: AsyncSession = Depends(get_db),  # noqa: B008
+        principal: Principal = Depends(get_current_principal),
+        session: AsyncSession = Depends(get_db),
     ) -> CurrentUserResponse:
         user = await UserRepository(session).get_active_by_id(principal.user_id)
         if user is None:

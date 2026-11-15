@@ -46,7 +46,7 @@ class Principal:
 
 async def get_current_principal(
     request: Request,
-    token_service: TokenService = Depends(get_token_service),  # noqa: B008
+    token_service: TokenService = Depends(get_token_service),
 ) -> Principal:
     """解析并校验 access token。**不访问数据库**。"""
     credential = bearer_token(request.headers.get("authorization"))
@@ -85,8 +85,8 @@ def require_platform_role(*allowed: PlatformRole) -> object:
     """
 
     async def _check(
-        principal: Principal = Depends(get_current_principal),  # noqa: B008
-        database: Database = Depends(get_database),  # noqa: B008
+        principal: Principal = Depends(get_current_principal),
+        database: Database = Depends(get_database),
     ) -> None:
         role = await _load_platform_role(database=database, user_id=principal.user_id)
         if role not in allowed:

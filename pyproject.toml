@@ -60,6 +60,10 @@ known-first-party = ["rag_core", "rag_contracts", "rag_db", "rag_api", "rag_work
 # 错误码枚举的成员名含 TOKEN（AUTH_TOKEN_EXPIRED 等），
 # bandit 的 S105 会把它误判成硬编码密码。这些是契约常量，不是密钥。
 "packages/contracts/src/rag_contracts/errors/codes.py" = ["S105"]
+# FastAPI 的依赖/参数声明必须在函数签名默认值里调用（Query/Depends），
+# 这是框架的设计，不是代码异味。
+"apps/api/src/rag_api/api/**" = ["B008"]
+"apps/api/src/rag_api/deps/**" = ["B008"]
 # 枚举包同理：ConfidentialityLevel.SECRET = "secret" 是密级常量，
 # 不是密码。按文件豁免（范围比按规则全局豁免窄得多）。
 "packages/contracts/src/rag_contracts/enums/*.py" = ["S105"]

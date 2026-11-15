@@ -38,16 +38,18 @@ from typing import Any
 from fastapi import APIRouter, FastAPI
 
 from rag_api.api.health import router as health_router
+from rag_api.api.v1.admin_audit import router as admin_audit_router
 from rag_api.api.v1.auth import build_auth_router, build_me_router
 from rag_api.api.v1.uploads import router as uploads_router
 from rag_api.errors_handlers import register_exception_handlers
 from rag_api.identity.factory import available_providers
 from rag_api.identity.tokens import TokenService
 from rag_api.middleware import AccessLogMiddleware, RequestContextMiddleware
+from rag_api.security.pii import redact_text as redact_pii
 from rag_api.storages.factory import build_all_storages
 from rag_core.db import Database, wait_until_ready
 from rag_core.errors import ConfigError
-from rag_core.logging import get_logger, setup_logging
+from rag_core.logging import get_logger, register_text_redactor, setup_logging
 from rag_core.redis import RedisClient
 from rag_core.settings import Settings, get_settings
 
@@ -59,7 +61,10 @@ def _build_lifespan(settings: Settings) -> Any:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        # 1. 日志必须最先装配
+        # 1. 日志必须最先装配。
+        #    先注册 PII 脱敏再 setup_logging：保证从第一条日志起
+        #    手机号/身份证/邮箱就已经被打码（而不是启动日志里漏出去）。
+        register_text_redactor(redact_pii)
         setup_logging(settings)
 
         # 2. 启动期配置自检：误配要在启动时炸，不要等第一个请求
@@ -186,6 +191,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_v1.include_router(build_auth_router(dev_enabled=dev_enabled))
     api_v1.include_router(build_me_router())
     api_v1.include_router(uploads_router)
+    api_v1.include_router(admin_audit_router)
 
     app.include_router(health_router)
     app.include_router(api_v1)

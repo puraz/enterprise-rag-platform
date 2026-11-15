@@ -79,6 +79,37 @@ _SENSITIVE_SUFFIXES = (
 MASK = "***"
 _MAX_REDACT_DEPTH = 6
 
+# 可注册的额外脱敏器：让上层（如 rag_api 的 PII 模块）注入自己的规则，
+# 而 core 不需要 import 上层——保持依赖方向单向。
+#
+# 为什么用注册而不是直接 import：`rag_core` 是被 api/worker 依赖的底层，
+# 反过来 import `rag_api` 会造成循环依赖，也破坏"core 不含业务概念"的定位。
+# 注册表让 core 提供机制、上层提供策略。
+_extra_redactors: list[Callable[[str], str]] = []
+
+
+def register_text_redactor(func: Callable[[str], str]) -> None:
+    """注册一个文本脱敏函数（在 core 的脱敏之后依次执行）。
+
+    典型用法（在应用启动时）：
+
+        from rag_core.logging import register_text_redactor
+        from rag_api.security.pii import redact_text
+
+        register_text_redactor(redact_text)
+
+    **必须幂等**：重复注册同一个函数不会重复执行（用 `in` 判断）。
+    多次调用 setup_logging 时容易重复注册。
+    """
+    if func not in _extra_redactors:
+        _extra_redactors.append(func)
+
+
+def clear_text_redactors() -> None:
+    """清空注册的脱敏器（测试用）。"""
+    _extra_redactors.clear()
+
+
 # URL 里的 userinfo：scheme://user:password@host -> scheme://user:***@host
 _URL_CREDENTIALS = re.compile(
     r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*://)(?P<user>[^:/@\s]+):(?P<password>[^@/\s]+)@"
@@ -101,9 +132,20 @@ def _is_sensitive_key(key: str) -> bool:
 
 
 def _redact_text(text: str) -> str:
-    """对字符串值做模式级脱敏（URL 凭据 / Bearer Token）。"""
+    """对字符串值做模式级脱敏。
+
+    两层：
+    1. 内置规则（URL 凭据 / Bearer Token）——core 自带，无依赖；
+    2. 注册的额外规则（如 rag_api 的 PII 脱敏）。
+
+    顺序：内置先跑（密钥优先），再跑注册的（PII）。
+    两组规则不重叠：密钥是随机串，PII 有固定格式。
+    """
     redacted = _URL_CREDENTIALS.sub(r"\g<scheme>\g<user>:***@", text)
-    return _AUTH_SCHEME_VALUE.sub(r"\g<scheme>\g<space>***", redacted)
+    redacted = _AUTH_SCHEME_VALUE.sub(r"\g<scheme>\g<space>***", redacted)
+    for redactor in _extra_redactors:
+        redacted = redactor(redacted)
+    return redacted
 
 
 def _redact_value(value: Any, depth: int = 0) -> Any:

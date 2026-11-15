@@ -92,10 +92,10 @@ def _service(session: AsyncSession, storage: StorageBackend) -> UploadService:
 )
 async def initiate_upload(
     payload: InitiateUploadRequest,
-    principal: Principal = Depends(get_current_principal),  # noqa: B008
-    ctx: PermissionContext = Depends(get_permission_context),  # noqa: B008
-    session: AsyncSession = Depends(get_db),  # noqa: B008
-    storage: StorageBackend = Depends(get_storage),  # noqa: B008
+    principal: Principal = Depends(get_current_principal),
+    ctx: PermissionContext = Depends(get_permission_context),
+    session: AsyncSession = Depends(get_db),
+    storage: StorageBackend = Depends(get_storage),
 ) -> InitiateUploadResponse:
     # **上传要求知识库写权限**：只读用户（viewer）不能上传
     ctx.require_kb_write()
@@ -141,9 +141,9 @@ async def upload_part(
     upload_id: uuid.UUID,
     part_number: int,
     request: Request,
-    principal: Principal = Depends(get_current_principal),  # noqa: B008
-    session: AsyncSession = Depends(get_db),  # noqa: B008
-    storage: StorageBackend = Depends(get_storage),  # noqa: B008
+    principal: Principal = Depends(get_current_principal),
+    session: AsyncSession = Depends(get_db),
+    storage: StorageBackend = Depends(get_storage),
 ) -> UploadPartResponse:
     # 先看 Content-Length 再读体：超长请求直接拒绝，不浪费内存
     settings = get_settings()
@@ -192,9 +192,9 @@ async def upload_part(
 )
 async def get_upload_status(
     upload_id: uuid.UUID,
-    principal: Principal = Depends(get_current_principal),  # noqa: B008
-    session: AsyncSession = Depends(get_db),  # noqa: B008
-    storage: StorageBackend = Depends(get_storage),  # noqa: B008
+    principal: Principal = Depends(get_current_principal),
+    session: AsyncSession = Depends(get_db),
+    storage: StorageBackend = Depends(get_storage),
 ) -> UploadSessionStatusResponse:
     service = _service(session, storage)
     status, total_parts, part_size, uploaded, missing = await service.session_status(
@@ -228,9 +228,9 @@ async def get_upload_status(
 async def complete_upload(
     upload_id: uuid.UUID,
     payload: CompleteUploadRequest,
-    principal: Principal = Depends(get_current_principal),  # noqa: B008
-    session: AsyncSession = Depends(get_db),  # noqa: B008
-    storage: StorageBackend = Depends(get_storage),  # noqa: B008
+    principal: Principal = Depends(get_current_principal),
+    session: AsyncSession = Depends(get_db),
+    storage: StorageBackend = Depends(get_storage),
 ) -> CompleteUploadResponse:
     service = _service(session, storage)
 
@@ -270,9 +270,9 @@ async def complete_upload(
 )
 async def abort_upload(
     upload_id: uuid.UUID,
-    principal: Principal = Depends(get_current_principal),  # noqa: B008
-    session: AsyncSession = Depends(get_db),  # noqa: B008
-    storage: StorageBackend = Depends(get_storage),  # noqa: B008
+    principal: Principal = Depends(get_current_principal),
+    session: AsyncSession = Depends(get_db),
+    storage: StorageBackend = Depends(get_storage),
 ) -> None:
     service = _service(session, storage)
     await service.abort(tenant_id=principal.tenant_id, session_id=upload_id)
