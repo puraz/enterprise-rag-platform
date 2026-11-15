@@ -14,6 +14,7 @@ from rag_core.settings.embedding import EmbeddingSettings
 from rag_core.settings.identity import IdentitySettings
 from rag_core.settings.llm import LLMSettings, ModelPricing, TokenPricing
 from rag_core.settings.redis import RedisSettings
+from rag_core.settings.storage import StorageSettings
 
 __all__ = [
     "ENV_SELECTOR",
@@ -25,6 +26,7 @@ __all__ = [
     "RedisSettings",
     "RunEnv",
     "Settings",
+    "StorageSettings",
     "TokenPricing",
     "find_project_root",
     "get_settings",

@@ -16,6 +16,8 @@ dependencies = [
     "langchain-openai>=0.3",
     "sentence-transformers>=3.3",
     "torch>=2.5",
+    "boto3>=1.35",
+    "types-boto3>=1.35",
 ]
 
 # 告诉 uv：这些依赖来自同 workspace 的本地目录，不要跑去 PyPI 找。
