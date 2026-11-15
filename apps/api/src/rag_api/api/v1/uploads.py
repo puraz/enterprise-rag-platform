@@ -49,6 +49,7 @@ from rag_api.openapi import (
     TENANT_ENDPOINT,
     TENANT_WRITE_ENDPOINT,
 )
+from rag_api.permissions import PermissionContext, get_permission_context
 from rag_api.services.upload import UploadService
 from rag_api.services.upload_security import inspect_file
 from rag_api.storages.base import PartInfo, StorageBackend
@@ -92,9 +93,12 @@ def _service(session: AsyncSession, storage: StorageBackend) -> UploadService:
 async def initiate_upload(
     payload: InitiateUploadRequest,
     principal: Principal = Depends(get_current_principal),  # noqa: B008
+    ctx: PermissionContext = Depends(get_permission_context),  # noqa: B008
     session: AsyncSession = Depends(get_db),  # noqa: B008
     storage: StorageBackend = Depends(get_storage),  # noqa: B008
 ) -> InitiateUploadResponse:
+    # **上传要求知识库写权限**：只读用户（viewer）不能上传
+    ctx.require_kb_write()
     # **文件名与扩展名在这里校验**（不是等到 complete）：
     # 让客户端尽早知道"这个格式不支持"，而不是传完 2GB 才发现
     # initiate 阶段还没有文件内容，只校验文件名与扩展名。

@@ -181,6 +181,7 @@ class ChunkRepository:
         max_distance: float | None = None,
         ef_search: int | None = None,
         iterative_scan: str = "relaxed_order",
+        access_filter: Any = None,
     ) -> list[tuple[Chunk, float]]:
         """向量检索。返回 (chunk, cosine_distance) 列表，距离升序。
 
@@ -207,16 +208,18 @@ class ChunkRepository:
 
         # 余弦距离运算符 <=>：值越小越相似
         distance = Chunk.embedding.cosine_distance(query_embedding).label("distance")
-        stmt = (
-            select(Chunk, distance)
-            .where(
-                Chunk.tenant_id == tenant_id,
-                Chunk.is_current.is_(True),
-                Chunk.embedding.is_not(None),
-            )
-            .order_by(distance)
-            .limit(limit)
-        )
+        conditions = [
+            Chunk.tenant_id == tenant_id,
+            Chunk.is_current.is_(True),
+            Chunk.embedding.is_not(None),
+        ]
+        # **ACL 过滤必须进 WHERE**（不能查完再在 Python 里过滤）：
+        # - 查完再过滤会让分页错乱、越权内容进应用内存、浪费 I/O；
+        # - 检索返回的是文档内容本身，泄漏发生在答案里，比元数据泄漏更严重。
+        if access_filter is not None:
+            conditions.append(access_filter)
+
+        stmt = select(Chunk, distance).where(*conditions).order_by(distance).limit(limit)
         if knowledge_base_ids:
             stmt = stmt.where(Chunk.knowledge_base_id.in_(knowledge_base_ids))
         if max_distance is not None:
