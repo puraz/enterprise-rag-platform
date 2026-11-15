@@ -294,3 +294,29 @@ FastAPI 默认的 `{"detail": ...}` 已由全局处理器转换，不得绕过�
   文件名净化（去路径/控制字符/保留字符、保留扩展名截断）、
   扩展名白名单（拒绝 .exe/.sh/.bat 等）、魔数校验、
   zip bomb 三维防护（条目数/压缩比/单条目大小）、zip slip 路径检查。
+
+### 4.7 认证与 OIDC 规范（`apps/api/src/rag_api/identity/`）
+
+- **不手写 JWT 验签**：用 PyJWT + 显式算法白名单 + 完整 claims 校验
+  （iss / aud / exp / iat / sub）。
+- **算法白名单绝不含 `HS256` 与 `none`**：HS256 需 IdP 与 RP 共享对称密钥
+  （OIDC 里不存在）；`none` 等于不签名。两者都导致 token 可伪造。
+  先校验算法再取公钥，**顺序反了等于让攻击者决定用什么算法验签**。
+- **JWKS 按 kid 缓存 + kid 未命中时强制刷新一次**：IdP 轮换密钥后
+  新 token 用新 kid；不刷新会导致所有用户突然登录失败，且根因不可见。
+- **discovery 的 issuer 必须与配置一致**：防 discovery 文档被篡改指向别的 IdP。
+- **SPA 用 Authorization Code + PKCE（S256）**：public client 存不住 secret，
+  没有 PKCE 时授权码泄漏即可被换走。`code_verifier` 只在前端保存。
+- **refresh token 必须轮换 + 复用检测**：
+  - 每次续期作废旧 token 并签发新的（同 family）；
+  - **检测到已用 token 再次出现 → 作废整族**（无法分辨攻击者与受害者，
+    安全的选择是双方都重新登录）；
+  - Redis 里**只存 SHA-256 hash**，不存原文（存储泄漏时无法直接使用）。
+- **用户级失效检查 `tokens_valid_after`**：禁用账号或强制下线后，
+  早于该时刻签发的 token 全部失效。只验签不看账号状态，
+  会让被禁用者继续用满 access token 有效期。
+- **不是所有 IdP 都是标准 OIDC**：企业微信/飞书/钉钉的 OAuth2 缺标准
+  id_token 或 claims 不规范，需要单独适配器（`IdentityProvider` 接口相同）。
+- **本机无 Docker/Java 时用 `rag_api.testing.MockOIDCServer` 验证代码逻辑**：
+  它能覆盖验签、claims 校验、JWKS 缓存、PKCE、算法攻击。
+  真实 Keycloak 的价值是验证部署 quirks（realm 路径、issuer 尾部斜杠）。

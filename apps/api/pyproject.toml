@@ -18,6 +18,8 @@ dependencies = [
     "torch>=2.5",
     "boto3>=1.35",
     "types-boto3>=1.35",
+    "cryptography>=43",
+    "python-multipart>=0.0.20",
 ]
 
 # 告诉 uv：这些依赖来自同 workspace 的本地目录，不要跑去 PyPI 找。
