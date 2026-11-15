@@ -603,3 +603,82 @@ export interface CreatedResource {
   /** 新资源的 ID */
   id: string;
 }
+
+/** 初始化上传请求。 */
+export interface InitiateUploadRequest {
+  /** 原始文件名（服务端会净化） */
+  filename: string;
+  /** 文件总字节数 */
+  total_size: number;
+  /** MIME 类型（仅供参考，服务端以魔数为准） */
+  content_type: string;
+  /** 整体 SHA-256（小写十六进制）。提供时启用秒传：同租户内已有相同内容的文件则直接返回 blob_id，无需上传 */
+  content_hash?: string | null;
+  /** 目标知识库（可稍后在 complete 时指定） */
+  knowledge_base_id?: string | null;
+}
+
+/**
+ * 初始化上传响应。
+ * 两种形态（用 `deduplicated` 区分）：
+ * - **秒传**：`deduplicated=true`、`blob_id` 有值、`upload_id` 为 null；
+ * - **需上传**：`deduplicated=false`、`upload_id` 有值、`blob_id` 为 null。
+ */
+export interface InitiateUploadResponse {
+  /** 是否秒传命中（无需上传） */
+  deduplicated: boolean;
+  /** 存储层上传会话 ID */
+  upload_id?: string | null;
+  /** 秒传命中的 blob ID */
+  blob_id?: string | null;
+  /** 建议的分片大小（字节） */
+  part_size: number;
+  /** 总分片数 */
+  total_parts: number;
+  /** 已上传的分片号（续传场景：客户端只需补传缺失的） */
+  uploaded_parts?: number[];
+}
+
+/** 分片上传响应。 */
+export interface UploadPartResponse {
+  /** 分片编号（从 1 开始） */
+  part_number: number;
+  /** 分片 ETag，complete 时需带回 */
+  etag: string;
+  /** 分片字节数 */
+  size_bytes: number;
+}
+
+/** 上传会话状态（断点续传查询）。 */
+export interface UploadSessionStatusResponse {
+  /** 上传会话 ID */
+  upload_id: string;
+  /** 会话状态：initiated/uploading/completing/completed/... */
+  status: string;
+  total_parts: number;
+  part_size: number;
+  /** 已上传的分片（**以对象存储为准**，不是数据库计数） */
+  uploaded_parts: UploadPartResponse[];
+  /** 尚未上传的分片号，客户端只需补这些 */
+  missing_parts: number[];
+}
+
+/** 完成上传请求。 */
+export interface CompleteUploadRequest {
+  /** 整体 SHA-256。提供时服务端会重新计算已合并文件的 hash 并比对；不匹配则作废上传。**强烈建议提供**——分片级 ETag 无法证明整体正确 */
+  content_hash?: string | null;
+  /** 目标知识库（覆盖 initiate 时的值） */
+  knowledge_base_id?: string | null;
+}
+
+/** 完成上传响应。 */
+export interface CompleteUploadResponse {
+  /** 落库的物理文件 ID */
+  blob_id: string;
+  /** 文件大小 */
+  size_bytes: number;
+  /** 服务端计算的内容 SHA-256 */
+  content_hash: string;
+  /** 服务端确认的 MIME 类型 */
+  content_type: string;
+}

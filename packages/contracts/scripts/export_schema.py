@@ -23,6 +23,14 @@ from rag_contracts.api.auth import (
     LoginResponse,
 )
 from rag_contracts.api.pagination import PageMeta, PageRequest
+from rag_contracts.api.uploads import (
+    CompleteUploadRequest,
+    CompleteUploadResponse,
+    InitiateUploadRequest,
+    InitiateUploadResponse,
+    UploadPartResponse,
+    UploadSessionStatusResponse,
+)
 from rag_contracts.api.success import CreatedResource, TaskAccepted
 from rag_contracts.enums import (
     AuditAction,
@@ -70,6 +78,12 @@ EXPORTED_MODELS: tuple[type[BaseModel], ...] = (
     PageRequest,
     TaskAccepted,
     CreatedResource,
+    InitiateUploadRequest,
+    InitiateUploadResponse,
+    UploadPartResponse,
+    UploadSessionStatusResponse,
+    CompleteUploadRequest,
+    CompleteUploadResponse,
 )
 
 # 需要导出的枚举。导出成 TS 字符串联合类型，而不是 TS enum

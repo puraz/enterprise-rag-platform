@@ -39,10 +39,12 @@ from fastapi import APIRouter, FastAPI
 
 from rag_api.api.health import router as health_router
 from rag_api.api.v1.auth import build_auth_router, build_me_router
+from rag_api.api.v1.uploads import router as uploads_router
 from rag_api.errors_handlers import register_exception_handlers
 from rag_api.identity.factory import available_providers
 from rag_api.identity.tokens import TokenService
 from rag_api.middleware import AccessLogMiddleware, RequestContextMiddleware
+from rag_api.storages.factory import build_all_storages
 from rag_core.db import Database, wait_until_ready
 from rag_core.errors import ConfigError
 from rag_core.logging import get_logger, setup_logging
@@ -65,6 +67,9 @@ def _build_lifespan(settings: Settings) -> Any:
 
         database = Database(settings)
         redis = RedisClient(settings)
+        # 构造所有可用后端：配置的主后端 + local（迁移期读老数据）
+        storages = build_all_storages(settings)
+        primary_storage = storages[settings.storage.backend]
 
         try:
             # 3. 等依赖就绪（容器编排里 API 与 PG 同时启动，PG 需要几秒）。
@@ -94,12 +99,16 @@ def _build_lifespan(settings: Settings) -> Any:
                 identity_provider=settings.identity.provider,
                 dev_auth_enabled=settings.dev_auth_enabled,
                 identity_providers_available=list(available_providers()),
+                storage_backend=settings.storage.backend,
+                storage_backends=list(storages),
             )
 
             app.state.settings = settings
             app.state.database = database
             app.state.redis = redis
             app.state.token_service = TokenService(settings.identity)
+            app.state.storage = primary_storage
+            app.state.storages = storages
             app.state.app_version = _app_version()
 
             yield
@@ -176,6 +185,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     dev_enabled = resolved.dev_auth_enabled and not resolved.env.is_production_like
     api_v1.include_router(build_auth_router(dev_enabled=dev_enabled))
     api_v1.include_router(build_me_router())
+    api_v1.include_router(uploads_router)
 
     app.include_router(health_router)
     app.include_router(api_v1)

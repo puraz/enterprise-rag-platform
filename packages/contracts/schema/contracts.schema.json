@@ -889,6 +889,304 @@
       ],
       "title": "CreatedResource",
       "type": "object"
+    },
+    "InitiateUploadRequest": {
+      "additionalProperties": false,
+      "description": "初始化上传请求。",
+      "properties": {
+        "filename": {
+          "description": "原始文件名（服务端会净化）",
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Filename",
+          "type": "string"
+        },
+        "total_size": {
+          "description": "文件总字节数",
+          "minimum": 1,
+          "title": "Total Size",
+          "type": "integer"
+        },
+        "content_type": {
+          "description": "MIME 类型（仅供参考，服务端以魔数为准）",
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Content Type",
+          "type": "string"
+        },
+        "content_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "整体 SHA-256（小写十六进制）。提供时启用秒传：同租户内已有相同内容的文件则直接返回 blob_id，无需上传",
+          "title": "Content Hash"
+        },
+        "knowledge_base_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "目标知识库（可稍后在 complete 时指定）",
+          "title": "Knowledge Base Id"
+        }
+      },
+      "required": [
+        "filename",
+        "total_size",
+        "content_type"
+      ],
+      "title": "InitiateUploadRequest",
+      "type": "object"
+    },
+    "InitiateUploadResponse": {
+      "description": "初始化上传响应。\n\n两种形态（用 `deduplicated` 区分）：\n- **秒传**：`deduplicated=true`、`blob_id` 有值、`upload_id` 为 null；\n- **需上传**：`deduplicated=false`、`upload_id` 有值、`blob_id` 为 null。",
+      "properties": {
+        "deduplicated": {
+          "description": "是否秒传命中（无需上传）",
+          "title": "Deduplicated",
+          "type": "boolean"
+        },
+        "upload_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "存储层上传会话 ID",
+          "title": "Upload Id"
+        },
+        "blob_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "秒传命中的 blob ID",
+          "title": "Blob Id"
+        },
+        "part_size": {
+          "description": "建议的分片大小（字节）",
+          "title": "Part Size",
+          "type": "integer"
+        },
+        "total_parts": {
+          "description": "总分片数",
+          "title": "Total Parts",
+          "type": "integer"
+        },
+        "uploaded_parts": {
+          "description": "已上传的分片号（续传场景：客户端只需补传缺失的）",
+          "items": {
+            "type": "integer"
+          },
+          "title": "Uploaded Parts",
+          "type": "array"
+        }
+      },
+      "required": [
+        "deduplicated",
+        "part_size",
+        "total_parts"
+      ],
+      "title": "InitiateUploadResponse",
+      "type": "object"
+    },
+    "UploadPartResponse": {
+      "description": "分片上传响应。",
+      "properties": {
+        "part_number": {
+          "description": "分片编号（从 1 开始）",
+          "title": "Part Number",
+          "type": "integer"
+        },
+        "etag": {
+          "description": "分片 ETag，complete 时需带回",
+          "title": "Etag",
+          "type": "string"
+        },
+        "size_bytes": {
+          "description": "分片字节数",
+          "title": "Size Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "part_number",
+        "etag",
+        "size_bytes"
+      ],
+      "title": "UploadPartResponse",
+      "type": "object"
+    },
+    "UploadSessionStatusResponse": {
+      "$defs": {
+        "UploadPartResponse": {
+          "description": "分片上传响应。",
+          "properties": {
+            "part_number": {
+              "description": "分片编号（从 1 开始）",
+              "title": "Part Number",
+              "type": "integer"
+            },
+            "etag": {
+              "description": "分片 ETag，complete 时需带回",
+              "title": "Etag",
+              "type": "string"
+            },
+            "size_bytes": {
+              "description": "分片字节数",
+              "title": "Size Bytes",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "part_number",
+            "etag",
+            "size_bytes"
+          ],
+          "title": "UploadPartResponse",
+          "type": "object"
+        }
+      },
+      "description": "上传会话状态（断点续传查询）。",
+      "properties": {
+        "upload_id": {
+          "description": "上传会话 ID",
+          "title": "Upload Id",
+          "type": "string"
+        },
+        "status": {
+          "description": "会话状态：initiated/uploading/completing/completed/...",
+          "title": "Status",
+          "type": "string"
+        },
+        "total_parts": {
+          "title": "Total Parts",
+          "type": "integer"
+        },
+        "part_size": {
+          "title": "Part Size",
+          "type": "integer"
+        },
+        "uploaded_parts": {
+          "description": "已上传的分片（**以对象存储为准**，不是数据库计数）",
+          "items": {
+            "$ref": "#/$defs/UploadPartResponse"
+          },
+          "title": "Uploaded Parts",
+          "type": "array"
+        },
+        "missing_parts": {
+          "description": "尚未上传的分片号，客户端只需补这些",
+          "items": {
+            "type": "integer"
+          },
+          "title": "Missing Parts",
+          "type": "array"
+        }
+      },
+      "required": [
+        "upload_id",
+        "status",
+        "total_parts",
+        "part_size",
+        "uploaded_parts",
+        "missing_parts"
+      ],
+      "title": "UploadSessionStatusResponse",
+      "type": "object"
+    },
+    "CompleteUploadRequest": {
+      "additionalProperties": false,
+      "description": "完成上传请求。",
+      "properties": {
+        "content_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "整体 SHA-256。提供时服务端会重新计算已合并文件的 hash 并比对；不匹配则作废上传。**强烈建议提供**——分片级 ETag 无法证明整体正确",
+          "title": "Content Hash"
+        },
+        "knowledge_base_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "目标知识库（覆盖 initiate 时的值）",
+          "title": "Knowledge Base Id"
+        }
+      },
+      "title": "CompleteUploadRequest",
+      "type": "object"
+    },
+    "CompleteUploadResponse": {
+      "description": "完成上传响应。",
+      "properties": {
+        "blob_id": {
+          "description": "落库的物理文件 ID",
+          "format": "uuid",
+          "title": "Blob Id",
+          "type": "string"
+        },
+        "size_bytes": {
+          "description": "文件大小",
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "content_hash": {
+          "description": "服务端计算的内容 SHA-256",
+          "title": "Content Hash",
+          "type": "string"
+        },
+        "content_type": {
+          "description": "服务端确认的 MIME 类型",
+          "title": "Content Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "blob_id",
+        "size_bytes",
+        "content_hash",
+        "content_type"
+      ],
+      "title": "CompleteUploadResponse",
+      "type": "object"
     }
   }
 }

@@ -183,10 +183,22 @@ class ValidationFailedError(AppError):
 
 
 class BadRequestError(AppError):
+    """请求语义不合法（不是字段校验失败）。
+
+    与 `ValidationFailedError` 的区别：
+    - `ValidationFailedError`（422）：字段类型/长度/格式不对，有字段级明细；
+    - `BadRequestError`（**400**）：请求本身矛盾或越界，比如"分片编号 0"
+      "offset 超上限""分片大小与声明不符"。
+
+    状态码用 400 而不是 422：码名是 BAD_REQUEST，返回 422 会让
+    "码名与状态码对不上"，前端按状态码做分支时无法区分这两类。
+    """
+
     code = ErrorCode.COMMON_BAD_REQUEST
     category = ErrorCategory.VALIDATION
     severity = Severity.INFO
     default_message = "请求不合法"
+    status_override = 400
 
 
 class NotFoundError(AppError):

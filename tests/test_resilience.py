@@ -219,6 +219,11 @@ def test_open_breaker_rejects_without_calling_downstream() -> None:
             with pytest.raises(AppError):
                 await caller.call(always_fail, operation="probe")
 
+        # **显式断言熔断已打开**：不能只依赖"调用次数够了就会打开"这个假设。
+        # 不显式断言的话，若哪次窗口清理把记录清掉了，测试会以
+        # "CircuitOpenError 没抛出"的形式失败，看不出真正原因。
+        assert caller.breaker.state is BreakerState.OPEN
+
         before = calls["n"]
         # 熔断已打开，后续调用应快速失败且不再触达下游
         with pytest.raises(CircuitOpenError):

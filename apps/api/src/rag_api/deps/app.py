@@ -13,6 +13,7 @@ from __future__ import annotations
 from fastapi import Request
 
 from rag_api.identity.tokens import TokenService
+from rag_api.storages.base import StorageBackend
 from rag_core.db import Database
 from rag_core.redis import RedisClient
 from rag_core.settings import Settings
@@ -45,3 +46,13 @@ def get_token_service(request: Request) -> TokenService:
     """token 签发/校验服务。密钥来自配置，故随进程创建。"""
     service: TokenService = request.app.state.token_service
     return service
+
+
+def get_storage(request: Request) -> StorageBackend:
+    """主存储后端（当前写入目标）。
+
+    进程级单例：S3 的 boto3 client 内部维护连接池，
+    每请求新建会导致反复 TLS 握手与 fd 暴涨。
+    """
+    storage: StorageBackend = request.app.state.storage
+    return storage

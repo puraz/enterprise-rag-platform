@@ -89,6 +89,11 @@ class InitiateResult:
     deduplicated: bool
     blob_id: uuid.UUID | None = None
     upload_id: str | None = None
+    """**对外的会话 ID**（数据库主键），客户端后续用它调 parts/complete。
+    不用存储层的 upload_id 作为公开标识——那是后端的实现细节，
+    暴露它会让攻击者推断存储配置。"""
+    storage_upload_id: str | None = None
+    """存储层 upload_id（内部使用，不返回给客户端）。"""
     part_size: int = 0
     total_parts: int = 0
     # 已上传的分片号（续传场景：客户端已传过一部分）
@@ -197,7 +202,8 @@ class UploadService:
         )
         return InitiateResult(
             deduplicated=False,
-            upload_id=multipart.upload_id,
+            upload_id=str(session_row.id),
+            storage_upload_id=multipart.upload_id,
             part_size=part_size,
             total_parts=total_parts,
             uploaded_parts=[],
@@ -276,6 +282,50 @@ class UploadService:
         )
         return await self._storage.list_parts(multipart)
 
+    async def session_status(
+        self, *, tenant_id: uuid.UUID, session_id: uuid.UUID
+    ) -> tuple[str, int, int, list[PartInfo], list[int]]:
+        """返回会话状态与分片进度。
+
+        返回 `(status, total_parts, part_size, uploaded, missing)`。
+        `uploaded` 以**存储层**为准；`missing` 是客户端还差哪些片。
+        """
+        row, multipart = await self._load_upload_for_part(
+            tenant_id=tenant_id, session_id=session_id
+        )
+        uploaded = await self._storage.list_parts(multipart)
+        present = {p.part_number for p in uploaded}
+        missing = [n for n in range(1, row.total_parts + 1) if n not in present]
+        return row.status, row.total_parts, row.part_size, uploaded, missing
+
+    async def session_id_for_upload(
+        self, *, tenant_id: uuid.UUID, storage_upload_id: str
+    ) -> uuid.UUID:
+        """按存储层 upload_id 反查会话主键。
+
+        保留这个方法是为了兼容"客户端只知道存储 upload_id"的旧调用方。
+        新接口应该直接用会话主键（`InitiateResult.upload_id`）。
+        """
+        from sqlalchemy import select
+
+        result = await self._session.execute(
+            select(UploadSession.id)
+            .where(
+                UploadSession.tenant_id == tenant_id,
+                UploadSession.storage_upload_id == storage_upload_id,
+            )
+            .limit(1)
+        )
+        found = result.scalar_one_or_none()
+        if found is None:
+            raise NotFoundError("上传会话不存在")
+        return found
+
+    async def get_session_filename(self, *, tenant_id: uuid.UUID, session_id: uuid.UUID) -> str:
+        """取会话的原始文件名（用于 complete 时确定扩展名/魔数）。"""
+        row, _ = await self._load_upload_for_part(tenant_id=tenant_id, session_id=session_id)
+        return row.filename
+
     async def complete(
         self,
         *,
@@ -322,7 +372,12 @@ class UploadService:
             #    客户端传的可能是伪造的）
             metadata = await self._storage.complete_multipart(multipart, stored_parts)
 
-            # 3. 整体 hash 校验
+            # 3. **魔数校验**：initiate 时没有内容只能校验扩展名，
+            #    现在有完整文件了，必须确认内容与扩展名一致。
+            #    防的是"声明 .pdf 实际传 .exe"这类绕过。
+            await self._verify_content_matches_extension(key=multipart.key, filename=row.filename)
+
+            # 4. 整体 hash 校验
             actual_hash = await self._compute_stored_hash(multipart.key)
             if declared_hash and actual_hash != declared_hash:
                 log.warning(
@@ -384,6 +439,37 @@ class UploadService:
                     session_id=session_id,
                     error_code="UPLOAD.COMPLETE_FAILED",
                     error_message=type(exc).__name__,
+                )
+            raise
+
+    async def _verify_content_matches_extension(self, *, key: str, filename: str) -> None:
+        """读取已存文件的开头，校验魔数与扩展名一致。
+
+        只读前 8KB（足够判断所有支持的格式），不下载整个文件。
+
+        失败时删除对象——不留下一个"扩展名造假"的文件在存储里。
+        """
+        from rag_api.services.upload_security import inspect_file
+        from rag_core.errors import UnsupportedMediaTypeError
+
+        head = b""
+        async for chunk in self._storage.get(key):
+            head = chunk[:8192]
+            break
+
+        try:
+            inspect_file(filename=filename, head=head)
+        except UnsupportedMediaTypeError:
+            # 内容与扩展名不符：删对象再抛，避免存储里留下假文件
+            from rag_api.storages.base import StorageError
+
+            try:
+                await self._storage.delete(key)
+            except StorageError as cleanup_exc:
+                log.warning(
+                    "upload_cleanup_after_mime_mismatch_failed",
+                    key=key,
+                    error=type(cleanup_exc).__name__,
                 )
             raise
 

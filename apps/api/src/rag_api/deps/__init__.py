@@ -29,6 +29,7 @@ from rag_api.deps.app import (
     get_database,
     get_redis,
     get_settings_from_app,
+    get_storage,
     get_token_service,
 )
 from rag_api.deps.auth import Principal, get_current_principal, require_platform_role
@@ -45,6 +46,7 @@ __all__ = [
     "get_redis",
     "get_session",
     "get_settings_from_app",
+    "get_storage",
     "get_token_service",
     "page_query",
     "require_platform_role",
