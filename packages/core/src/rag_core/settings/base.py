@@ -22,6 +22,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from rag_core.settings.database import DatabaseSettings
 from rag_core.settings.identity import IdentitySettings
+from rag_core.settings.llm import LLMSettings
 from rag_core.settings.redis import RedisSettings
 
 # RAG_ENV 要参与"选哪个 .env 文件"，所以常量单独暴露
@@ -86,6 +87,7 @@ class Settings(BaseSettings):
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     identity: IdentitySettings = Field(default_factory=IdentitySettings)
+    llm: LLMSettings = Field(default_factory=LLMSettings)
 
     @property
     def resolved_log_format(self) -> Literal["json", "console"]:
@@ -133,6 +135,10 @@ class Settings(BaseSettings):
         # 但所有请求都 500 —— 比启动失败难排查得多。
         if not self.startup_dependency_check:
             problems.append("RAG_STARTUP_DEPENDENCY_CHECK=false 不允许出现在生产")
+
+        # LLM 供应商密钥：配了 provider 就必须有 key，否则所有 AI 功能不可用
+        if self.llm.provider and not self.llm.api_key:
+            problems.append(f"RAG_LLM__API_KEY 未配置（provider={self.llm.provider}）")
 
         if problems:
             joined = "；".join(problems)

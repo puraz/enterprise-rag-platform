@@ -87,6 +87,7 @@ def test_production_rejects_development_password(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("RAG_ENV", "prod")
     monkeypatch.setenv("RAG_IDENTITY__JWT_SECRET", "a-production-grade-secret-value-32+")
     monkeypatch.setenv("RAG_IDENTITY__JWT_ALGORITHM", "RS256")
+    monkeypatch.setenv("RAG_LLM__API_KEY", "sk-a-real-production-key-value")
     with pytest.raises(ValidationError, match="生产环境配置不安全"):
         Settings()
 
@@ -96,6 +97,7 @@ def test_production_rejects_debug_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RAG_ENV", "prod")
     monkeypatch.setenv("RAG_IDENTITY__JWT_SECRET", "a-production-grade-secret-value-32+")
     monkeypatch.setenv("RAG_IDENTITY__JWT_ALGORITHM", "RS256")
+    monkeypatch.setenv("RAG_LLM__API_KEY", "sk-a-real-production-key-value")
     monkeypatch.setenv("RAG_DATABASE__PASSWORD", "a-real-strong-secret")
     monkeypatch.setenv("RAG_DEBUG", "true")
     with pytest.raises(ValidationError, match="RAG_DEBUG"):
@@ -109,6 +111,7 @@ def test_production_with_real_secret_passes_and_uses_json_logs(
     monkeypatch.setenv("RAG_ENV", "prod")
     monkeypatch.setenv("RAG_IDENTITY__JWT_SECRET", "a-production-grade-secret-value-32+")
     monkeypatch.setenv("RAG_IDENTITY__JWT_ALGORITHM", "RS256")
+    monkeypatch.setenv("RAG_LLM__API_KEY", "sk-a-real-production-key-value")
     monkeypatch.setenv("RAG_DATABASE__PASSWORD", "a-real-strong-secret")
     settings = Settings()
     assert settings.env is RunEnv.PROD
