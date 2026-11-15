@@ -1,0 +1,7 @@
+{
+  "label": "ragas-trial2",
+  "faithfulness": null,
+  "answer_relevancy": null,
+  "sample_count": 3,
+  "note": "Ragas 评估失败：KeyError: 0。样本已收集，可换评判模型重试。"
+}

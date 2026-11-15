@@ -1,0 +1,7 @@
+{
+  "label": "ragas-trial",
+  "faithfulness": null,
+  "answer_relevancy": null,
+  "sample_count": 0,
+  "note": "评判模型配置失败（AttributeError: 'str' object has no attribute 'get_secret_value'）。Ragas 需要 LLM + Embedding 接入。"
+}

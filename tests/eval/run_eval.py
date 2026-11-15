@@ -314,7 +314,7 @@ async def _ingest_corpus(
     from rag_adapters.parsers.artifact import BlockRecord, PageRecord, dump_parsed, load_parsed
     from rag_adapters.parsers.factory import parse_document
     from rag_adapters.providers.factory import build_embedding_provider
-    from rag_contracts.enums import DocumentFormat
+    from rag_contracts.enums import DocumentFormat, DocumentStatus, DocumentVersionStatus
     from rag_db.repositories import BlobRepository, DocumentRepository
     from rag_db.repositories.chunk import ChunkRepository, IndexVersionRepository
 
@@ -384,6 +384,14 @@ async def _ingest_corpus(
                     storage_backend="local",
                     content_type="text/markdown",
                 )
+                # **建文档时就带最终状态与计数**：
+                # 评估脚本不走 worker 管线（不经过 parse→chunk→embed
+                # 的状态机），如果建文档时用默认 PENDING / chunk_count=0，
+                # 会留下"有 chunk 但计数为 0、状态停在 parsing"的脏数据
+                # ——对账会正确报出这个问题（实测抓到 3 个文档）。
+                #
+                # 这里直接写成 ready + 正确计数，让评估库与生产库的
+                # 数据形态一致。否则基于它做的任何数据检查都不可信。
                 doc = await DocumentRepository(session).create(
                     tenant_id=tenant_id,
                     knowledge_base_id=kb_id,
@@ -391,6 +399,7 @@ async def _ingest_corpus(
                     original_filename=doc_path.name,
                     format=DocumentFormat.MARKDOWN.value,
                     created_by=user_id,
+                    status=DocumentStatus.READY,
                 )
                 repo = DocumentRepository(session)
                 version_no = await repo.allocate_version_no(doc_id=doc.id)
@@ -420,6 +429,13 @@ async def _ingest_corpus(
                     )
                     await iv_repo.activate(knowledge_base_id=kb_id, version_id=active.id)
                     await session.flush()
+
+                leaf_count = sum(1 for d in drafts if d.chunk_level == 0)
+                # 计数与状态必须在同一事务里写，否则"有 chunk 但 count=0"
+                # 的中间态会被对账抓出来（这是正确行为，但评估库不该脏）
+                doc.chunk_count = leaf_count
+                version.chunk_count = len(drafts)
+                version.status = DocumentVersionStatus.READY
 
                 await ChunkRepository(session).bulk_create(
                     tenant_id=tenant_id,

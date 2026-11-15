@@ -1,0 +1,7 @@
+{
+  "label": "ragas-faith2",
+  "faithfulness": 1.0,
+  "answer_relevancy": null,
+  "sample_count": 3,
+  "note": "Answer Relevancy 跳过：DeepSeek 不支持 n>1，而该指标需要多采样。Faithfulness 不受影响。判分模型与被测模型相同（DeepSeek），存在自我偏好偏差；分数只用于同一配置的前后对比，不跨数据集比较。"
+}
