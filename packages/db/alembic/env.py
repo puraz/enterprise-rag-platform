@@ -44,7 +44,9 @@ def _database_url() -> str:
 
     每次调用都重新取，保证 `make migrate` 与 API 用的是同一份配置。
     """
-    return get_settings().database.dsn.get_secret_value()
+    # 用高权限 DSN：迁移需要 CREATE/ALTER/POLICY 权限，
+    # 而运行时角色 rag_app 只有 DML 权限（最小权限原则）。
+    return get_settings().database.migration_dsn.get_secret_value()
 
 
 def run_migrations_offline() -> None:

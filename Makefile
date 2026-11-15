@@ -3,7 +3,7 @@
 UV ?= uv
 
 .PHONY: help sync lint fmt typecheck test check config check-deps test-int test-all \
-        migrate migrate-new migrate-down migrate-check gen-contracts gen-contracts-check
+        migrate migrate-new migrate-down migrate-check gen-contracts gen-contracts-check verify-rls
 
 # 迁移统一在 packages/db 下执行（alembic.ini 在那里）
 ALEMBIC ?= $(UV) run alembic -c packages/db/alembic.ini
@@ -33,6 +33,9 @@ test-int:  ## 集成测试（需真实 PG/Redis，先跑 make check-deps）
 
 test-all:  ## 全量测试（单测 + 集成）
 	$(UV) run pytest -m ""
+
+verify-rls:  ## 验证 RLS 是否真的生效（超级用户 vs 应用角色）
+	$(UV) run python scripts/verify_rls.py
 
 check-deps:  ## 检查 PG / Redis / pgvector 连通性
 	$(UV) run python scripts/check_deps.py

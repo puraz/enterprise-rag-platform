@@ -19,10 +19,19 @@ class DatabaseSettings(BaseModel):
 
     host: str = "127.0.0.1"
     port: int = Field(default=5432, ge=1, le=65535)
-    user: str = "rag"
+    # 默认用应用角色 rag_app：**必须是非超级用户**，否则 RLS 完全失效。
+    # 超级用户（rolsuper）与 BYPASSRLS 角色都会无条件绕过行级安全策略，
+    # 且 pg_class.relforcerowsecurity 对 superuser 也无效。
+    # 迁移用单独的 rag_admin/puraz（需要 DDL 权限），见 alembic/env.py。
+    user: str = "rag_app"
     # 开发默认值故意写成一眼能认出来的样子，便于生产守卫拦截
     password: SecretStr = SecretStr("rag_local_dev_only")
     name: str = "rag"
+
+    # 迁移专用凭据（可选）。不设则复用上面的 user/password。
+    # 生产环境应显式设置成高权限角色，与运行时角色分离。
+    migration_user: str | None = None
+    migration_password: SecretStr | None = None
 
     # 连接池：这三个数字直接决定"并发上来时会不会把 DB 打爆"
     pool_size: int = Field(default=10, ge=1)
@@ -43,6 +52,31 @@ class DatabaseSettings(BaseModel):
         user = quote(self.user, safe="")
         # 密码必须 URL 编码：@ / : / 出现在密码里不编码会把 DSN 解析坏
         password = quote(self.password.get_secret_value(), safe="")
+        raw = f"postgresql+asyncpg://{user}:{password}@{self.host}:{self.port}/{self.name}"
+        return SecretStr(raw)
+
+    @property
+    def migration_dsn(self) -> SecretStr:
+        """迁移专用 DSN（高权限角色）。
+
+        **为什么迁移要单独的角色**：
+        运行时角色 `rag_app` 只有 DML 权限（SELECT/INSERT/UPDATE/DELETE），
+        没有 CREATE TABLE / ALTER TABLE / CREATE POLICY 权限 —— 这是有意的
+        最小权限设计。迁移需要 DDL，必须用另一个角色。
+
+        用环境变量 `RAG_DATABASE__MIGRATION_USER/PASSWORD` 覆盖；
+        未设置时回退到主 user/password（方便单角色环境）。
+
+        **不要用超级用户跑应用**：超级用户无条件绕过 RLS，
+        策略会静默失效。迁移用高权限、运行时用低权限是正确的分工。
+        """
+        user = quote(self.migration_user or self.user, safe="")
+        password_value = (
+            self.migration_password.get_secret_value()
+            if self.migration_password is not None
+            else self.password.get_secret_value()
+        )
+        password = quote(password_value, safe="")
         raw = f"postgresql+asyncpg://{user}:{password}@{self.host}:{self.port}/{self.name}"
         return SecretStr(raw)
 

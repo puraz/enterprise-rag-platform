@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
@@ -118,7 +119,9 @@ class Database:
                 raise
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[AsyncSession]:
+    async def transaction(
+        self, *, tenant_id: uuid.UUID | None = None
+    ) -> AsyncIterator[AsyncSession]:
         """显式事务边界。
 
         用 `async with db.transaction() as session:` 包住的代码要么全成功
@@ -128,7 +131,55 @@ class Database:
         隔离级别保持默认的 READ COMMITTED。本项目的并发正确性靠
         乐观锁 + 唯一索引 + 原子 UPDATE 保证，不靠提高隔离级别；
         升到 REPEATABLE READ 会带来序列化失败重试，收益远小于成本。
+
+        ## tenant_id 参数与 RLS
+
+        传入 `tenant_id` 时，会在事务开始后立即执行
+        `set_config('app.tenant_id', :t, true)`（第三个参数 true = 事务级），
+        让数据库的行级安全策略生效。
+
+        **必须用事务级设置，不能用会话级 `SET`**：
+        连接池会复用连接，会话级设置会泄漏到下一个借用的请求 ——
+        如果那个请求因为异常路径没重设，就会读到上一个租户的数据。
+        这是真实可发生的越权，且极难复现（只在特定时机出现）。
+
+        `SET LOCAL` / `set_config(..., true)` 在事务提交或回滚时
+        自动清除，因此连接归还池后是干净的。
+
+        **不传 tenant_id 时不做任何设置**：RLS 策略会因
+        `current_setting('app.tenant_id', true)` 返回 NULL 而拒绝所有行。
+        这对"忘了传"是最安全的默认（看不到数据，而不是看到全部）。
+        需要跨租户的后台任务应显式使用 `transaction_bypass_rls()`。
         """
+        async with self._session_factory() as session, session.begin():
+            if tenant_id is not None:
+                # 用 set_config 而不是 SET LOCAL：参数可绑定，避免 SQL 拼接。
+                # 第三个参数 true 表示 is_local（事务级），等价于 SET LOCAL。
+                await session.execute(
+                    text("SELECT set_config('app.tenant_id', :tid, true)"),
+                    {"tid": str(tenant_id)},
+                )
+            yield session
+
+    @asynccontextmanager
+    async def transaction_bypass_rls(self) -> AsyncIterator[AsyncSession]:
+        """不设置租户上下文的事务，供合法的跨租户路径使用。
+
+        典型场景：
+        - 管理端看板统计所有租户；
+        - 后台对账（扫全部租户的孤儿 blob）；
+        - 数据迁移与修复。
+
+        **这个方法的调用点必须能被审计追到**：它绕过了租户隔离，
+        误用就是越权。建议只在 `rag_api.services.admin_*` 和
+        `rag_worker.jobs.*` 里使用，且每次调用都写审计。
+
+        注意：只有连接角色具备 BYPASSRLS 或不设策略时才真正"绕过"。
+        普通角色（rag_app）在没有 app.tenant_id 时看到的是**零行**，
+        不是全部行 —— 这是有意的安全默认。
+        """
+        # 显式设成一个不可能匹配的哨兵值？不——留空让策略拒绝所有行，
+        # 需要跨租户时必须改用 rag_admin 角色（有 BYPASSRLS）。
         async with self._session_factory() as session, session.begin():
             yield session
 
