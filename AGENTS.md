@@ -381,3 +381,37 @@ FastAPI 默认的 `{"detail": ...}` 已由全局处理器转换，不得绕过�
 - core 提供机制、上层提供策略：`rag_api` 在启动时把 PII 规则注册进去，
   core 不需要 import 上层（保持依赖单向）。
 - **注册必须幂等**：多次调用 `setup_logging` 时不能重复执行。
+
+### 4.10 文档解析层规范（`apps/api/src/rag_api/parsers/`）
+
+**格式 → 解析器选型**
+| 格式 | 实现 | 页码 | bbox |
+|---|---|---|---|
+| PDF | **PyMuPDF**（`import pymupdf`，不是 `import fitz`） | ✅ | ✅ |
+| PPTX | python-pptx | ✅（slide 序号） | — |
+| DOCX | docx2txt | — | — |
+| XLSX | openpyxl（Sheet 名作上下文前缀） | — | — |
+| MD/HTML/TXT/CSV | 自研 | — | — |
+
+- **PDF 不用 LangChain 的 `PyPDFLoader`**：实测它只给 `page` 不给 `bbox`，
+  而 bbox 是前端"点击引用在 PDF 原图上框选"的前提。
+  另：`langchain-community` 已官方 sunset（实测有 DeprecationWarning）。
+- **其它格式可以用轻量库**：DOCX/PPTX/XLSX 是流式文档，没有画布坐标概念，
+  不需要 bbox，只需段落结构与字符偏移。
+- **必须用 `import pymupdf` 而非 `import fitz`**：`fitz` 是历史导入名，
+  已弃用（实测有 FutureWarning），未来版本会移除。
+- **字符偏移必须能精确切出 block.text**：`verify_char_offsets()` 校验，
+  解析器的单测必须调它。偏移算错的后果是引用高亮显示错误文字，
+  且端到端测试极难发现（答案对、高亮错）。
+- **页码从 1 开始**：`pages[i].page_no` 是用户看到的页码，
+  不是 0-based 索引。存错会让所有引用偏一页。
+- **能力声明必须诚实**：只有真能给 bbox 的才声明 `supports_bbox=True`。
+  虚假声明会让前端拿到 null，表现为"高亮时好时坏"。
+- **块之间插入的分隔符也要计入偏移**：`\n\n` 是 `text` 的一部分。
+  先拼 text 再按内容搜索定位会在重复文本上出错。
+- **文本编码按 UTF-8 → GBK → gb18030 依次尝试**：中文文档常见 GBK，
+  只试 UTF-8 会抛 UnicodeDecodeError 且看不出是编码问题。
+- **CRLF 必须规范化为 LF**：否则偏移在 Windows 文件上错位。
+- **OCR 是可选能力**：`build_ocr_engine()` 检测不到 tesseract 时返回
+  `NullOcr`，调用方降级；**启动日志必须告警并给出安装提示**，
+  否则"扫描件解析不出内容"会变成没人知道原因的谜。

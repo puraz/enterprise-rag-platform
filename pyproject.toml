@@ -22,6 +22,8 @@ dev = [
     "ruff>=0.9",
     "mypy>=1.14",
     "alembic>=1.20.1",
+    "fpdf2>=2.8",
+    "python-docx>=1.1",
 ]
 
 # ------------------------------- ruff -------------------------------
@@ -82,6 +84,20 @@ mypy_path = ["packages/core/src", "packages/contracts/src", "apps/api/src", "app
 [[tool.mypy.overrides]]
 module = ["tests.*"]
 disallow_untyped_defs = false
+
+# 解析/OCR 相关库缺类型存根。它们都有运行时校验兜底（try/except + 能力检测），
+# 且调用点集中在 parsers/ 内，风险可控。
+[[tool.mypy.overrides]]
+module = [
+    "pymupdf.*",
+    "fitz.*",
+    "docx2txt.*",
+    "pptx.*",
+    "openpyxl.*",
+    "pytesseract.*",
+    "docx.*",
+]
+ignore_missing_imports = true
 
 # ----------------------------- pytest -------------------------------
 [tool.pytest.ini_options]
