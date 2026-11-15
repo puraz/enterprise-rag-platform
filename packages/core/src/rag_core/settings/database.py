@@ -33,6 +33,12 @@ class DatabaseSettings(BaseModel):
     migration_user: str | None = None
     migration_password: SecretStr | None = None
 
+    # 管理角色（BYPASSRLS）：用于合法的跨租户路径——
+    # 首登开通租户/成员、管理端看板、后台对账。
+    # 不配则 `Database.transaction_bypass_rls()` 会明确报错。
+    admin_user: str | None = None
+    admin_password: SecretStr | None = None
+
     # 连接池：这三个数字直接决定"并发上来时会不会把 DB 打爆"
     pool_size: int = Field(default=10, ge=1)
     max_overflow: int = Field(default=10, ge=0)
@@ -74,6 +80,25 @@ class DatabaseSettings(BaseModel):
         password_value = (
             self.migration_password.get_secret_value()
             if self.migration_password is not None
+            else self.password.get_secret_value()
+        )
+        password = quote(password_value, safe="")
+        raw = f"postgresql+asyncpg://{user}:{password}@{self.host}:{self.port}/{self.name}"
+        return SecretStr(raw)
+
+    @property
+    def admin_dsn(self) -> SecretStr | None:
+        """管理角色 DSN（BYPASSRLS）。未配置时返回 None。
+
+        **绝不能把它当默认连接串用**：绕过 RLS 意味着任何漏写
+        `WHERE tenant_id` 的查询都会读到全部租户的数据。
+        """
+        if not self.admin_user:
+            return None
+        user = quote(self.admin_user, safe="")
+        password_value = (
+            self.admin_password.get_secret_value()
+            if self.admin_password is not None
             else self.password.get_secret_value()
         )
         password = quote(password_value, safe="")

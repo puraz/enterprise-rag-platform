@@ -8,6 +8,10 @@ dependencies = [
     "rag-contracts",
     # api 通过仓储层访问数据，不直接写 SQL
     "rag-db",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "httpx>=0.27",
+    "pyjwt>=2.9",
 ]
 
 # 告诉 uv：这些依赖来自同 workspace 的本地目录，不要跑去 PyPI 找。

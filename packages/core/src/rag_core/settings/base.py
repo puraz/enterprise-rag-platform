@@ -21,6 +21,7 @@ from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from rag_core.settings.database import DatabaseSettings
+from rag_core.settings.identity import IdentitySettings
 from rag_core.settings.redis import RedisSettings
 
 # RAG_ENV 要参与"选哪个 .env 文件"，所以常量单独暴露
@@ -69,8 +70,22 @@ class Settings(BaseSettings):
     # 留空表示"按环境推导"，见 resolved_log_format
     log_format: Literal["json", "console"] | None = None
 
+    # ---- 开发用身份提供者 ----
+    # 默认关闭：生产环境绝不该有这个能力。
+    # 开启后 `/api/v1/auth/dev-login` 才会被注册，且接受 `dev:<subject>` 凭证。
+    # 三重防护见 DevIdentityProvider 的 docstring。
+    dev_auth_enabled: bool = False
+
+    # 启动时是否等待并校验依赖（PG/Redis）。
+    # 自动化测试（尤其只测 HTTP 契约的用例）可以关掉它，
+    # 让测试不依赖真实数据库，更快也更稳定。
+    # **生产绝不该关**：那样进程会在依赖不可用时"启动成功"，
+    # 所有请求都失败，而编排器以为实例健康。
+    startup_dependency_check: bool = True
+
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
+    identity: IdentitySettings = Field(default_factory=IdentitySettings)
 
     @property
     def resolved_log_format(self) -> Literal["json", "console"]:
@@ -98,6 +113,26 @@ class Settings(BaseSettings):
 
         if self.debug:
             problems.append("RAG_DEBUG=true 不允许出现在生产")
+
+        # 开发身份提供者绝不能在生产开启：
+        # 它接受 `dev:<任意subject>` 就能变成任意用户，等于无鉴权。
+        if self.dev_auth_enabled:
+            problems.append("RAG_DEV_AUTH_ENABLED=true 不允许出现在生产")
+
+        # JWT 签名密钥必须换掉默认值，否则任何人都能伪造 token
+        if self.identity.jwt_secret in DEV_SECRET_VALUES or len(self.identity.jwt_secret) < 32:
+            problems.append("RAG_IDENTITY__JWT_SECRET 仍是默认值或长度不足 32")
+
+        # 生产必须用非对称签名：HS256 要求所有验证方共享密钥，
+        # 任何一个服务被攻破就等于签发权泄漏
+        if self.identity.jwt_algorithm == "HS256":
+            problems.append("生产环境应使用 RS256 等非对称算法，而非 HS256")
+
+        # 生产必须做启动依赖检查：
+        # 关掉它意味着依赖挂掉时进程"启动成功"，编排器以为实例健康，
+        # 但所有请求都 500 —— 比启动失败难排查得多。
+        if not self.startup_dependency_check:
+            problems.append("RAG_STARTUP_DEPENDENCY_CHECK=false 不允许出现在生产")
 
         if problems:
             joined = "；".join(problems)

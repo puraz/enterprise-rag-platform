@@ -479,3 +479,49 @@ export interface FieldError {
   /** 校验器错误类型标识 */
   type: string;
 }
+
+/** 开发登录请求（仅非生产可用）。 */
+export interface DevLoginRequest {
+  /** dev 凭证，格式 `dev:<subject>` 或 `dev:<issuer>:<subject>` */
+  credential: string;
+}
+
+/** 登录成功的响应。 */
+export interface LoginResponse {
+  /** 本系统签发的 access token */
+  access_token: string;
+  /** 固定为 Bearer */
+  token_type?: string;
+  /** token 过期时间（Unix 秒），前端据此提前刷新 */
+  expires_at: number;
+  /** 本地用户 ID */
+  user_id: string;
+  /** 当前激活的租户 ID */
+  tenant_id: string;
+  email: string;
+  display_name: string;
+  /** 是否本次登录新建的用户（首登） */
+  is_new_user: boolean;
+}
+
+/** `GET /me` 的响应。 */
+export interface CurrentUserResponse {
+  user_id: string;
+  tenant_id: string;
+  email: string;
+  display_name: string;
+  status: string;
+  platform_role: string;
+  /** 当前租户内的角色（owner/admin/…），非成员时为 null */
+  tenant_role?: string | null;
+}
+
+/** 健康检查响应。 */
+export interface HealthResponse {
+  /** ok / degraded / error */
+  status: string;
+  version: string;
+  environment: string;
+  /** 各依赖的检查结果（ok / 错误摘要） */
+  checks?: Record<string, string>;
+}

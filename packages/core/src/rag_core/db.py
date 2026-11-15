@@ -88,6 +88,37 @@ class Database:
             autoflush=False,
         )
 
+        # 管理引擎：用 BYPASSRLS 角色，专门跑合法的跨租户路径
+        # （首登开通租户、管理端看板、对账任务）。
+        #
+        # **懒创建**：多数进程（纯 worker）用不到它，无谓占连接。
+        # 未配置 management 角色时保持 None，调用方会得到明确错误。
+        self._admin_engine: AsyncEngine | None = None
+        self._admin_factory: async_sessionmaker[AsyncSession] | None = None
+
+    def _ensure_admin_engine(self) -> async_sessionmaker[AsyncSession]:
+        """惰性创建管理引擎。"""
+        if self._admin_factory is not None:
+            return self._admin_factory
+
+        admin_dsn = self._settings.database.admin_dsn
+        if admin_dsn is None:
+            raise DependencyUnavailableError(
+                "未配置管理角色（RAG_DATABASE__ADMIN_USER），跨租户路径不可用"
+            )
+
+        self._admin_engine = create_async_engine(
+            admin_dsn.get_secret_value(),
+            pool_size=2,
+            max_overflow=1,
+            pool_pre_ping=True,
+            pool_recycle=1800,
+        )
+        self._admin_factory = async_sessionmaker(
+            bind=self._admin_engine, expire_on_commit=False, autoflush=False
+        )
+        return self._admin_factory
+
     @property
     def engine(self) -> AsyncEngine:
         """底层引擎。只给迁移脚本和测试用，业务代码不要碰。"""
@@ -163,24 +194,24 @@ class Database:
 
     @asynccontextmanager
     async def transaction_bypass_rls(self) -> AsyncIterator[AsyncSession]:
-        """不设置租户上下文的事务，供合法的跨租户路径使用。
+        """跨租户事务：用**管理角色**连接，真正绕过 RLS。
 
-        典型场景：
+        典型场景（都是合法但确实跨租户的）：
+        - 首登开通租户与成员关系（此时还没有租户上下文）；
         - 管理端看板统计所有租户；
-        - 后台对账（扫全部租户的孤儿 blob）；
+        - 后台对账（扫全部租户的孤儿 blob、过期上传会话）；
         - 数据迁移与修复。
 
         **这个方法的调用点必须能被审计追到**：它绕过了租户隔离，
-        误用就是越权。建议只在 `rag_api.services.admin_*` 和
-        `rag_worker.jobs.*` 里使用，且每次调用都写审计。
+        误用就是越权。约定只在 `rag_api.services.admin_*`、
+        `rag_api.services.auth`（首登）与 `rag_worker.jobs.*` 里使用。
 
-        注意：只有连接角色具备 BYPASSRLS 或不设策略时才真正"绕过"。
-        普通角色（rag_app）在没有 app.tenant_id 时看到的是**零行**，
-        不是全部行 —— 这是有意的安全默认。
+        需要配置 `RAG_DATABASE__ADMIN_USER`（BYPASSRLS 角色）。
+        未配置时抛 `DependencyUnavailableError`——明确失败好过
+        "看起来能跑但什么都读不到"。
         """
-        # 显式设成一个不可能匹配的哨兵值？不——留空让策略拒绝所有行，
-        # 需要跨租户时必须改用 rag_admin 角色（有 BYPASSRLS）。
-        async with self._session_factory() as session, session.begin():
+        factory = self._ensure_admin_engine()
+        async with factory() as session, session.begin():
             yield session
 
     async def ping(self) -> None:
@@ -216,6 +247,10 @@ class Database:
 
     async def close(self) -> None:
         """释放连接池。进程退出、测试清理时必须调用。"""
+        if self._admin_engine is not None:
+            await self._admin_engine.dispose()
+            self._admin_engine = None
+            self._admin_factory = None
         await self._engine.dispose()
 
 

@@ -638,6 +638,171 @@
       ],
       "title": "FieldError",
       "type": "object"
+    },
+    "DevLoginRequest": {
+      "additionalProperties": false,
+      "description": "开发登录请求（仅非生产可用）。",
+      "properties": {
+        "credential": {
+          "description": "dev 凭证，格式 `dev:<subject>` 或 `dev:<issuer>:<subject>`",
+          "examples": [
+            "dev:alice"
+          ],
+          "maxLength": 200,
+          "minLength": 5,
+          "title": "Credential",
+          "type": "string"
+        }
+      },
+      "required": [
+        "credential"
+      ],
+      "title": "DevLoginRequest",
+      "type": "object"
+    },
+    "LoginResponse": {
+      "description": "登录成功的响应。",
+      "properties": {
+        "access_token": {
+          "description": "本系统签发的 access token",
+          "title": "Access Token",
+          "type": "string"
+        },
+        "token_type": {
+          "default": "Bearer",
+          "description": "固定为 Bearer",
+          "title": "Token Type",
+          "type": "string"
+        },
+        "expires_at": {
+          "description": "token 过期时间（Unix 秒），前端据此提前刷新",
+          "title": "Expires At",
+          "type": "integer"
+        },
+        "user_id": {
+          "description": "本地用户 ID",
+          "format": "uuid",
+          "title": "User Id",
+          "type": "string"
+        },
+        "tenant_id": {
+          "description": "当前激活的租户 ID",
+          "format": "uuid",
+          "title": "Tenant Id",
+          "type": "string"
+        },
+        "email": {
+          "title": "Email",
+          "type": "string"
+        },
+        "display_name": {
+          "title": "Display Name",
+          "type": "string"
+        },
+        "is_new_user": {
+          "description": "是否本次登录新建的用户（首登）",
+          "title": "Is New User",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "access_token",
+        "expires_at",
+        "user_id",
+        "tenant_id",
+        "email",
+        "display_name",
+        "is_new_user"
+      ],
+      "title": "LoginResponse",
+      "type": "object"
+    },
+    "CurrentUserResponse": {
+      "description": "`GET /me` 的响应。",
+      "properties": {
+        "user_id": {
+          "format": "uuid",
+          "title": "User Id",
+          "type": "string"
+        },
+        "tenant_id": {
+          "format": "uuid",
+          "title": "Tenant Id",
+          "type": "string"
+        },
+        "email": {
+          "title": "Email",
+          "type": "string"
+        },
+        "display_name": {
+          "title": "Display Name",
+          "type": "string"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "platform_role": {
+          "title": "Platform Role",
+          "type": "string"
+        },
+        "tenant_role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "当前租户内的角色（owner/admin/…），非成员时为 null",
+          "title": "Tenant Role"
+        }
+      },
+      "required": [
+        "user_id",
+        "tenant_id",
+        "email",
+        "display_name",
+        "status",
+        "platform_role"
+      ],
+      "title": "CurrentUserResponse",
+      "type": "object"
+    },
+    "HealthResponse": {
+      "description": "健康检查响应。",
+      "properties": {
+        "status": {
+          "description": "ok / degraded / error",
+          "title": "Status",
+          "type": "string"
+        },
+        "version": {
+          "title": "Version",
+          "type": "string"
+        },
+        "environment": {
+          "title": "Environment",
+          "type": "string"
+        },
+        "checks": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "各依赖的检查结果（ok / 错误摘要）",
+          "title": "Checks",
+          "type": "object"
+        }
+      },
+      "required": [
+        "status",
+        "version",
+        "environment"
+      ],
+      "title": "HealthResponse",
+      "type": "object"
     }
   }
 }

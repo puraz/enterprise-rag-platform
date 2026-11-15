@@ -37,6 +37,7 @@ def json_logs() -> Iterator[io.StringIO]:
         env="prod",
         log_format="json",
         database={"password": "a-real-strong-secret"},
+        identity={"jwt_secret": "a-production-grade-secret-value-32+", "jwt_algorithm": "RS256"},
     )
     setup_logging(settings, stream=stream)
     yield stream
@@ -274,7 +275,10 @@ def test_repeated_setup_does_not_duplicate_lines() -> None:
     """重复调用 setup_logging 不能产生重复日志行。"""
     stream = io.StringIO()
     settings = Settings(
-        env="prod", log_format="json", database={"password": "a-real-strong-secret"}
+        env="prod",
+        log_format="json",
+        database={"password": "a-real-strong-secret"},
+        identity={"jwt_secret": "a-production-grade-secret-value-32+", "jwt_algorithm": "RS256"},
     )
     setup_logging(settings, stream=stream)
     setup_logging(settings, stream=stream)

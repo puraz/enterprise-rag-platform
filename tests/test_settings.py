@@ -85,6 +85,8 @@ def test_dsn_url_encodes_password(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_production_rejects_development_password(monkeypatch: pytest.MonkeyPatch) -> None:
     """生产环境带开发默认密码必须启动失败——这是复制模板最容易带上去的雷。"""
     monkeypatch.setenv("RAG_ENV", "prod")
+    monkeypatch.setenv("RAG_IDENTITY__JWT_SECRET", "a-production-grade-secret-value-32+")
+    monkeypatch.setenv("RAG_IDENTITY__JWT_ALGORITHM", "RS256")
     with pytest.raises(ValidationError, match="生产环境配置不安全"):
         Settings()
 
@@ -92,6 +94,8 @@ def test_production_rejects_development_password(monkeypatch: pytest.MonkeyPatch
 def test_production_rejects_debug_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     """生产开 debug 会泄漏调用栈与内部路径，必须拦。"""
     monkeypatch.setenv("RAG_ENV", "prod")
+    monkeypatch.setenv("RAG_IDENTITY__JWT_SECRET", "a-production-grade-secret-value-32+")
+    monkeypatch.setenv("RAG_IDENTITY__JWT_ALGORITHM", "RS256")
     monkeypatch.setenv("RAG_DATABASE__PASSWORD", "a-real-strong-secret")
     monkeypatch.setenv("RAG_DEBUG", "true")
     with pytest.raises(ValidationError, match="RAG_DEBUG"):
@@ -103,6 +107,8 @@ def test_production_with_real_secret_passes_and_uses_json_logs(
 ) -> None:
     """生产配置合法时应当通过，且日志自动切 JSON。"""
     monkeypatch.setenv("RAG_ENV", "prod")
+    monkeypatch.setenv("RAG_IDENTITY__JWT_SECRET", "a-production-grade-secret-value-32+")
+    monkeypatch.setenv("RAG_IDENTITY__JWT_ALGORITHM", "RS256")
     monkeypatch.setenv("RAG_DATABASE__PASSWORD", "a-real-strong-secret")
     settings = Settings()
     assert settings.env is RunEnv.PROD

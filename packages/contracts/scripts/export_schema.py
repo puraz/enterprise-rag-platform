@@ -16,6 +16,12 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from rag_contracts.api.auth import (
+    CurrentUserResponse,
+    DevLoginRequest,
+    HealthResponse,
+    LoginResponse,
+)
 from rag_contracts.enums import (
     AuditAction,
     AuditOutcome,
@@ -50,8 +56,14 @@ from rag_contracts.errors import ErrorCategory, ErrorCode, ErrorResponse, FieldE
 
 # 需要导出的模型。新增对外契约模型时加到这里。
 EXPORTED_MODELS: tuple[type[BaseModel], ...] = (
+    # 错误契约
     ErrorResponse,
     FieldError,
+    # 认证契约
+    DevLoginRequest,
+    LoginResponse,
+    CurrentUserResponse,
+    HealthResponse,
 )
 
 # 需要导出的枚举。导出成 TS 字符串联合类型，而不是 TS enum

@@ -10,11 +10,13 @@ from rag_core.settings.base import (
     reload_settings,
 )
 from rag_core.settings.database import DatabaseSettings
+from rag_core.settings.identity import IdentitySettings
 from rag_core.settings.redis import RedisSettings
 
 __all__ = [
     "ENV_SELECTOR",
     "DatabaseSettings",
+    "IdentitySettings",
     "RedisSettings",
     "RunEnv",
     "Settings",
