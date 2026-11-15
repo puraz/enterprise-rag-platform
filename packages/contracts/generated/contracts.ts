@@ -475,6 +475,64 @@ export type ModelCallStatus =
   | "rate_limited"
   | "content_filtered";
 
+/** 会话状态。 */
+export type ConversationStatus =
+  | "active"
+  | "archived";
+
+/**
+ * 消息角色。
+ * 与 `LLMRole`（provider 层）分开：这里是**业务角色**，
+ * 将来可能要加 `tool`（工具返回）等业务概念，而 provider 层
+ * 只认识 system/user/assistant 三种。
+ */
+export type MessageRole =
+  | "user"
+  | "assistant";
+
+/**
+ * 消息状态。
+ * ## 为什么助手消息需要 5 种状态
+ * 流式回答不是原子的：可能生成到一半断连、可能被自省判为无依据、
+ * 可能供应商报错。用 `success`/`failed` 两态无法表达
+ * "用户看到了部分内容但没写完"——而那恰恰是最需要记录的情况
+ * （前端要显示"回答中断"，且这条消息不该进评估集）。
+ */
+export type MessageStatus =
+  | "pending"
+  | "streaming"
+  | "completed"
+  | "interrupted"
+  | "failed";
+
+/**
+ * 拒答原因。
+ * `docs/PROMPT.md` 要求"无依据拒答"。拒答必须记录原因，
+ * 否则无法回答"为什么这个月拒答率涨了 3 倍"。
+ */
+export type RefusalReason =
+  | "no_materials"
+  | "insufficient_evidence"
+  | "prompt_injection_suspected";
+
+/** 用户反馈。 */
+export type FeedbackRating =
+  | "like"
+  | "dislike";
+
+/**
+ * 点踩原因（可选，用于构建改进数据集）。
+ * 固定枚举而不是自由文本：自由文本无法聚合统计，
+ * 而"哪类问题最常被踩"是优化 prompt 的关键输入。
+ */
+export type FeedbackReason =
+  | "not_relevant"
+  | "wrong_fact"
+  | "incomplete"
+  | "no_citation"
+  | "too_verbose"
+  | "other";
+
 // =========================== 数据模型 ===========================
 
 /** 统一错误响应体。所有非 2xx 响应都必须是这个形状。 */
@@ -774,5 +832,70 @@ export interface AnswerWithCitations {
   /** 引用列表，按 index 升序 */
   citations?: Citation[];
   /** 是否走了降级路径（如 reranker 挂→只用 RRF、主模型挂→备用模型）。降级时前端应给用户明确提示，不能悄悄降级。 */
+  degraded?: boolean;
+}
+
+/**
+ * 发起一次问答。
+ * ## 为什么 `conversation_id` 可选
+ * - 空：新建会话（首轮问答）；
+ * - 非空：在该会话内追问（服务端取历史做独立化改写）。
+ * 服务端会校验该会话属于当前用户——**跨用户访问返回 404**
+ * （不泄漏"这个 ID 是否存在"）。
+ */
+export interface ChatRequest {
+  /** 用户问题。上限 4000 字符——超过这个长度的问题本身不合法（应拆成多次提问） */
+  query: string;
+  /** 会话 ID。空则新建会话 */
+  conversation_id?: string | null;
+  /** 限定的知识库。空表示租户内全部可见库。上限 20：太多库会让检索范围过宽、召回质量下降 */
+  knowledge_base_ids?: string[];
+}
+
+/** 会话列表项。 */
+export interface ConversationItem {
+  id: string;
+  title: string;
+  status: ConversationStatus;
+  knowledge_base_id?: string | null;
+  message_count: number;
+  last_message_at?: string | null;
+  created_at: string;
+  updated_at: string;
+  /** 本会话累计成本（展示用） */
+  total_cost_usd: number;
+}
+
+/** 消息项。 */
+export interface MessageItem {
+  id: string;
+  conversation_id: string;
+  sequence: number;
+  role: MessageRole;
+  content: string;
+  status: MessageStatus;
+  refused?: boolean;
+  refusal_reason?: RefusalReason | null;
+  /** 引用列表（只含本轮检索来源） */
+  citations?: Citation[];
+  created_at: string;
+  input_tokens?: number;
+  output_tokens?: number;
+  cost_usd?: number;
+  latency_ms?: number | null;
+}
+
+/** SSE `done` 事件的 payload。 */
+export interface ChatDonePayload {
+  message_id: string;
+  conversation_id: string;
+  refused?: boolean;
+  refusal_reason?: RefusalReason | null;
+  citations?: Citation[];
+  input_tokens?: number;
+  output_tokens?: number;
+  cost_usd?: number;
+  latency_ms?: number;
+  /** 是否走了降级路径（供应商降级/rerank 挂） */
   degraded?: boolean;
 }

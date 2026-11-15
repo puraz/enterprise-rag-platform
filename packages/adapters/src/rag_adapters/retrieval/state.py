@@ -156,6 +156,17 @@ class RetrievalState:
     """用户原始查询。**永不改写**——改写结果放 `rewritten_query`，
     这样对比实验与排障时能看出"改写导致的差异"。"""
 
+    history: list[tuple[str, str]] = field(default_factory=list)
+    """多轮历史 `[(role, content), ...]`（时间正序）。
+
+    **只用于两处**：
+    1. 改写时做指代消解（"那二线呢" → "二线城市住宿标准"）；
+    2. 上层拼生成 prompt 时提供上下文。
+
+    **不参与检索**：检索只用 `rewritten_query`（独立化后的）。
+    把整段历史塞进检索会稀释查询语义（用户上一轮问的是别的事）。
+    """
+
     rewritten_query: str | None = None
     candidates: list[RetrievedChunk] = field(default_factory=list)
     """当前候选集（每阶段替换顺序，但保留 chunk_id 集合）。"""

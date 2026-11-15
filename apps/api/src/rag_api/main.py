@@ -112,6 +112,29 @@ def _build_lifespan(settings: Settings) -> Any:
                 storage_backends=list(storages),
             )
 
+            # 5. 模型 provider（**进程级单例，按需构造**）
+            #
+            # ## 为什么不在启动时无条件构造（实测踩到的坑）
+            #
+            # 第一版在这里直接 `build_llm_provider(settings)`，结果：
+            # 所有只需要鉴权/健康检查的测试都因为"未配置 RAG_LLM__API_KEY"
+            # 而起不来。**问答能力缺失不该让整个 API 起不来**——
+            # 上传、鉴权、知识库管理都不依赖 LLM。
+            #
+            # 所以改成：**首次真正需要问答时才构造**（见 `get_llm_provider`）。
+            # 构造失败的异常在请求时暴露（500 + 明确错误码），
+            # 而不是让进程启动失败。
+            #
+            # 但**配置探测要提前**：启动日志里明确写"LLM 未配置"，
+            # 否则"问答 500"会变成没人知道原因的谜。
+            llm_configured = bool(settings.llm.api_key)
+            if not llm_configured:
+                log.warning(
+                    "llm_not_configured",
+                    impact="问答接口（/api/v1/chat）不可用，其它接口正常",
+                    hint="设置 RAG_LLM__API_KEY",
+                )
+
             app.state.settings = settings
             app.state.database = database
             app.state.redis = redis
@@ -119,10 +142,33 @@ def _build_lifespan(settings: Settings) -> Any:
             app.state.storage = primary_storage
             app.state.storages = storages
             app.state.app_version = _app_version()
+            # 惰性持有：第一次访问时才构造（线程/协程安全由 GIL 与
+            # 单次赋值保证——两个请求同时构造会各建一个，但都正确，
+            # 只是多一个 httpx client。可接受，不值得为它加锁）
+            app.state._llm_provider = None
+            app.state._embedding_provider = None
+
+            log.info(
+                "model_providers_lazy",
+                llm_configured=llm_configured,
+                llm_model=settings.llm.chat_model,
+                embedding_model=settings.embedding.model_name,
+                embedding_dim=settings.embedding.dimension,
+                note="provider 在首次使用时构造；embedding 模型首次向量化时加载",
+            )
 
             yield
         finally:
-            # 关闭顺序与创建相反：Redis 先关（它更轻量），DB 后关
+            # 关闭顺序与创建相反：先关 provider（释放模型显存与连接池），
+            # 再 Redis（更轻量），最后 DB。
+            import contextlib
+
+            if getattr(app.state, "_llm_provider", None) is not None:
+                with contextlib.suppress(Exception):
+                    await app.state._llm_provider.aclose()
+            if getattr(app.state, "_embedding_provider", None) is not None:
+                with contextlib.suppress(Exception):
+                    await app.state._embedding_provider.aclose()
             await redis.close()
             await database.close()
             log.info("shutdown_complete")
@@ -209,6 +255,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_v1.include_router(build_me_router())
     api_v1.include_router(uploads_router)
     api_v1.include_router(admin_audit_router)
+    # 问答与会话（A16）：SSE 流式 chat + 会话 CRUD + 反馈
+    from rag_api.api.v1.chat import router as chat_router
+
+    api_v1.include_router(chat_router)
 
     app.include_router(health_router)
     app.include_router(api_v1)
@@ -220,3 +270,46 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         routes=len(app.routes),
     )
     return app
+
+
+# ---------------------------------------------------------------- 惰性 provider
+
+
+def get_llm_provider(app: Any) -> Any:
+    """取（或首次构造）LLM provider。
+
+    进程级单例：httpx 连接池复用。首次访问构造，
+    失败时抛 `ConfigError`（明确告知"没配 API key"）。
+
+    ## 为什么不在启动时构造
+
+    问答能力缺失不该让整个 API 起不来——上传、鉴权、知识库管理
+    都不依赖 LLM。启动时硬失败会让"没配 key"变成"服务不可用"。
+    """
+    existing = getattr(app.state, "_llm_provider", None)
+    if existing is not None:
+        return existing
+
+    from rag_adapters.providers.factory import build_llm_provider
+
+    provider = build_llm_provider(app.state.settings)
+    app.state._llm_provider = provider
+    return provider
+
+
+def get_embedding_provider(app: Any) -> Any:
+    """取（或首次构造）Embedding provider。
+
+    `LocalBGEEmbedding.__init__` 只存配置，模型在首次 `embed_batch`
+    时才加载——所以首次问答会有 13 秒的模型加载延迟（实测），
+    后续走缓存。
+    """
+    existing = getattr(app.state, "_embedding_provider", None)
+    if existing is not None:
+        return existing
+
+    from rag_adapters.providers.factory import build_embedding_provider
+
+    provider = build_embedding_provider(app.state.settings)
+    app.state._embedding_provider = provider
+    return provider

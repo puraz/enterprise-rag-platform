@@ -2,6 +2,7 @@
 
 from rag_db.repositories.audit import AuditRepository, ModelCallRepository
 from rag_db.repositories.chunk import ChunkRepository, IndexVersionRepository
+from rag_db.repositories.conversation import ConversationRepository, MessageRepository
 from rag_db.repositories.identity import (
     MembershipRepository,
     TenantRepository,
@@ -24,10 +25,12 @@ __all__ = [
     "AuditRepository",
     "BlobRepository",
     "ChunkRepository",
+    "ConversationRepository",
     "DocumentRepository",
     "IndexVersionRepository",
     "KnowledgeBaseRepository",
     "MembershipRepository",
+    "MessageRepository",
     "ModelCallRepository",
     "OutboxRepository",
     "TaskRepository",

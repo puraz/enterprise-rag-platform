@@ -80,6 +80,11 @@ RLS_TABLES: tuple[str, ...] = (
     "tasks",
     "outbox_messages",
     "model_calls",
+    # 对话域（A16）：会话与消息都是租户内资源。
+    # **必须在 RLS 清单里**：消息正文是用户提问与回答，
+    # 不隔离意味着能读到别的租户的对话内容——隐私事故。
+    "conversations",
+    "messages",
 )
 
 # 审计日志单独处理：tenant_id 可为 NULL（全局事件），

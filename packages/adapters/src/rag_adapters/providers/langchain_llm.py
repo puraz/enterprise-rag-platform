@@ -47,7 +47,7 @@ LangGraph 的一等公民，自研 Provider 得写适配器。
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import httpx
@@ -122,6 +122,23 @@ def _to_usage(message: AIMessage) -> TokenUsage:
         cached_tokens=cached,
         reasoning_tokens=reasoning,
     )
+
+
+def _usage_from_metadata(metadata: dict[str, Any]) -> TokenUsage:
+    """从流式 chunk 的 `usage_metadata` 转 TokenUsage。
+
+    与 `_to_usage` 同一套字段语义（见其 docstring），
+    但入参是裸 dict 而不是 AIMessage —— 流式 chunk 的
+    `usage_metadata` 是 dict，没有 message 包装。
+
+    **不复用 `_to_usage`** 是为了避免构造一个假的 AIMessage：
+    那会让"这里为什么要造一个空 message"变成需要解释的困惑。
+    """
+
+    class _Fake:
+        usage_metadata = metadata
+
+    return _to_usage(_Fake())  # type: ignore[arg-type]
 
 
 def _classify_error(exc: BaseException) -> LLMProviderError:
@@ -226,6 +243,17 @@ class LangChainLLMProvider(LLMProvider):
         )
 
     @property
+    def model_name(self) -> str:
+        """配置的 chat_model（用于查单价、写 model_calls）。
+
+        注意与 `LLMResponse.model` 的区别：那是**响应里**供应商实际
+        使用的模型名（DeepSeek 可能把下线模型路由到新模型）。
+        查单价用配置名（本地要知道"我们想用哪个"），
+        记账用响应名（"实际按哪个计费"）——两者都记。
+        """
+        return self._model_name
+
+    @property
     def capabilities(self) -> ProviderCapabilities:
         """能力声明。
 
@@ -323,12 +351,22 @@ class LangChainLLMProvider(LLMProvider):
         temperature: float = 0.7,
         max_tokens: int | None = None,
         timeout_s: float | None = None,
+        usage_callback: Callable[[TokenUsage], None] | None = None,
     ) -> AsyncIterator[str]:
         """流式补全，逐块产出文本增量。
 
         SSE 的边界处理（`data:` 前缀、`[DONE]`、跨 chunk 的半行）
         都由 LangChain 负责——这正是自研实现最容易出坑的地方。
+
+        ## usage 只出现在最后一个 chunk
+
+        OpenAI 兼容协议（含 DeepSeek）在**最后一个** chunk 的
+        `usage` 字段给总用量，中间的 chunk 是 null。所以：
+        - 生成过程中拿不到成本（只能等结束）；
+        - 必须显式取最后一个 chunk 的 `usage_metadata`，
+          否则流式路径的成本永远是 0（A5 实现漏了这个）。
         """
+        last_usage: TokenUsage | None = None
         llm = self._llm
         if model is not None and model != self._model_name:
             llm = llm.bind(model=model)  # type: ignore[assignment]
@@ -339,6 +377,13 @@ class LangChainLLMProvider(LLMProvider):
 
         try:
             async for chunk in llm.astream(_to_lc_messages(messages)):
+                # 每个 chunk 都可能带 usage_metadata，最后一个才是完整值。
+                # 用 `=` 而不是 `+=`：LangChain 在流式里给的是**累计值**
+                # （最后一个 chunk 含全部），累加会翻倍。
+                metadata = getattr(chunk, "usage_metadata", None)
+                if metadata:
+                    last_usage = _usage_from_metadata(metadata)
+
                 if isinstance(chunk.content, str) and chunk.content:
                     yield chunk.content
                 elif isinstance(chunk.content, list):
@@ -348,6 +393,11 @@ class LangChainLLMProvider(LLMProvider):
                             yield str(part.get("text") or "")
         except Exception as exc:
             raise _classify_error(exc) from exc
+        finally:
+            # 无论正常结束还是异常中断，都把已拿到的 usage 回调出去。
+            # 异常时也回调：供应商可能已生成部分 token 并计费。
+            if usage_callback is not None and last_usage is not None:
+                usage_callback(last_usage)
 
     async def health(self) -> bool:
         """探活：一次极小的真实调用。

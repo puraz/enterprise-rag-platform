@@ -75,12 +75,21 @@ class FakeReranker:
 
 
 class FakeRewriter:
+    """假的改写器。
+
+    **签名必须带 history**：多轮独立化需要历史（"那二线呢" 无历史无法消解）。
+    早期协议是 `(query) -> str`，改签名时这个替身会立刻报错——
+    这正是测试替身该起的作用（协议变了要显式改）。
+    """
+
     def __init__(self, rewritten: str) -> None:
         self.rewritten = rewritten
         self.calls: list[str] = []
+        self.histories: list[list[tuple[str, str]]] = []
 
-    async def __call__(self, query: str) -> str:
+    async def __call__(self, query: str, *, history: list[tuple[str, str]]) -> str:
         self.calls.append(query)
+        self.histories.append(list(history))
         return self.rewritten
 
 
@@ -482,3 +491,66 @@ def test_refusal_message_is_user_facing() -> None:
     """拒答话术要给出下一步动作，而不是冷冰冰的"无法回答"。"""
     assert "无法回答" in REFUSAL_MESSAGE
     assert "换个问法" in REFUSAL_MESSAGE
+
+
+# ==================================================== 多轮：历史传递（A16）
+
+
+async def test_history_is_passed_to_rewriter() -> None:
+    """**多轮的核心机制**：历史必须传到改写器，否则无法做指代消解。
+
+    实测场景：用户第 2 轮问"那二线呢？"——这句话单独检索召回为零。
+    必须靠历史把它独立化成"二线城市住宿标准是多少"。
+    """
+    vector = FakeVectorSearcher([("c1", "二线城市 400 元", 0.1)])
+    rewriter = FakeRewriter("二线城市住宿标准是多少")
+    graph = RetrievalGraph(
+        vector_searcher=vector,
+        rewriter=rewriter,
+        config=RetrievalConfig(use_rewrite=True),
+    )
+
+    history = [
+        ("user", "一线城市住宿多少"),
+        ("assistant", "每晚不超过 600 元"),
+    ]
+    state = await graph.run("那二线呢？", history=history)
+
+    # 改写器收到了历史
+    assert rewriter.histories[0] == history
+    # 检索用的是独立化后的问题
+    assert vector.calls[0][0] == "二线城市住宿标准是多少"
+    # 原始问题保留（用户看到的）
+    assert state.query == "那二线呢？"
+    assert state.rewritten_query == "二线城市住宿标准是多少"
+
+
+async def test_history_does_not_pollute_retrieval() -> None:
+    """历史**不参与检索**——只用于改写与生成。
+
+    把整段历史塞进检索会稀释查询语义（用户上一轮问的是别的事）。
+    """
+    vector = FakeVectorSearcher([("c1", "内容", 0.1)])
+    graph = RetrievalGraph(
+        vector_searcher=vector,
+        config=RetrievalConfig(use_rewrite=False),
+    )
+
+    await graph.run("当前问题", history=[("user", "很久以前的问题")])
+
+    # 检索只用了当前问题，没混入历史
+    assert vector.calls[0][0] == "当前问题"
+
+
+async def test_empty_history_for_first_turn() -> None:
+    """首轮没有历史时改写器收到空列表（不是 None）。"""
+    rewriter = FakeRewriter("")
+    graph = RetrievalGraph(
+        vector_searcher=FakeVectorSearcher([("c1", "x", 0.1)]),
+        rewriter=rewriter,
+        config=RetrievalConfig(use_rewrite=True),
+    )
+
+    await graph.run("第一个问题")
+
+    assert rewriter.histories[0] == []

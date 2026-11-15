@@ -39,7 +39,7 @@ Provider 只负责传输。
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -178,6 +178,17 @@ class LLMProvider(ABC):
     name: str = "unknown"
 
     @property
+    def model_name(self) -> str:
+        """当前使用的模型标识（配置的 chat_model）。
+
+        **成本核算必须要它**：`LLMSettings.pricing` 按模型名索引，
+        取不到名字就查不到单价，成本会记 0（账永远不平）。
+
+        默认实现返回 `name`（供应商名），子类应覆盖为实际模型名。
+        """
+        return self.name
+
+    @property
     @abstractmethod
     def capabilities(self) -> ProviderCapabilities:
         """当前模型的能力。路由层据此匹配。"""
@@ -211,6 +222,7 @@ class LLMProvider(ABC):
         temperature: float = 0.7,
         max_tokens: int | None = None,
         timeout_s: float | None = None,
+        usage_callback: Callable[[TokenUsage], None] | None = None,
     ) -> AsyncIterator[str]:
         """流式补全，逐块产出文本。
 
@@ -223,6 +235,15 @@ class LLMProvider(ABC):
         真调了不支持的实现得到空流，比拿到半截内容更容易发现。
 
         需要流式的实现（如 DeepSeek）直接覆盖本方法。
+
+        Args:
+            usage_callback: 流结束时回调 final usage。**必须提供**才能
+                做精确成本核算——流式响应通常只在**最后一个 chunk**
+                带 usage，而 `yield` 的只有文本增量。
+
+                为什么用回调而不是返回 `(text, usage)` 元组：
+                改返回类型会破坏所有既有调用方（`async for x in stream()`
+                拿到的是元组）。回调是向后兼容的加法。
         """
         if not self.capabilities.supports_stream:
             # 返回空异步迭代器：调用方遍历它不会得到任何元素。
@@ -235,3 +256,13 @@ class LLMProvider(ABC):
     async def health(self) -> bool:
         """供应商是否可用。默认 True（本地实现无需健康检查）。"""
         return True
+
+    async def aclose(self) -> None:  # noqa: B027 - 可选钩子，非抽象方法
+        """释放资源（关闭 httpx 连接池等）。
+
+        **有意不做成 abstractmethod**：与 `EmbeddingProvider.aclose` 同理——
+        不是所有实现都有资源要释放。但**必须声明在基类上**：
+        否则调用方拿到 `LLMProvider` 类型时无法调用（mypy 报
+        "has no attribute aclose"），只能 `hasattr` 判断或 ignore 类型，
+        两者都是把"接口不完整"的代价转嫁给每个调用方。
+        """

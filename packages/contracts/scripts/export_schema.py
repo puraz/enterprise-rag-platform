@@ -23,6 +23,12 @@ from rag_contracts.api.auth import (
     HealthResponse,
     LoginResponse,
 )
+from rag_contracts.api.chat import (
+    ChatDonePayload,
+    ChatRequest,
+    ConversationItem,
+    MessageItem,
+)
 from rag_contracts.api.citations import AnswerWithCitations, Citation
 from rag_contracts.api.pagination import PageMeta, PageRequest
 from rag_contracts.api.success import CreatedResource, TaskAccepted
@@ -42,19 +48,25 @@ from rag_contracts.enums import (
     ChunkingStrategy,
     ChunkType,
     ConfidentialityLevel,
+    ConversationStatus,
     DistanceMetric,
     DocumentFormat,
     DocumentStatus,
     DocumentVersionStatus,
+    FeedbackRating,
+    FeedbackReason,
     IndexType,
     IndexVersionStatus,
     KnowledgeBaseStatus,
     KnowledgeBaseVisibility,
     MembershipStatus,
+    MessageRole,
+    MessageStatus,
     ModelCallStatus,
     ModelTaskType,
     OutboxStatus,
     PlatformRole,
+    RefusalReason,
     RetrievalMode,
     SourceType,
     TaskStatus,
@@ -94,6 +106,11 @@ EXPORTED_MODELS: tuple[type[BaseModel], ...] = (
     # 字段名漂移只会在联调时暴露。
     Citation,
     AnswerWithCitations,
+    # 对话契约（A16）
+    ChatRequest,
+    ConversationItem,
+    MessageItem,
+    ChatDonePayload,
 )
 
 # 需要导出的枚举。导出成 TS 字符串联合类型，而不是 TS enum
@@ -141,6 +158,13 @@ EXPORTED_ENUMS: dict[str, type] = {
     "AuditTargetType": AuditTargetType,
     "ModelTaskType": ModelTaskType,
     "ModelCallStatus": ModelCallStatus,
+    # ---- 对话域（rag_contracts.enums.conversations，A16）----
+    "ConversationStatus": ConversationStatus,
+    "MessageRole": MessageRole,
+    "MessageStatus": MessageStatus,
+    "RefusalReason": RefusalReason,
+    "FeedbackRating": FeedbackRating,
+    "FeedbackReason": FeedbackReason,
 }
 
 

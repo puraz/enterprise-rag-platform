@@ -721,3 +721,37 @@ FastAPI 默认的 `{"detail": ...}` 已由全局处理器转换，不得绕过�
   需要多采样——跳过并在 `note` 里写明原因，不要用 n=1 硬跑。
 - **`EvaluationResult` 不要用 `dict()` 转换**（0.4 版会抛 `KeyError: 0`），
   用 `result["faithfulness"]` 字符串键。
+
+### 4.19 对话链路规范（多轮 RAG）
+
+- **检索用独立化问题，生成用完整历史**。第 2 轮"那二线呢？"单独检索召回为零，
+  必须先用历史做指代消解：`history + query → standalone_query`，
+  用 standalone 检索。生成时带历史（否则模型不知在问什么）。
+- **`QueryRewriter` 签名必须带 history**：`(query, *, history) -> str`。
+  早期 `(query) -> str` 只能做同义改写，做不了指代消解——多轮下致命。
+- **历史裁剪必须成对丢弃**（2 条 = 1 轮）：只丢 `user` 留 `assistant`
+  会让模型看到"凭空出现的回答"，开始瞎猜或复述。
+  从**最旧**开始丢（最近几轮才相关）。
+- **同一会话不能并发提问**：两个请求同时基于同一历史改写，各写一条消息，
+  历史里两条并列（互不知情）→ 下一轮追问时模型看到错乱对话。
+  用 `SELECT ... FOR UPDATE NOWAIT` + 持锁只覆盖"分配序号 + 读历史"，
+  **不覆盖 LLM 生成**（否则追问要排队）。
+- **序号分配用会话行原子递增**（`UPDATE conversations SET message_count+1
+  RETURNING`），不用 `max(sequence)+1`——并发下会撞唯一约束。
+- **SSE 必须感知断连**：捕获 `CancelledError` 先落库（保留部分内容）
+  再 `raise`；否则 LLM 继续生成到结束（浪费钱）且消息永远停在 `streaming`。
+  另需 `X-Accel-Buffering: no`（Nginx 默认缓冲 SSE，表现为"等 5 秒后一次涌出"）。
+- **消息状态需 5 态**（pending/streaming/completed/interrupted/failed）：
+  两态无法表达"用户看到部分内容但没写完"——而那恰恰最需要记录。
+- **流式 usage 靠回调收集**：OpenAI 兼容协议只在最后一个 chunk 给 usage，
+  而 `stream()` 只 yield 文本。`stream(usage_callback=...)` 是向后兼容的加法。
+  不收集则流式路径成本恒为 0（账不平）。
+- **`ModelPricing` 必须用 `price_at(now)`**：它有 peak/off_peak 两档，
+  DeepSeek 峰时价是谷时 2 倍。直接读 `.input` 会 AttributeError
+  （字段在 `TokenPricing` 上）。缓存单价 `input_cached` 也要取（是常规的 1/30）。
+- **`LLMProvider.model_name` 必须是公开属性**：查单价靠它。
+  只有私有 `_model_name` 会让调用方回退到供应商名，单价查不到 → 成本恒 0。
+- **`UPDATE ... RETURNING ... LIMIT` 不合法**：PostgreSQL 的 LIMIT 只用于 SELECT。
+  改用子查询选 id 再更新。
+- **审计在 `finally` 里写**：流结束/出错/断连都要留痕。
+  审计 `details` 不放问题原文（保留期长且可能含 PII），只放 ID 与计数。

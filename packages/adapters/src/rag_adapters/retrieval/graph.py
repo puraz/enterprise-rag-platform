@@ -77,10 +77,32 @@ class Reranker(Protocol):
 
 
 class QueryRewriter(Protocol):
-    """查询改写（由调用方用 LLM 实现）。"""
+    """查询改写 / 独立化（由调用方用 LLM 实现）。
 
-    async def __call__(self, query: str) -> str:
-        """返回改写后的查询。返回空串表示"不该改写"。"""
+    ## 为什么签名带 history
+
+    多轮对话里用户会说"那二线呢？"——这句话**单独拿去检索召回为零**
+    （不含任何可检索语义）。必须先做**指代消解**：
+
+        history: [user: 一线城市住宿多少, assistant: 每晚不超过 600 元]
+        query:   "那二线呢？"
+        → standalone: "二线城市差旅住宿标准是多少"
+
+    然后**用 standalone 去检索**，而生成时仍用完整历史 + standalone。
+
+    早期版本的签名是 `(query) -> str`（只有当前问题，拿不到历史），
+    那样只能做"同义改写"（"报销" → "费用报销"），做不了指代消解。
+    多轮场景下这个限制是致命的，所以改成 `(query, history) -> str`。
+
+    `history` 是 `(role, content)` 列表，按时间正序。
+    实现应该：
+    - 首轮（history 为空）→ 通常原样返回（不需要改写）；
+    - 有指代（"那""这个""上面说的"）→ 结合历史消解；
+    - 不确定时返回空串（调用方回退到原问题，保守）。
+    """
+
+    async def __call__(self, query: str, *, history: list[tuple[str, str]]) -> str:
+        """返回独立化后的检索查询。返回空串表示"不改写，用原问题"。"""
         ...
 
 
@@ -137,7 +159,16 @@ class RetrievalGraph:
         if cfg.use_self_check and self._self_check is None:
             raise ValueError("use_self_check=True 但未提供 self_checker")
 
-    async def run(self, query: str) -> RetrievalState:
+    async def run(
+        self, query: str, *, history: list[tuple[str, str]] | None = None
+    ) -> RetrievalState:
+        """执行检索。
+
+        Args:
+            query: 当前问题（用户原始输入）。
+            history: 多轮历史 `[(role, content), ...]`（时间正序）。
+                用于独立化改写（指代消解）。
+        """
         """执行检索（不含生成）。
 
         用顺序调用而不是 LangGraph 的 `ainvoke`：
@@ -148,12 +179,14 @@ class RetrievalGraph:
         （自省不通过 → 重新检索 → 再自省）。等真需要循环时
         再改成 StateGraph，而不是为了用框架而用框架。
         """
-        state = RetrievalState(query=query)
+        state = RetrievalState(query=query, history=list(history or []))
 
-        # ---- 1. 改写（可选）----
+        # ---- 1. 改写 / 独立化（可选，多轮必需）----
         if self.config.use_rewrite and self._rewriter is not None:
             started = time.perf_counter()
-            rewritten = await self._rewriter(query)
+            # **必须传历史**：多轮里的"那二线呢"没有历史就无法独立化，
+            # 直接拿去检索召回为零。
+            rewritten = await self._rewriter(query, history=state.history)
             state.record_timing("rewrite", started)
             if rewritten.strip():
                 state.rewritten_query = rewritten.strip()
