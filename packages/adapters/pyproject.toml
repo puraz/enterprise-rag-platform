@@ -15,6 +15,11 @@ dependencies = [
     # LLM（langchain-openai 自带 openai SDK），不自研 HTTP 客户端
     "langchain-core>=0.3",
     "langchain-openai>=0.3",
+    # 检索图：路由 / 改写 / 自省这些节点是状态机 + 条件跳转，
+    # 手写 if-else 编排会让"哪个节点在什么条件下被走到"难以追踪。
+    # LangGraph 提供显式图结构 + 可中断/可恢复的状态，且能导出执行轨迹
+    # （A11 要求"每个节点耗时可见"，B4 要求"链路可视化"）。
+    "langgraph>=0.2",
     # 本地 embedding（bge-m3）+ CUDA
     "sentence-transformers>=3.3",
     "torch>=2.5",

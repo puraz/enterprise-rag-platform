@@ -1,0 +1,207 @@
+{
+  "label": "with-keyword-v2",
+  "k": 10,
+  "timestamp": "20261115T115509Z",
+  "elapsed_s": 16.982343224000942,
+  "metrics": {
+    "recall": 1.0,
+    "mrr": 0.9545454545454546,
+    "hit_rate": 1.0,
+    "false_positive_rate": 1.0,
+    "avg_latency_ms": 707.5890844174259
+  },
+  "cases": [
+    {
+      "id": "q01",
+      "query": "一线城市出差住宿每晚最多能报销多少",
+      "category": "direct",
+      "first_hit_rank": 1,
+      "latency_ms": 15863.787465001224,
+      "retrieved_count": 10
+    },
+    {
+      "id": "q02",
+      "query": "出差申请需要谁来审批",
+      "category": "direct",
+      "first_hit_rank": 2,
+      "latency_ms": 50.68028099776711,
+      "retrieved_count": 10
+    },
+    {
+      "id": "q03",
+      "query": "报销单最晚什么时候提交",
+      "category": "direct",
+      "first_hit_rank": 1,
+      "latency_ms": 49.967685001320206,
+      "retrieved_count": 10
+    },
+    {
+      "id": "q04",
+      "query": "单次招待客户花了八千元，需要谁批",
+      "category": "reasoning",
+      "first_hit_rank": 1,
+      "latency_ms": 49.363553000148386,
+      "retrieved_count": 10
+    },
+    {
+      "id": "q05",
+      "query": "出差两周住宿标准有变化吗",
+      "category": "reasoning",
+      "first_hit_rank": 1,
+      "latency_ms": 48.85405700042611,
+      "retrieved_count": 10
+    },
+    {
+      "id": "q06",
+      "query": "坐飞机可以坐商务舱吗",
+      "category": "multi_snippet",
+      "first_hit_rank": 1,
+      "latency_ms": 48.699845996452495,
+      "retrieved_count": 10
+    },
+    {
+      "id": "q07",
+      "query": "招待费报销需要什么附件",
+      "category": "direct",
+      "first_hit_rank": 1,
+      "latency_ms": 47.982151998439804,
+      "retrieved_count": 10
+    },
+    {
+      "id": "q08",
+      "query": "紧急出差能不能先走再说",
+      "category": "paraphrase",
+      "first_hit_rank": 1,
+      "latency_ms": 48.362301000452135,
+      "retrieved_count": 10
+    },
+    {
+      "id": "q09",
+      "query": "试用期多久，工资怎么算",
+      "category": "multi_snippet",
+      "first_hit_rank": 1,
+      "latency_ms": 48.42348200327251,
+      "retrieved_count": 10
+    },
+    {
+      "id": "q10",
+      "query": "入职第一天要办哪些手续",
+      "category": "direct",
+      "first_hit_rank": 1,
+      "latency_ms": 48.90539099869784,
+      "retrieved_count": 10
+    },
+    {
+      "id": "q11",
+      "query": "年假有几天，怎么算的",
+      "category": "direct",
+      "first_hit_rank": 1,
+      "latency_ms": 48.13210199790774,
+      "retrieved_count": 10
+    },
+    {
+      "id": "q12",
+      "query": "迟到了会扣钱吗",
+      "category": "paraphrase",
+      "first_hit_rank": 1,
+      "latency_ms": 48.97676900145598,
+      "retrieved_count": 10
+    },
+    {
+      "id": "q13",
+      "query": "一个月能在家办公几天",
+      "category": "paraphrase",
+      "first_hit_rank": 1,
+      "latency_ms": 48.89121200540103,
+      "retrieved_count": 10
+    },
+    {
+      "id": "q14",
+      "query": "工资几号发",
+      "category": "direct",
+      "first_hit_rank": 1,
+      "latency_ms": 49.8597090045223,
+      "retrieved_count": 10
+    },
+    {
+      "id": "q15",
+      "query": "绩效考核多长时间做一次",
+      "category": "direct",
+      "first_hit_rank": 1,
+      "latency_ms": 49.1589869998279,
+      "retrieved_count": 10
+    },
+    {
+      "id": "q16",
+      "query": "想辞职要提前多久说",
+      "category": "paraphrase",
+      "first_hit_rank": 1,
+      "latency_ms": 47.85860199626768,
+      "retrieved_count": 10
+    },
+    {
+      "id": "q17",
+      "query": "陪产假有多少天",
+      "category": "direct",
+      "first_hit_rank": 1,
+      "latency_ms": 47.25021000194829,
+      "retrieved_count": 10
+    },
+    {
+      "id": "q18",
+      "query": "密码要求多长，多久换一次",
+      "category": "multi_snippet",
+      "first_hit_rank": 1,
+      "latency_ms": 48.3671200054232,
+      "retrieved_count": 10
+    },
+    {
+      "id": "q19",
+      "query": "客户名单属于哪个密级",
+      "category": "reasoning",
+      "first_hit_rank": 2,
+      "latency_ms": 47.638181000365876,
+      "retrieved_count": 10
+    },
+    {
+      "id": "q20",
+      "query": "笔记本丢了怎么办",
+      "category": "paraphrase",
+      "first_hit_rank": 1,
+      "latency_ms": 47.3836780001875,
+      "retrieved_count": 10
+    },
+    {
+      "id": "q21",
+      "query": "收到可疑钓鱼邮件该找谁",
+      "category": "paraphrase",
+      "first_hit_rank": 1,
+      "latency_ms": 48.42837100295583,
+      "retrieved_count": 10
+    },
+    {
+      "id": "q22",
+      "query": "跟外部公司合作要签什么",
+      "category": "direct",
+      "first_hit_rank": 1,
+      "latency_ms": 48.54102700483054,
+      "retrieved_count": 10
+    },
+    {
+      "id": "q23",
+      "query": "公司股票期权怎么兑现",
+      "category": "unanswerable",
+      "first_hit_rank": null,
+      "latency_ms": 48.79636799887521,
+      "retrieved_count": 10
+    },
+    {
+      "id": "q24",
+      "query": "食堂几点开饭",
+      "category": "unanswerable",
+      "first_hit_rank": null,
+      "latency_ms": 47.82947700005025,
+      "retrieved_count": 10
+    }
+  ]
+}

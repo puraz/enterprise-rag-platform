@@ -1,0 +1,30 @@
+{"id": "q01", "query": "一线城市出差住宿每晚最多能报销多少", "doc": "01-travel-policy.md", "relevant_snippets": ["一线城市（北京、上海、广州、深圳）每晚不超过 600 元"], "category": "direct"}
+{"id": "q02", "query": "出差申请需要谁来审批", "doc": "01-travel-policy.md", "relevant_snippets": ["出差申请经直属上级审批后方可预订机票与酒店"], "category": "direct"}
+{"id": "q03", "query": "报销单最晚什么时候提交", "doc": "01-travel-policy.md", "relevant_snippets": ["员工应在费用发生后 30 日内提交报销申请"], "category": "direct"}
+{"id": "q04", "query": "单次招待客户花了八千元，需要谁批", "doc": "01-travel-policy.md", "relevant_snippets": ["单次招待金额超过 5000 元须经分管副总审批"], "category": "reasoning"}
+{"id": "q05", "query": "出差两周住宿标准有变化吗", "doc": "01-travel-policy.md", "relevant_snippets": ["连续出差超过 7 天的，从第 8 天起住宿标准可上浮 20%"], "category": "reasoning"}
+{"id": "q06", "query": "坐飞机可以坐商务舱吗", "doc": "01-travel-policy.md", "relevant_snippets": ["总监及以上职级可乘坐高铁商务座与飞机商务舱", "国际航班飞行时间超过 8 小时的，经济舱员工可申请商务舱"], "category": "multi_snippet"}
+{"id": "q07", "query": "招待费报销需要什么附件", "doc": "01-travel-policy.md", "relevant_snippets": ["招待费用报销时须附发票、招待清单与客户签字确认单"], "category": "direct"}
+{"id": "q08", "query": "紧急出差能不能先走再说", "doc": "01-travel-policy.md", "relevant_snippets": ["紧急出差（客户现场故障、突发商务谈判）可先出行后补审批"], "category": "paraphrase"}
+{"id": "q09", "query": "试用期多久，工资怎么算", "doc": "02-hr-handbook.md", "relevant_snippets": ["试用期为三个月", "试用期工资为转正后的百分之八十"], "category": "multi_snippet"}
+{"id": "q10", "query": "入职第一天要办哪些手续", "doc": "02-hr-handbook.md", "relevant_snippets": ["新员工入职当天须完成以下手续：签订劳动合同"], "category": "direct"}
+{"id": "q11", "query": "年假有几天，怎么算的", "doc": "02-hr-handbook.md", "relevant_snippets": ["年假按工龄计算：入职满一年享五天，满三年享十天，满五年享十五天"], "category": "direct"}
+{"id": "q12", "query": "迟到了会扣钱吗", "doc": "02-hr-handbook.md", "relevant_snippets": ["迟到超过三十分钟计为旷工半天"], "category": "paraphrase"}
+{"id": "q13", "query": "一个月能在家办公几天", "doc": "02-hr-handbook.md", "relevant_snippets": ["员工每月可申请最多三天远程办公"], "category": "paraphrase"}
+{"id": "q14", "query": "工资几号发", "doc": "02-hr-handbook.md", "relevant_snippets": ["工资于每月十五日发放"], "category": "direct"}
+{"id": "q15", "query": "绩效考核多长时间做一次", "doc": "02-hr-handbook.md", "relevant_snippets": ["绩效考核每半年一次"], "category": "direct"}
+{"id": "q16", "query": "想辞职要提前多久说", "doc": "02-hr-handbook.md", "relevant_snippets": ["员工离职须提前三十日书面通知（试用期内提前三日）"], "category": "paraphrase"}
+{"id": "q17", "query": "陪产假有多少天", "doc": "02-hr-handbook.md", "relevant_snippets": ["男员工享十五天陪产假"], "category": "direct"}
+{"id": "q18", "query": "密码要求多长，多久换一次", "doc": "03-security-policy.md", "relevant_snippets": ["密码长度不少于十二位", "密码每九十天更换一次"], "category": "multi_snippet"}
+{"id": "q19", "query": "客户名单属于哪个密级", "doc": "03-security-policy.md", "relevant_snippets": ["秘密数据：客户名单、合同条款、财务明细、源代码"], "category": "reasoning"}
+{"id": "q20", "query": "笔记本丢了怎么办", "doc": "03-security-policy.md", "relevant_snippets": ["设备丢失或被盗须在二十四小时内报告信息安全部"], "category": "paraphrase"}
+{"id": "q21", "query": "收到可疑钓鱼邮件该找谁", "doc": "03-security-policy.md", "relevant_snippets": ["报告渠道为 security@example.com 或内线 8888"], "category": "paraphrase"}
+{"id": "q22", "query": "跟外部公司合作要签什么", "doc": "03-security-policy.md", "relevant_snippets": ["与第三方共享数据前须签订保密协议"], "category": "direct"}
+{"id": "q23", "query": "公司股票期权怎么兑现", "doc": null, "relevant_snippets": [], "category": "unanswerable"}
+{"id": "q24", "query": "食堂几点开饭", "doc": null, "relevant_snippets": [], "category": "unanswerable"}
+{"id": "q25", "query": "security@example.com 这个邮箱是干什么的", "doc": "03-security-policy.md", "relevant_snippets": ["报告渠道为 security@example.com 或内线 8888"], "category": "keyword_sensitive"}
+{"id": "q26", "query": "内线 8888 是哪个部门的电话", "doc": "03-security-policy.md", "relevant_snippets": ["报告渠道为 security@example.com 或内线 8888"], "category": "keyword_sensitive"}
+{"id": "q27", "query": "五险一金是按什么基数交的", "doc": "02-hr-handbook.md", "relevant_snippets": ["公司为员工缴纳五险一金，缴费基数按当地规定执行"], "category": "keyword_sensitive"}
+{"id": "q28", "query": "发票抬头要写什么", "doc": "01-travel-policy.md", "relevant_snippets": ["发票须为增值税普通发票或专用发票，抬头为公司全称"], "category": "keyword_sensitive"}
+{"id": "q29", "query": "京沪广深算几线城市", "doc": "01-travel-policy.md", "relevant_snippets": ["一线城市（北京、上海、广州、深圳）每晚不超过 600 元"], "category": "keyword_sensitive"}
+{"id": "q30", "query": "差额发票和定额发票能报吗", "doc": "01-travel-policy.md", "relevant_snippets": ["定额发票、手写发票不予受理"], "category": "keyword_sensitive"}

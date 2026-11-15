@@ -70,6 +70,10 @@ RLS_TABLES: tuple[str, ...] = (
     "document_versions",
     "blobs",
     "chunks",
+    # A10 旁表：一个 chunk 每个索引版本一条向量。
+    # **必须在 RLS 表里**：它同样带 tenant_id，且内容是文档正文的向量——
+    # 不隔离等于可以通过向量相似度探测别的租户有什么内容。
+    "chunk_embeddings",
     "index_versions",
     "upload_sessions",
     "tenant_memberships",
