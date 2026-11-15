@@ -8,9 +8,9 @@
 朴素实现（Python 读-判断-写）在并发下必然超发：
 
 ```python
-remaining = redis.get(key)     # 两个请求都读到 10
-if remaining > 0:              # 两个都判断通过
-    redis.decr(key)            # 实际只该放行 1 个
+remaining = redis.get(key)  # 两个请求都读到 10
+if remaining > 0:  # 两个都判断通过
+    redis.decr(key)  # 实际只该放行 1 个
 ```
 
 实测验证（`test_concurrent_requests_never_exceed_burst`）：

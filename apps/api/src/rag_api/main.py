@@ -45,7 +45,11 @@ from rag_api.api.v1.uploads import router as uploads_router
 from rag_api.errors_handlers import register_exception_handlers
 from rag_api.identity.factory import available_providers
 from rag_api.identity.tokens import TokenService
-from rag_api.middleware import AccessLogMiddleware, RequestContextMiddleware
+from rag_api.middleware import (
+    AccessLogMiddleware,
+    MetricsMiddleware,
+    RequestContextMiddleware,
+)
 from rag_api.security.pii import redact_text as redact_pii
 from rag_core.db import Database, wait_until_ready
 from rag_core.errors import ConfigError
@@ -175,8 +179,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url="/openapi.json" if not resolved.env.is_production_like else None,
     )
 
-    # 中间件：注册顺序 = 由外到内，所以 RequestContext 先注册
+    # ---- 指标（Prometheus）----
+    #
+    # 在 lifespan 之外构建：`/metrics` 端点可能在任何请求周期被调用，
+    # 不能等 lifespan 启动才创建。指标本身不依赖外部资源（纯内存计数）。
+    from rag_core.metrics import build_metrics
+
+    metrics = build_metrics()
+    app.state.metrics = metrics
+
+    # 中间件：注册顺序 = 由外到内，所以 RequestContext 先注册。
+    #
+    # MetricsMiddleware 放在最内层（最后注册）：它需要 `scope["route"]`
+    # 已由路由器填充，否则拿到的是 None，所有请求都归到 __unmatched__。
     app.add_middleware(AccessLogMiddleware)
+    app.add_middleware(MetricsMiddleware, metrics=metrics)
     app.add_middleware(RequestContextMiddleware)
 
     register_exception_handlers(app)

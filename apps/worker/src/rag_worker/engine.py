@@ -226,10 +226,22 @@ class WorkerEngine:
         self._tenant_sessions = tenant_session_factory
         self._stats = WorkerStats()
         self._shutdown = asyncio.Event()
+        # 指标（可选）：worker 不跑 HTTP 服务，指标通过单独的
+        # metrics 端点进程暴露（或推送到 Pushgateway）。
+        # 传 None 时跳过记录，不影响任务执行。
+        self._metrics: Any = None
 
     @property
     def stats(self) -> WorkerStats:
         return self._stats
+
+    def attach_metrics(self, metrics: Any) -> None:
+        """接入 Prometheus 指标。
+
+        单独一个方法而不是构造参数：worker 可能在测试里不装配指标，
+        强制传参会让所有测试都要造一个 fake metrics。
+        """
+        self._metrics = metrics
 
     @property
     def should_stop(self) -> bool:
@@ -355,11 +367,21 @@ class WorkerEngine:
             return
 
         self._stats.succeeded += 1
+        elapsed = time.perf_counter() - started
+        if self._metrics is not None:
+            from rag_core.metrics import record_task
+
+            record_task(
+                self._metrics,
+                task_type=task_type,
+                outcome="succeeded",
+                duration_s=elapsed,
+            )
         log.info(
             "task_succeeded",
             task_id=str(task_id),
             task_type=task_type,
-            elapsed_s=round(time.perf_counter() - started, 2),
+            elapsed_s=round(elapsed, 2),
         )
 
     async def _mark_complete(self, *, task_id: uuid.UUID) -> bool:
@@ -459,6 +481,16 @@ class WorkerEngine:
             )
             self._stats.failed += 1
             return
+
+        if self._metrics is not None:
+            from rag_core.metrics import record_task
+
+            record_task(
+                self._metrics,
+                task_type=task_type,
+                outcome="dead" if new_state == TaskStatus.DEAD.value else "failed",
+                duration_s=time.perf_counter() - started,
+            )
 
         if new_state == TaskStatus.DEAD.value:
             self._stats.dead += 1

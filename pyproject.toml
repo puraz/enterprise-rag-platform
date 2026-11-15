@@ -117,6 +117,8 @@ module = [
     "openpyxl.*",
     "pytesseract.*",
     "docx.*",
+    # Langfuse 是可选依赖（A14）：未安装时应该降级而不是让 mypy 报错
+    "langfuse.*",
 ]
 ignore_missing_imports = true
 

@@ -1,0 +1,203 @@
+# Prometheus 告警规则。
+#
+# ## 每条规则都要能回答"我该做什么"
+#
+# 告警的失败模式不是"不够灵敏"，而是"太多噪音让人开始忽略"。
+# 所以每条规则的命名带动作倾向（`APIDown` 而不是 `APIMetric`），
+# 注释里写清"看到这条该查什么"。
+#
+# ## 阈值不是拍的
+#
+# 每条都注明依据。没有依据的阈值（"P99 > 1s 就告警"）会在正常业务
+# 波动时反复触发，最终被静音——比不设告警更糟。
+groups:
+  - name: rag-availability
+    interval: 30s
+    rules:
+      # ---- 可用性 ----
+      - alert: APIDown
+        expr: up{job="rag-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "API 实例 {{ $labels.instance }} 不可达"
+          description: |
+            抓取端点连续 2 分钟失败。
+            先看容器是否在重启（`docker ps` / `kubectl get pods`），
+            再看启动日志里是否有配置或依赖错误。
+          runbook: "docs/runbook.md#api-down"
+
+      - alert: HighErrorRate
+        # 5xx 占全部请求的 5% 以上。用 rate 而不是总数：
+        # 总数在流量高峰时天然很大，无法区分"流量大"和"出错多"。
+        expr: |
+          (
+            sum(rate(rag_http_requests_total{status=~"5.."}[5m]))
+            /
+            sum(rate(rag_http_requests_total[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "5xx 错误率 {{ $value | humanizePercentage }}"
+          description: |
+            查看 rag_http_errors_total 里哪个 code_name 占比最高，
+            再用该 code_name 搜日志拿 request_id。
+            5xx 表示"我们的问题"（4xx 是调用方的问题，不在此告警）。
+
+      # ---- 延迟 ----
+      - alert: HighAPILatency
+        # P95 > 2s。依据：正常问答链路（检索 50ms + LLM 3~5s）中，
+        # 非 LLM 接口应在 500ms 内；2s 已是明显异常。
+        # **不含 chat 接口**（它天然慢，单独规则见下）。
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le, route) (rate(rag_http_request_duration_seconds_bucket[5m]))
+          ) > 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "路由 {{ $labels.route }} P95 延迟 {{ $value | humanizeDuration }}"
+          description: |
+            按 route 定位：如果是 /api/v1/documents 系列，看数据库慢查询；
+            如果是 /api/v1/uploads，看存储后端（S3 超时常见）。
+
+      - alert: SlowRetrieval
+        # 检索 P95 > 500ms。依据：A11 实测基线是 6ms（小语料），
+        # 大规模下 100ms 内应可控；500ms 说明索引没用上（见 A10 的
+        # random_page_cost 与部分索引两个坑）。
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le, strategy) (rate(rag_retrieval_duration_seconds_bucket[5m]))
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "检索 P95 {{ $value | humanizeDuration }}（strategy={{ $labels.strategy }}）"
+          description: |
+            执行 `EXPLAIN ANALYZE` 确认是否用了 HNSW 索引。
+            两个已知原因：random_page_cost 过高、HNSW 用了部分索引。
+
+  - name: rag-llm
+    interval: 30s
+    rules:
+      # ---- 供应商可用性 ----
+      - alert: LLMBreakerOpen
+        # 熔断器状态 > 1 表示 half_open 或 open（0=closed 1=half_open 2=open）。
+        # 用 > 1 只抓真正熔断，half_open 是恢复试探阶段，不该告警。
+        expr: rag_llm_breaker_state > 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "供应商 {{ $labels.provider }} 熔断中"
+          description: |
+            所有请求会快速失败（走降级或返回 503）。
+            检查：供应商状态页、API key 是否过期、网络是否可达。
+
+      - alert: LLMErrorRateHigh
+        expr: |
+          (
+            sum by (provider, model) (rate(rag_llm_calls_total{status!="success"}[5m]))
+            /
+            sum by (provider, model) (rate(rag_llm_calls_total[5m]))
+          ) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.provider }}/{{ $labels.model }} 失败率 {{ $value | humanizePercentage }}"
+          description: |
+            查看日志里该模型对应的 error_code：rate_limit 要限流，
+            auth 要换 key，invalid_response 要检查协议变更。
+
+      - alert: LLMDegradedToFallback
+        # 降级调用占比 > 20%。
+        #
+        # 为什么 20%：偶发超时导致的降级是正常的（主供应商抖动），
+        # 但持续两成以上说明主路径有系统性问题（限流、区域性故障、
+        # 模型下线）。阈值太低会被正常抖动触发，太高则发现太晚。
+        expr: |
+          (
+            sum(rate(rag_llm_calls_total{is_fallback="true"}[5m]))
+            /
+            sum(rate(rag_llm_calls_total[5m]))
+          ) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "降级调用占比 {{ $value | humanizePercentage }}"
+          description: |
+            降级意味着用户拿到的是备用模型的结果（可能质量下降，且
+            响应里应带 degraded 标记）。
+            检查主供应商的健康状态与熔断器指标。
+
+  - name: rag-cost
+    interval: 60s
+    rules:
+      - alert: HighTokenUsage
+        # 单次调用输出 token P95 > 8000。依据：多数模型的默认
+        # max_tokens 是 4096~8192，接近上限说明经常被截断
+        # （答案不完整）或 prompt 太啰嗦。
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le, task) (rate(rag_llm_tokens_bucket{kind="output"}[15m]))
+          ) > 8000
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.task }} 输出 token P95 = {{ $value }}"
+          description: |
+            接近模型上限会导致答案被截断（finish_reason=length）。
+            检查 prompt 里的上下文是否过长（final_limit 太大）。
+
+      - alert: CostSpike
+        # 单次调用成本 P95 > $0.05。依据：DeepSeek 定价下，
+        # 一次典型问答（2K 输入 + 500 输出）约 $0.0007；
+        # $0.05 意味着 70 倍，通常是上下文失控。
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le, task) (rate(rag_llm_cost_usd_bucket[15m]))
+          ) > 0.05
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.task }} 单次成本 P95 = ${{ $value }}"
+          description: |
+            检查是否有超长文档进了上下文（final_limit / 压缩失效），
+            或某个循环在反复调用（自省重试次数失控）。
+
+  - name: rag-cache
+    interval: 60s
+    rules:
+      - alert: LowCacheHitRate
+        # 命中率 < 30%（仅在有流量时）。依据：问答缓存命中率低于 30%
+        # 说明用户问题过于分散，或 TTL 太短导致频繁失效。
+        expr: |
+          (
+            sum by (namespace) (rate(rag_cache_operations_total{result="hit"}[15m]))
+            /
+            sum by (namespace) (rate(rag_cache_operations_total{result=~"hit|miss"}[15m]))
+          ) < 0.3
+          and
+          sum by (namespace) (rate(rag_cache_operations_total{result="miss"}[15m])) > 1
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: "缓存 {{ $labels.namespace }} 命中率 {{ $value | humanizePercentage }}"
+          description: |
+            命中率低不一定有问题（问题分散是正常的）。
+            但如果成本同时上涨，考虑：加大多查询缓存粒度、
+            或检查失效逻辑是否过于激进。

@@ -17,6 +17,9 @@ dependencies = [
     "asyncpg>=0.30",
     # Redis 异步客户端（连 Valkey 也一样，协议兼容）
     "redis>=5.2",
+    # Prometheus 指标：自带 multiprocess 模式（多 worker 汇总），
+    # 不自研是因为"多进程计数器聚合"有大量边界情况（文件锁、清理、累积语义）
+    "prometheus-client>=0.21",
 ]
 
 [tool.uv.sources]

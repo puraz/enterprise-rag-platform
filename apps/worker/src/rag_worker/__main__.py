@@ -118,6 +118,7 @@ async def run(settings: Settings) -> int:
     database = Database(settings)
     storages = build_all_storages(settings)
     embedding_provider: Any = None
+    tracer: Any = None
 
     try:
         # 启动期就探一次：连不上立刻以退出码 1 结束，
@@ -160,6 +161,25 @@ async def run(settings: Settings) -> int:
             tenant_session_factory=lambda tenant_id: database.transaction(tenant_id=tenant_id),
         )
 
+        # 指标：worker 没有 HTTP 端点，这里只构建并挂到引擎上。
+        # 生产上通过 Pushgateway 推送或由独立的 metrics 进程暴露
+        # （多进程模式下 PROMETHEUS_MULTIPROC_DIR 让各 worker 写入共享目录）。
+        from rag_core.metrics import build_metrics
+
+        engine.attach_metrics(build_metrics())
+        log.info(
+            "worker_metrics_ready",
+            multiproc=settings.env.is_production_like,
+            note="指标已接入；多副本场景需 PROMETHEUS_MULTIPROC_DIR",
+        )
+
+        # 追踪器：未配置凭证时用 LocalTracer（内存记录），
+        # 不会因为缺少 Langfuse 而起不来。
+        from rag_core.tracing import build_tracer
+
+        tracer = build_tracer(enabled=False)
+        log.info("worker_tracer_ready", kind=type(tracer).__name__)
+
         loop = asyncio.get_running_loop()
         _install_signal_handlers(engine, loop)
 
@@ -184,6 +204,8 @@ async def run(settings: Settings) -> int:
         if embedding_provider is not None:
             with contextlib.suppress(Exception):
                 await embedding_provider.aclose()
+        with contextlib.suppress(Exception):
+            await tracer.aclose()
 
         for name, backend in storages.items():
             closer = getattr(backend, "aclose", None)

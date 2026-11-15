@@ -640,3 +640,42 @@ FastAPI 默认的 `{"detail": ...}` 已由全局处理器转换，不得绕过�
 - **`is_fallback` 与 `provider` 必须一起设**：只标降级不记 provider 会让
   降级调用在按 provider 聚合时落到"未知"组——而"降级用了哪家"正是
   最该被看见的信息（实测漏设过，被测试抓到）。
+
+### 4.17 可观测性规范
+
+**脱敏（`rag_core.tracing`）**
+- **脱敏必须在出口做，且默认拒绝**：追踪是旁路，数据发到另一个服务、
+  保留更久、访问控制更松。按键名脱敏（`prompt`/`query`/`answer`/`api_key`
+  → `<redacted:N chars>`），非敏感键的字符串值再过 PII 规则。
+- **保留长度但不保留内容**：`<redacted:1234 chars>` 能判断"上下文有多大"，
+  对排查成本飙升有用且不泄漏。
+- **保留长度信息时断言"原文不出现"**，不要硬编码 `<redacted:N chars>` 的 N
+  ——数错字数会让人误以为脱敏有 bug（实测踩过）。
+
+**指标（`rag_core.metrics`）**
+- **label 基数必须受控**：绝不把 `document_id`/`user_id`/`query`/`path`
+  放进 label。十万文档 = 十万条时间序列，Prometheus 内存被打爆。
+  `test_no_high_cardinality_labels` 用 13 个禁词遍历所有指标做守卫。
+- **HTTP 的 route 用路由模板**（`/api/v1/documents/{doc_id}`），
+  404 统一标 `__unmatched__`——扫描器（`/.env`、`/wp-admin`）
+  会让实际路径的基数爆炸。
+- **指标定义集中在 `metrics.py`**：同名指标重复注册会抛
+  `Duplicated timeseries`。业务代码只调 `record_*()` 函数。
+- **Gauge 不用来记累计值**（进程重启归零，`rate()` 会算出负增长），
+  累计量一律 Counter。
+- **熔断器状态用数值**（0=closed 1=half_open 2=open）而不是 label：
+  Gauge 只支持数值，告警用 `> 1` 表示熔断。
+
+**告警（`deploy/observability/prometheus/alerts.yml`）**
+- **每条规则必须有**：阈值依据（写注释）、排查指引（写 description）、
+  severity 分级。
+- **不要写"占位用的假表达式"**：`(... * 0)` 这类恒为 0 的规则看起来
+  像告警，实际永不触发，比缺失更危险。缺 label 就先补 label。
+- **告警的失败模式是噪音而非迟钝**：没有依据的阈值会在正常波动时
+  反复触发，最终被静音。
+
+**追踪**
+- **追踪失败不能影响业务**，但也不能静默——降级要记 warning。
+- **`build_tracer` 无凭证时降级 LocalTracer 并告警**，不让配置错误
+  变成"服务起不来"。
+- **span 异常路径也要结束**（否则漏记失败节点的耗时）。

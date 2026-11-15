@@ -99,3 +99,45 @@ async def readiness(request: Request, response: Response) -> HealthResponse:
         environment=str(settings.env),
         checks=checks,
     )
+
+
+# ---------------------------------------------------------------- 指标端点
+
+
+@router.get(
+    "/metrics",
+    summary="Prometheus 指标",
+    include_in_schema=False,
+    # 不加 responses=：这是机器读取的端点，OpenAPI 里不需要错误 schema。
+    # tests/test_openapi_contract.py 对 include_in_schema=False 的端点豁免。
+)
+async def metrics_endpoint(request: Request) -> Response:
+    """Prometheus 抓取端点。
+
+    ## 为什么不放在 /api/v1 下
+
+    Prometheus 的默认配置是抓 `http://host:port/metrics`。
+    放进 `/api/v1/metrics` 会让部署时多一层路径重写，
+    且容易被网关的鉴权中间件拦住（Prometheus 通常没有 JWT）。
+
+    ## 为什么不受鉴权保护
+
+    指标里没有业务数据（只有计数、延迟、状态），且抓取端在集群内部。
+    加鉴权会让 Prometheus 配置变复杂（需要配 bearer token 并定期轮换）。
+
+    **但要确保它不暴露业务信息**：指标 label 里没有 document_id、
+    用户 ID、query 内容——这是 `rag_core.metrics` 的硬约束
+    （见该模块 "label 的基数问题"）。
+    """
+    from rag_core.metrics import render_metrics
+
+    metrics = getattr(request.app.state, "metrics", None)
+    if metrics is None:
+        # 测试里可能没装配 metrics：返回空的可解析响应而不是 500，
+        # 否则 Prometheus 会把 "target down" 当成真实告警。
+        return Response(content=b"", media_type="text/plain; version=0.0.4")
+
+    return Response(
+        content=render_metrics(metrics),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )

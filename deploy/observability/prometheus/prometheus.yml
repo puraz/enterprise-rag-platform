@@ -1,0 +1,37 @@
+# Prometheus 抓取配置。
+#
+# ## 为什么 scrape_interval 是 15s
+#
+# 更短（5s）会让时间序列写入放大 3 倍，而告警窗口通常是分钟级
+# （`rate(...[5m])`），5s 的精度对告警没有帮助。
+# 更长（60s）会让短时尖峰被平滑掉，P99 延迟告警会漏。
+#
+# 15s 是"足够精确且存储可控"的平衡点，也是 Prometheus 官方默认值。
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: rag-local
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: rag-api
+    metrics_path: /health/metrics
+    static_configs:
+      # 单机开发环境。生产用服务发现（k8s_sd / consul_sd）而不是静态列表，
+      # 否则扩缩容时配置文件会与真实副本数脱节。
+      - targets: ["host.docker.internal:8000"]
+        labels:
+          service: api
+
+  # Worker 没有 HTTP 端点。两种暴露方式：
+  # 1) 多进程模式 + 一个 sidecar 暴露 /metrics（本配置未展开）
+  # 2) Pushgateway（适合批处理型 worker，但要处理"进程消失后指标残留"）
+  #
+  # 这里先注释掉，等 A15 压测确定 worker 的指标暴露方式。
+  # - job_name: rag-worker
+  #   static_configs:
+  #     - targets: ["host.docker.internal:9101"]

@@ -136,3 +136,69 @@ def _normalize_path(path: str) -> str:
 
 # 类型别名，便于装配函数签名可读
 ASGIMiddleware = Callable[[ASGIApp], Awaitable[None] | ASGIApp]
+
+
+class MetricsMiddleware:
+    """把每个 HTTP 请求记成 Prometheus 指标。
+
+    ## 必须在 AccessLog 里层（先算好状态码）
+
+    Prometheus 的 Counter 需要 status，而 status 在响应开始时才知道。
+    与 AccessLog 一样用 `capture_status` 包装 send。
+
+    ## route label 必须用**路由模板**
+
+    FastAPI 在 `scope["route"]` 里给出模板（`/api/v1/documents/{doc_id}`），
+    用它而不是实际路径：实际路径的 UUID 段会让时间序列数量随数据量爆炸
+    （十万文档 = 十万条 `http_requests_total` 序列，Prometheus 内存被打爆）。
+
+    如果 `route` 不可用（404 之类没匹配到路由），退化为归一化路径。
+    归一化只处理 UUID 与纯数字段，仍有基数风险——所以 404 的
+    route 标注成 `__unmatched__` 而不是实际路径，彻底避免扫描器
+    （`/.env`、`/wp-admin` 这类探测）把基数炸开。
+    """
+
+    def __init__(self, app: ASGIApp, metrics: object) -> None:
+        self.app = app
+        self._metrics = metrics
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        from rag_core.metrics import Metrics
+
+        metrics: Metrics = self._metrics  # type: ignore[assignment]
+        started = time.perf_counter()
+        status_code = 500
+
+        async def capture_status(message: Message) -> None:
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = int(message["status"])
+            await send(message)
+
+        try:
+            await self.app(scope, receive, capture_status)
+        finally:
+            method = str(scope.get("method", "UNKNOWN"))
+            route = _route_label(scope)
+            elapsed = time.perf_counter() - started
+
+            metrics.http_requests.labels(method=method, route=route, status=str(status_code)).inc()
+            metrics.http_request_duration.labels(method=method, route=route).observe(elapsed)
+
+
+def _route_label(scope: Scope) -> str:
+    """取路由模板作为 label。
+
+    Starlette 在请求处理完成后会把命中的 `Route` 放进 `scope["route"]`。
+    未命中（404）时没有 route，**统一标成 `__unmatched__`**——
+    不用实际路径，因为扫描器会用随机路径探测，每个都成一个新序列。
+    """
+    route = scope.get("route")
+    path = getattr(route, "path", None)
+    if path:
+        return str(path)
+    return "__unmatched__"
