@@ -360,6 +360,88 @@
         "failed"
       ],
       "description": "outbox 消息状态。\n\n    至少一次送达：只要消息没有标记为 dispatched，就会一直被轮询重发。\n    消费者必须幂等——这是\"至少一次\"语义的必然要求。"
+    },
+    "AuditAction": {
+      "title": "AuditAction",
+      "type": "string",
+      "enum": [
+        "auth.login",
+        "auth.logout",
+        "auth.token_refresh",
+        "auth.login_failed",
+        "knowledge_base.create",
+        "knowledge_base.update",
+        "knowledge_base.delete",
+        "document.upload",
+        "document.read",
+        "document.download",
+        "document.delete",
+        "document.version_rollback",
+        "retrieval.query",
+        "chat.completion",
+        "security.access_denied",
+        "security.tenant_mismatch",
+        "security.rate_limited",
+        "security.token_reused",
+        "security.prompt_injection",
+        "admin.index_rebuild",
+        "admin.permission_change",
+        "admin.provider_change",
+        "admin.config_change"
+      ],
+      "description": "审计动作类型。\n\n    **命名规则**：`<资源>.<动词>`，全小写下划线连接资源名。\n    值是对外契约的一部分（管理端按此筛选），一旦发布不能改。"
+    },
+    "AuditOutcome": {
+      "title": "AuditOutcome",
+      "type": "string",
+      "enum": [
+        "success",
+        "denied",
+        "failed"
+      ],
+      "description": "操作结果。"
+    },
+    "AuditTargetType": {
+      "title": "AuditTargetType",
+      "type": "string",
+      "enum": [
+        "tenant",
+        "user",
+        "knowledge_base",
+        "document",
+        "document_version",
+        "conversation",
+        "provider",
+        "config"
+      ],
+      "description": "被操作对象的类型。用于按对象查审计（\"这个文档被谁看过\"）。"
+    },
+    "ModelTaskType": {
+      "title": "ModelTaskType",
+      "type": "string",
+      "enum": [
+        "chat",
+        "query_rewrite",
+        "multi_query",
+        "hyde",
+        "context_compress",
+        "embedding",
+        "rerank",
+        "evaluation"
+      ],
+      "description": "模型调用的任务类型。\n\n    成本按任务类型拆分是必需的：`docs/PROMPT.md` 要求\"按租户-功能-模型\n    三维成本拆解\"。没有这个字段，就无法回答\"钱主要花在检索改写还是回答生成上\"。"
+    },
+    "ModelCallStatus": {
+      "title": "ModelCallStatus",
+      "type": "string",
+      "enum": [
+        "success",
+        "failed",
+        "timeout",
+        "rate_limited",
+        "content_filtered"
+      ],
+      "description": "模型调用结果。"
     }
   },
   "models": {

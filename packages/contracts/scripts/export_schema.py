@@ -17,6 +17,9 @@ from typing import Any
 from pydantic import BaseModel
 
 from rag_contracts.enums import (
+    AuditAction,
+    AuditOutcome,
+    AuditTargetType,
     BlobStatus,
     ChunkingStrategy,
     ChunkType,
@@ -30,6 +33,8 @@ from rag_contracts.enums import (
     KnowledgeBaseStatus,
     KnowledgeBaseVisibility,
     MembershipStatus,
+    ModelCallStatus,
+    ModelTaskType,
     OutboxStatus,
     PlatformRole,
     RetrievalMode,
@@ -87,6 +92,12 @@ EXPORTED_ENUMS: dict[str, type[str]] = {
     "TaskType": TaskType,
     "TaskStatus": TaskStatus,
     "OutboxStatus": OutboxStatus,
+    # ---- 审计/成本域（rag_contracts.enums.audit）----
+    "AuditAction": AuditAction,
+    "AuditOutcome": AuditOutcome,
+    "AuditTargetType": AuditTargetType,
+    "ModelTaskType": ModelTaskType,
+    "ModelCallStatus": ModelCallStatus,
 }
 
 

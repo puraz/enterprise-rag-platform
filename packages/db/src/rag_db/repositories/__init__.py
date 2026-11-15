@@ -1,5 +1,6 @@
 """仓储层出口。业务层从这里 import，不直接摸内部模块。"""
 
+from rag_db.repositories.audit import AuditRepository, ModelCallRepository
 from rag_db.repositories.chunk import ChunkRepository, IndexVersionRepository
 from rag_db.repositories.identity import (
     MembershipRepository,
@@ -20,12 +21,14 @@ from rag_db.repositories.task import (
 )
 
 __all__ = [
+    "AuditRepository",
     "BlobRepository",
     "ChunkRepository",
     "DocumentRepository",
     "IndexVersionRepository",
     "KnowledgeBaseRepository",
     "MembershipRepository",
+    "ModelCallRepository",
     "OutboxRepository",
     "TaskRepository",
     "TenantRepository",

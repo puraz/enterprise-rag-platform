@@ -384,6 +384,76 @@ export type OutboxStatus =
   | "dispatched"
   | "failed";
 
+/**
+ * 审计动作类型。
+ * **命名规则**：`<资源>.<动词>`，全小写下划线连接资源名。
+ * 值是对外契约的一部分（管理端按此筛选），一旦发布不能改。
+ */
+export type AuditAction =
+  | "auth.login"
+  | "auth.logout"
+  | "auth.token_refresh"
+  | "auth.login_failed"
+  | "knowledge_base.create"
+  | "knowledge_base.update"
+  | "knowledge_base.delete"
+  | "document.upload"
+  | "document.read"
+  | "document.download"
+  | "document.delete"
+  | "document.version_rollback"
+  | "retrieval.query"
+  | "chat.completion"
+  | "security.access_denied"
+  | "security.tenant_mismatch"
+  | "security.rate_limited"
+  | "security.token_reused"
+  | "security.prompt_injection"
+  | "admin.index_rebuild"
+  | "admin.permission_change"
+  | "admin.provider_change"
+  | "admin.config_change";
+
+/** 操作结果。 */
+export type AuditOutcome =
+  | "success"
+  | "denied"
+  | "failed";
+
+/** 被操作对象的类型。用于按对象查审计（"这个文档被谁看过"）。 */
+export type AuditTargetType =
+  | "tenant"
+  | "user"
+  | "knowledge_base"
+  | "document"
+  | "document_version"
+  | "conversation"
+  | "provider"
+  | "config";
+
+/**
+ * 模型调用的任务类型。
+ * 成本按任务类型拆分是必需的：`docs/PROMPT.md` 要求"按租户-功能-模型
+ * 三维成本拆解"。没有这个字段，就无法回答"钱主要花在检索改写还是回答生成上"。
+ */
+export type ModelTaskType =
+  | "chat"
+  | "query_rewrite"
+  | "multi_query"
+  | "hyde"
+  | "context_compress"
+  | "embedding"
+  | "rerank"
+  | "evaluation";
+
+/** 模型调用结果。 */
+export type ModelCallStatus =
+  | "success"
+  | "failed"
+  | "timeout"
+  | "rate_limited"
+  | "content_filtered";
+
 // =========================== 数据模型 ===========================
 
 /** 统一错误响应体。所有非 2xx 响应都必须是这个形状。 */

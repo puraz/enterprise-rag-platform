@@ -40,6 +40,13 @@
 `tests/test_enums.py` 会确保新增枚举被导出到 TS 类型（漏导出会红）。
 """
 
+from rag_contracts.enums.audit import (
+    AuditAction,
+    AuditOutcome,
+    AuditTargetType,
+    ModelCallStatus,
+    ModelTaskType,
+)
 from rag_contracts.enums.documents import (
     BlobStatus,
     ConfidentialityLevel,
@@ -75,6 +82,9 @@ from rag_contracts.enums.uploads import (
 # RUF022 要求 __all__ 全局字母序，因此这里不按域分组。
 # 域归属看上面的 import 段——那里是按域分组的，且带了注释。
 __all__ = [
+    "AuditAction",
+    "AuditOutcome",
+    "AuditTargetType",
     "BlobStatus",
     "ChunkType",
     "ChunkingStrategy",
@@ -88,6 +98,8 @@ __all__ = [
     "KnowledgeBaseStatus",
     "KnowledgeBaseVisibility",
     "MembershipStatus",
+    "ModelCallStatus",
+    "ModelTaskType",
     "OutboxStatus",
     "PlatformRole",
     "RetrievalMode",

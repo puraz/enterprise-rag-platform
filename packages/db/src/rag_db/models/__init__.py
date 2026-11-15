@@ -7,18 +7,22 @@
 按域分组，新增模型时加进对应分组。
 """
 
+from rag_db.models.audit import AuditChainHead, AuditLog
 from rag_db.models.blob import Blob
 from rag_db.models.chunk import Chunk, IndexVersion
 from rag_db.models.document import Document, DocumentVersion
 from rag_db.models.health import SchemaHealth
 from rag_db.models.knowledge import KnowledgeBase
 from rag_db.models.membership import TenantMembership
+from rag_db.models.model_call import ModelCall
 from rag_db.models.task import OutboxMessage, Task
 from rag_db.models.tenant import Tenant
 from rag_db.models.upload import UploadSession
 from rag_db.models.user import IdentityLink, User
 
 __all__ = [
+    "AuditChainHead",
+    "AuditLog",
     "Blob",
     "Chunk",
     "Document",
@@ -26,6 +30,7 @@ __all__ = [
     "IdentityLink",
     "IndexVersion",
     "KnowledgeBase",
+    "ModelCall",
     "OutboxMessage",
     "SchemaHealth",
     "Task",
