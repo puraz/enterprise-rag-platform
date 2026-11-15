@@ -80,6 +80,9 @@ known-first-party = ["rag_core", "rag_contracts", "rag_db", "rag_adapters", "rag
 # 可视化脚本内嵌一段 HTML/CSS 模板。CSS 单行规则拆行会破坏可读性，
 # 且这段代码不参与业务逻辑（纯展示）。
 "scripts/chunk_preview.py" = ["E501"]
+# 限流器的 Lua 脚本是内嵌字符串常量，bandit 的 S105（硬编码密码）
+# 会因脚本里有 ARGV[1] 这类"键=值"形态而误判。它是 Redis 脚本，不是密钥。
+"packages/core/src/rag_core/ratelimit.py" = ["S105"]
 
 # ------------------------------- mypy -------------------------------
 [tool.mypy]

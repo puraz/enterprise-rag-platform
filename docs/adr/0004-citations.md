@@ -81,10 +81,10 @@
 
 ```python
 LocationResult(
-    located=False,      # 告诉上层这是降级结果
-    page_no=None,       # 无法确定在哪一页
-    char_start=...,     # chunk 的区间仍是真实信息
-    quote=...,          # 整块内容，前端可退化为"显示原文"
+    located=False,  # 告诉上层这是降级结果
+    page_no=None,  # 无法确定在哪一页
+    char_start=...,  # chunk 的区间仍是真实信息
+    quote=...,  # 整块内容，前端可退化为"显示原文"
 )
 ```
 

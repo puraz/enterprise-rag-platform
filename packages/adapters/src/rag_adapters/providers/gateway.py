@@ -38,7 +38,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -75,6 +75,17 @@ class CallCost:
     unit_price_cached: Decimal | None
     unit_price_output: Decimal
     total_usd: Decimal
+
+    provider: str = ""
+    """实际使用的供应商标识（降级时与请求的不同）。"""
+
+    is_fallback: bool = False
+    """是否为降级调用。
+
+    **必须落库**（`model_calls.is_fallback`）：否则无法回答
+    "降级发生了多少次、降级调用的成本占多少"。降级通常是
+    廉价备用模型，混在一起会让成本分析失真。
+    """
 
 
 def compute_cost(usage: TokenUsage, pricing: TokenPricing) -> tuple[Decimal, Decimal, Decimal]:
@@ -163,15 +174,105 @@ class ModelGateway:
         json_mode: bool = False,
         provider_name: str | None = None,
         idempotent: bool = True,
+        fallback_provider: str | None = None,
     ) -> tuple[LLMResponse, CallCost]:
-        """执行一次调用，返回 (响应, 成本明细)。
+        """执行一次调用。`fallback_provider` 非空时，主 provider 失败会尝试它。
+
+        ## 降级为什么由 Gateway 负责而不是调用方
+
+        调用方（service）只关心"给我一个回答"。让它自己 try/except 再调
+        另一个 provider，会导致：
+
+        - 每个调用点都要重复写降级逻辑（漏一处就是该场景没有降级）；
+        - 成本计算散落两处（降级调用的 `is_fallback=True` 容易漏记）；
+        - 熔断器管理混乱（两个 provider 各有一个 ResilientCaller）。
+
+        所以降级在 Gateway 内部完成，**返回值里带 `is_fallback`**，
+        上层据此决定是否给用户提示"结果来自降级路径"。
+        """
+
+        async def _call_with(provider_key: str) -> tuple[LLMResponse, CallCost]:
+            return await self._complete_once(
+                task,
+                messages,
+                provider_key=provider_key,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                json_mode=json_mode,
+                idempotent=idempotent,
+            )
+
+        resolved = provider_name or self._settings.provider
+        try:
+            response, cost = await _call_with(resolved)
+            # 主路径也记录实际 provider，便于按 provider 聚合
+            return response, replace(cost, provider=resolved)
+        except Exception as primary_exc:
+            if fallback_provider is None or fallback_provider == resolved:
+                raise
+            if fallback_provider not in self._providers:
+                log.error(
+                    "fallback_provider_unknown",
+                    fallback=fallback_provider,
+                    available=sorted(self._providers),
+                )
+                raise
+
+            # **只在"主路径不可用"时降级**：
+            # 参数错误（PERMANENT）换 provider 也一样错，降级只是浪费时间。
+            from rag_core.resilience.classify import FailureKind, classify
+
+            if classify(primary_exc) is FailureKind.PERMANENT:
+                raise
+
+            log.warning(
+                "llm_degraded_to_fallback",
+                primary=resolved,
+                fallback=fallback_provider,
+                task=task.value,
+                error_type=type(primary_exc).__name__,
+                note="主供应商失败，已切换备用；响应需告知用户",
+            )
+            try:
+                response, cost = await _call_with(fallback_provider)
+                # 标记降级：成本分析必须能区分"主路径"与"降级路径"，
+                # 否则"这个月成本降了 30%"可能是"一半请求降级到了便宜模型"，
+                # 而不是"优化生效了"。
+                # **provider 也要一起设置**：只标 is_fallback 而 provider
+                # 留空的话，成本按 provider 聚合时降级调用会落到"未知"组
+                # ——而"降级用了哪家"正是最该被看见的信息。
+                return response, replace(cost, is_fallback=True, provider=fallback_provider)
+            except Exception as fallback_exc:
+                log.error(
+                    "llm_fallback_also_failed",
+                    primary=resolved,
+                    fallback=fallback_provider,
+                    error_type=type(fallback_exc).__name__,
+                )
+                # 抛主路径异常：它是根因，降级失败只是次生
+                raise primary_exc from fallback_exc
+
+    async def _complete_once(
+        self,
+        task: ModelTaskType,
+        messages: list[LLMMessage],
+        *,
+        provider_key: str,
+        model: str | None,
+        temperature: float,
+        max_tokens: int | None,
+        json_mode: bool,
+        idempotent: bool,
+    ) -> tuple[LLMResponse, CallCost]:
+        """单次调用（不含降级）。
 
         `idempotent=False` 时**不重试**（例如带副作用的调用）。
         普通补全是幂等的（同样的输入得到同样输出，不计费重复）——
         注意：重试会**产生多次计费**，所以成本要按实际调用次数累加，
         不能只记第一次。
         """
-        resolved_provider = provider_name or self._settings.provider
+        resolved_provider = provider_key
         provider = self._providers.get(resolved_provider)
         if provider is None:
             raise ValueError(f"未知供应商 {resolved_provider!r}")
