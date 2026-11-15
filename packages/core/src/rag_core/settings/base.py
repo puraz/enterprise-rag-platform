@@ -21,6 +21,7 @@ from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from rag_core.settings.database import DatabaseSettings
+from rag_core.settings.embedding import EmbeddingSettings
 from rag_core.settings.identity import IdentitySettings
 from rag_core.settings.llm import LLMSettings
 from rag_core.settings.redis import RedisSettings
@@ -88,6 +89,7 @@ class Settings(BaseSettings):
     redis: RedisSettings = Field(default_factory=RedisSettings)
     identity: IdentitySettings = Field(default_factory=IdentitySettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
+    embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
 
     @property
     def resolved_log_format(self) -> Literal["json", "console"]:

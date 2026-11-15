@@ -70,6 +70,29 @@ api 与 worker **互不依赖**，只通过契约、数据库状态、队列消�
   共享代码只能进 packages/contracts、packages/core 或 packages/db。
 - **可插拔**：换 LLM/向量库/存储/IdP/队列/评估器，只应动一个适配层文件 + 一行配置。
   见到 `if provider == "xxx"` 一律改成能力匹配或策略注册。
+
+### 4.4 模型 Provider 层规范（`apps/api/src/rag_api/providers/`）
+
+- **LLM 用 `langchain-openai`**（`langchain_llm.py`），不自研 HTTP 客户端。
+  理由：LangChain 的 `InputTokenDetails.cache_read` / `OutputTokenDetails.reasoning`
+  完整覆盖成本核算；SSE 流式解析成熟；A11 的 LangGraph 原生集成。
+  **不要以"框架会丢字段"为理由自研** —— 先实测再判断。
+- **必须 `max_retries=0`**：LangChain 默认重试 2 次，不关会与 `ResilientCaller`
+  形成乘数效应，且熔断器拿不到真实失败信号。
+- **每个 Provider 用独立 `httpx.AsyncClient`**：openai SDK 默认共享模块级
+  client，某个实例 `aclose()` 会让其它实例抛 `Event loop is closed`。
+- **LLM 与 Embedding 配置分开**（`LLMSettings` / `EmbeddingSettings`）：
+  换 LLM 模型不应触发 embedding 重建。
+- **Embedding 维度必须在工厂校验**：`settings.embedding.dimension` 必须等于
+  `LocalBGEEmbedding.capabilities.dimension` 且等于 `chunks.embedding` 的
+  `vector(1024)`。三处不一致会在入库时才炸，届时已切分完几百个 chunk。
+- **Embedding 必须归一化**（`normalize_embeddings=True`）：余弦相似度 = 内积，
+  计算更快且与 `vector_cosine_ops` 索引语义一致。
+- **CPU 密集操作必须切线程**：`model.encode()` 和模型加载都是同步阻塞的，
+  直接 `await` 会阻塞整个事件循环。
+- **批量顺序必须与输入严格对应**：错位会让"检索能跑但相关性全乱"，且不报错。
+- **Reranker 在 A11 实现**：A5 用 `NoOpReranker` 占位（对应降级链
+  "Reranker 挂 → 只用 RRF"）；rerank 的价值只能在真实检索结果上验证。
 - **抽象优先**：所有外部能力面向 ABC/Protocol + 工厂 + 配置注入，业务不 import 具体实现。
 - **韧性统一**：重试/熔断/超时/信号量只能走 ResilientCaller，禁止业务自己写重试循环。
 - **鉴权服务端注入**：tenant_id、ACL 过滤从 token 解析，绝不取请求参数；RLS 是最后一道防线。

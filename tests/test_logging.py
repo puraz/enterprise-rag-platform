@@ -10,6 +10,7 @@ import asyncio
 import io
 import json
 import logging
+import os
 from collections.abc import Iterator
 
 import pytest
@@ -30,8 +31,21 @@ from rag_core.settings import Settings
 
 
 @pytest.fixture
-def json_logs() -> Iterator[io.StringIO]:
-    """把日志输出到内存流，方便直接断言内容。"""
+def json_logs(monkeypatch: pytest.MonkeyPatch) -> Iterator[io.StringIO]:
+    """把日志输出到内存流，方便直接断言内容。
+
+    **必须隔离环境变量**：任何测试调用 `get_settings()` 都会触发
+    `load_env_files()`，把 `.env` 内容注入 `os.environ`。之后构造
+    `Settings(env="prod", ...)` 会读到 `.env` 里的 `RAG_DEBUG=true`、
+    `RAG_DEV_AUTH_ENABLED=true`，撞上生产守卫。
+
+    这类"单独跑通过、全量跑失败"的测试污染极难排查——
+    测试之间必须互不影响。
+    """
+    for key in list(os.environ):
+        if key.startswith("RAG_"):
+            monkeypatch.delenv(key, raising=False)
+
     stream = io.StringIO()
     settings = Settings(
         env="prod",
@@ -272,8 +286,15 @@ def test_third_party_logging_is_bridged(json_logs: io.StringIO) -> None:
     assert record["level"] == "warning"
 
 
-def test_repeated_setup_does_not_duplicate_lines() -> None:
-    """重复调用 setup_logging 不能产生重复日志行。"""
+def test_repeated_setup_does_not_duplicate_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    """重复调用 setup_logging 不能产生重复日志行。
+
+    同样需要隔离环境变量（见 json_logs fixture 的说明）。
+    """
+    for key in list(os.environ):
+        if key.startswith("RAG_"):
+            monkeypatch.delenv(key, raising=False)
+
     stream = io.StringIO()
     settings = Settings(
         env="prod",
