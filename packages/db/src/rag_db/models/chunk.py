@@ -262,6 +262,34 @@ class Chunk(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         CheckConstraint(
             "token_count IS NULL OR token_count >= 0", name="ck_chunks_token_non_negative"
         ),
+        # ---- HNSW 向量索引 ----
+        #
+        # **必须在模型里声明，不能用裸 SQL 建。**
+        # 裸 SQL 建的索引不在 SQLAlchemy metadata 里，Alembic autogenerate
+        # 会认为它是"数据库里多余的索引"并生成 DROP —— 下次
+        # `make migrate-new` 就会把索引删掉，且没有任何报错提示。
+        # （实际踩到的坑：A3-3 用手写 SQL 建索引，A3-4 生成迁移时出现了
+        #   `Detected removed index 'ix_chunks_embedding_hnsw'`。）
+        #
+        # SQLAlchemy 完全能表达 HNSW，编译结果与手写 SQL 等价：
+        #   CREATE INDEX ... USING hnsw (embedding vector_cosine_ops)
+        #   WITH (m=16, ef_construction=64) WHERE embedding IS NOT NULL AND ...
+        #
+        # 参数依据：
+        # - m=16：每节点最大连接数，官方默认。内存开销约为向量总量 20%；
+        #   调到 32 会翻倍到 40%，百万 chunk（约 4GB 向量）时本机扛不住。
+        # - ef_construction=64：构建时候选列表，官方默认，越大质量越好但更慢。
+        # - vector_cosine_ops：与 bge 系列训练目标一致。度量选错不报错，
+        #   只会让召回悄悄变差 —— 最难发现的检索问题之一。
+        # - WHERE 部分索引：未向量化与旧版本的 chunk 不占索引空间。
+        Index(
+            "ix_chunks_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_with={"m": 16, "ef_construction": 64},
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+            postgresql_where=text("embedding IS NOT NULL AND is_current = true"),
+        ),
     )
 
     def __repr__(self) -> str:

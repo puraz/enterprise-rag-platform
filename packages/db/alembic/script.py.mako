@@ -11,6 +11,7 @@ from collections.abc import Sequence
 
 from alembic import op
 import sqlalchemy as sa
+import pgvector.sqlalchemy
 ${imports if imports else ""}
 
 # 迁移标识。不要手改，Alembic 用它们串成链。

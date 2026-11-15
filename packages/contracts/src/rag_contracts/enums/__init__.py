@@ -65,6 +65,12 @@ from rag_contracts.enums.tenancy import (
     TenantStatus,
     UserStatus,
 )
+from rag_contracts.enums.uploads import (
+    OutboxStatus,
+    TaskStatus,
+    TaskType,
+    UploadSessionStatus,
+)
 
 # RUF022 要求 __all__ 全局字母序，因此这里不按域分组。
 # 域归属看上面的 import 段——那里是按域分组的，且带了注释。
@@ -82,10 +88,14 @@ __all__ = [
     "KnowledgeBaseStatus",
     "KnowledgeBaseVisibility",
     "MembershipStatus",
+    "OutboxStatus",
     "PlatformRole",
     "RetrievalMode",
     "SourceType",
+    "TaskStatus",
+    "TaskType",
     "TenantRole",
     "TenantStatus",
+    "UploadSessionStatus",
     "UserStatus",
 ]

@@ -13,7 +13,9 @@ from rag_db.models.document import Document, DocumentVersion
 from rag_db.models.health import SchemaHealth
 from rag_db.models.knowledge import KnowledgeBase
 from rag_db.models.membership import TenantMembership
+from rag_db.models.task import OutboxMessage, Task
 from rag_db.models.tenant import Tenant
+from rag_db.models.upload import UploadSession
 from rag_db.models.user import IdentityLink, User
 
 __all__ = [
@@ -24,8 +26,11 @@ __all__ = [
     "IdentityLink",
     "IndexVersion",
     "KnowledgeBase",
+    "OutboxMessage",
     "SchemaHealth",
+    "Task",
     "Tenant",
     "TenantMembership",
+    "UploadSession",
     "User",
 ]

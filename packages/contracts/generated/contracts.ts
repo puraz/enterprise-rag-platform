@@ -324,6 +324,66 @@ export type RetrievalMode =
   | "keyword"
   | "hybrid";
 
+/**
+ * 分片上传会话状态机。
+ * INITIATED ──▶ UPLOADING ──▶ COMPLETING ──▶ COMPLETED
+ * │             │              │
+ * │             │              └──▶ FAILED（合并/校验失败）
+ * │             └──▶ EXPIRED（超时未完成）
+ * └──▶ ABORTED（用户取消）
+ * 关键约束：
+ * - COMPLETED 之后不能再收分片（幂等返回成功）；
+ * - EXPIRED 与 ABORTED 的分片由清理任务回收；
+ * - COMPLETING 是"合并中"的中间态，防止两个请求同时 complete。
+ */
+export type UploadSessionStatus =
+  | "initiated"
+  | "uploading"
+  | "completing"
+  | "completed"
+  | "failed"
+  | "expired"
+  | "aborted";
+
+/**
+ * 异步任务类型。
+ * 值必须与 worker 侧的任务注册表一致——不一致时报错是
+ * "未知任务类型"，但实际是名字拼写不同，很难定位。
+ */
+export type TaskType =
+  | "parse_document"
+  | "chunk_document"
+  | "embed_document"
+  | "index_document"
+  | "rebuild_index"
+  | "cleanup_upload_sessions"
+  | "cleanup_orphan_blobs"
+  | "dispatch_outbox";
+
+/**
+ * 任务执行状态。
+ * 与 `DocumentStatus` 分开：任务表记录"某次执行的进展"，
+ * 文档表记录"业务上的最终状态"。一次文档处理可能产生多次任务执行
+ * （每次重试一条），管理端需要看到历史。
+ */
+export type TaskStatus =
+  | "pending"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "dead"
+  | "cancelled";
+
+/**
+ * outbox 消息状态。
+ * 至少一次送达：只要消息没有标记为 dispatched，就会一直被轮询重发。
+ * 消费者必须幂等——这是"至少一次"语义的必然要求。
+ */
+export type OutboxStatus =
+  | "pending"
+  | "dispatched"
+  | "failed";
+
 // =========================== 数据模型 ===========================
 
 /** 统一错误响应体。所有非 2xx 响应都必须是这个形状。 */

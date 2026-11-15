@@ -30,11 +30,15 @@ from rag_contracts.enums import (
     KnowledgeBaseStatus,
     KnowledgeBaseVisibility,
     MembershipStatus,
+    OutboxStatus,
     PlatformRole,
     RetrievalMode,
     SourceType,
+    TaskStatus,
+    TaskType,
     TenantRole,
     TenantStatus,
+    UploadSessionStatus,
     UserStatus,
 )
 from rag_contracts.errors import ErrorCategory, ErrorCode, ErrorResponse, FieldError, Severity
@@ -78,6 +82,11 @@ EXPORTED_ENUMS: dict[str, type[str]] = {
     "IndexVersionStatus": IndexVersionStatus,
     "DistanceMetric": DistanceMetric,
     "RetrievalMode": RetrievalMode,
+    # ---- 上传/任务域（rag_contracts.enums.uploads）----
+    "UploadSessionStatus": UploadSessionStatus,
+    "TaskType": TaskType,
+    "TaskStatus": TaskStatus,
+    "OutboxStatus": OutboxStatus,
 }
 
 

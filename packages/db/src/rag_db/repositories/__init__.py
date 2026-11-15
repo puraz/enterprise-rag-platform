@@ -13,6 +13,11 @@ from rag_db.repositories.knowledge import (
     claim_documents_for_processing,
     count_orphan_blobs,
 )
+from rag_db.repositories.task import (
+    OutboxRepository,
+    TaskRepository,
+    UploadSessionRepository,
+)
 
 __all__ = [
     "BlobRepository",
@@ -21,7 +26,10 @@ __all__ = [
     "IndexVersionRepository",
     "KnowledgeBaseRepository",
     "MembershipRepository",
+    "OutboxRepository",
+    "TaskRepository",
     "TenantRepository",
+    "UploadSessionRepository",
     "UserRepository",
     "claim_documents_for_processing",
     "count_orphan_blobs",

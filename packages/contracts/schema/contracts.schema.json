@@ -308,6 +308,58 @@
         "hybrid"
       ],
       "description": "检索模式（A11 用）。"
+    },
+    "UploadSessionStatus": {
+      "title": "UploadSessionStatus",
+      "type": "string",
+      "enum": [
+        "initiated",
+        "uploading",
+        "completing",
+        "completed",
+        "failed",
+        "expired",
+        "aborted"
+      ],
+      "description": "分片上传会话状态机。\n\n        INITIATED ──▶ UPLOADING ──▶ COMPLETING ──▶ COMPLETED\n            │             │              │\n            │             │              └──▶ FAILED（合并/校验失败）\n            │             └──▶ EXPIRED（超时未完成）\n            └──▶ ABORTED（用户取消）\n\n    关键约束：\n    - COMPLETED 之后不能再收分片（幂等返回成功）；\n    - EXPIRED 与 ABORTED 的分片由清理任务回收；\n    - COMPLETING 是\"合并中\"的中间态，防止两个请求同时 complete。"
+    },
+    "TaskType": {
+      "title": "TaskType",
+      "type": "string",
+      "enum": [
+        "parse_document",
+        "chunk_document",
+        "embed_document",
+        "index_document",
+        "rebuild_index",
+        "cleanup_upload_sessions",
+        "cleanup_orphan_blobs",
+        "dispatch_outbox"
+      ],
+      "description": "异步任务类型。\n\n    值必须与 worker 侧的任务注册表一致——不一致时报错是\n    \"未知任务类型\"，但实际是名字拼写不同，很难定位。"
+    },
+    "TaskStatus": {
+      "title": "TaskStatus",
+      "type": "string",
+      "enum": [
+        "pending",
+        "running",
+        "succeeded",
+        "failed",
+        "dead",
+        "cancelled"
+      ],
+      "description": "任务执行状态。\n\n    与 `DocumentStatus` 分开：任务表记录\"某次执行的进展\"，\n    文档表记录\"业务上的最终状态\"。一次文档处理可能产生多次任务执行\n    （每次重试一条），管理端需要看到历史。"
+    },
+    "OutboxStatus": {
+      "title": "OutboxStatus",
+      "type": "string",
+      "enum": [
+        "pending",
+        "dispatched",
+        "failed"
+      ],
+      "description": "outbox 消息状态。\n\n    至少一次送达：只要消息没有标记为 dispatched，就会一直被轮询重发。\n    消费者必须幂等——这是\"至少一次\"语义的必然要求。"
     }
   },
   "models": {
