@@ -12,6 +12,8 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "httpx>=0.27",
     "pyjwt>=2.9",
+    "langchain-core>=0.3",
+    "langchain-openai>=0.3",
 ]
 
 # 告诉 uv：这些依赖来自同 workspace 的本地目录，不要跑去 PyPI 找。
