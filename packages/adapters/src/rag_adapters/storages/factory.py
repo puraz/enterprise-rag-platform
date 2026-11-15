@@ -23,9 +23,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from rag_api.storages.base import StorageBackend
-from rag_api.storages.local import LocalStorageBackend
-from rag_api.storages.s3 import S3StorageBackend
+from rag_adapters.storages.base import StorageBackend
+from rag_adapters.storages.local import LocalStorageBackend
+from rag_adapters.storages.s3 import S3StorageBackend
 from rag_core.errors import ConfigError
 from rag_core.settings import Settings
 

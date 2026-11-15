@@ -56,7 +56,7 @@ import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from rag_api.storages.base import (
+from rag_adapters.storages.base import (
     MultipartUpload,
     ObjectMetadata,
     ObjectNotFoundError,

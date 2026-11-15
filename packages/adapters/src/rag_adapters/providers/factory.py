@@ -25,14 +25,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from rag_api.providers.bge import LocalBGEEmbedding
-from rag_api.providers.embedding import (
+from rag_adapters.providers.bge import LocalBGEEmbedding
+from rag_adapters.providers.embedding import (
     EmbeddingProvider,
     NoOpReranker,
     RerankerProvider,
 )
-from rag_api.providers.langchain_llm import LangChainLLMProvider
-from rag_api.providers.llm import LLMProvider
+from rag_adapters.providers.langchain_llm import LangChainLLMProvider
+from rag_adapters.providers.llm import LLMProvider
 from rag_core.errors import ConfigError
 from rag_core.settings import Settings
 

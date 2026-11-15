@@ -12,8 +12,8 @@ from __future__ import annotations
 
 from fastapi import Request
 
+from rag_adapters.storages.base import StorageBackend
 from rag_api.identity.tokens import TokenService
-from rag_api.storages.base import StorageBackend
 from rag_core.db import Database
 from rag_core.redis import RedisClient
 from rag_core.settings import Settings

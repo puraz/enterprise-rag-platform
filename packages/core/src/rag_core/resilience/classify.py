@@ -97,6 +97,22 @@ def classify(exc: BaseException) -> FailureKind:
     if isinstance(exc, _TRANSIENT_BUILTINS):
         return FailureKind.RETRYABLE
 
+    # 适配层异常自带 `retryable` 标志（ParseError / StorageError /
+    # LLMProviderError 都是这个约定）。
+    #
+    # **用协议判断而不是 isinstance**：core 不能 import adapters
+    # （那会形成 core → adapters 的反向依赖）。鸭子类型让 core 不需要
+    # 认识任何具体异常类，而适配层也不必为了被识别而继承 core 的东西。
+    #
+    # 为什么这条重要：`StorageError(retryable=True)` 表示"对象存储超时"，
+    # 不读这个标志会把它归为 FATAL（不重试）——偶发网络抖动就变成
+    # 永久失败，用户看到"文档解析失败"而实际上重试一次就好了。
+    retryable_flag = getattr(exc, "retryable", None)
+    if isinstance(retryable_flag, bool):
+        # 带显式 retryable=False 的（格式不支持、对象不存在）也归 FATAL 而非
+        # PERMANENT：它们不是调用方的错，而是数据/配置问题，应告警而非静默重试。
+        return FailureKind.RETRYABLE if retryable_flag else FailureKind.PERMANENT
+
     # 未识别异常：不知道能不能重试 → 保守地不重试，但要计入熔断
     # 并在日志里留完整堆栈，因为这说明有未覆盖的错误路径。
     return FailureKind.FATAL

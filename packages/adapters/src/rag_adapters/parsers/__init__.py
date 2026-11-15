@@ -20,7 +20,7 @@
 调用方据此降级（扫描页只保留占位符）。启动日志会明确告警。
 """
 
-from rag_api.parsers.base import (
+from rag_adapters.parsers.base import (
     BaseParser,
     PageInfo,
     ParsedDocument,
@@ -30,7 +30,7 @@ from rag_api.parsers.base import (
     UnsupportedFormatError,
     verify_char_offsets,
 )
-from rag_api.parsers.factory import (
+from rag_adapters.parsers.factory import (
     NullOcr,
     OcrEngine,
     TesseractOcr,
@@ -39,8 +39,8 @@ from rag_api.parsers.factory import (
     parse_document,
     supported_formats,
 )
-from rag_api.parsers.pdf import PdfParser
-from rag_api.parsers.simple import DocxParser, PptxParser, TextLikeParser, XlsxParser
+from rag_adapters.parsers.pdf import PdfParser
+from rag_adapters.parsers.simple import DocxParser, PptxParser, TextLikeParser, XlsxParser
 
 __all__ = [
     "BaseParser",

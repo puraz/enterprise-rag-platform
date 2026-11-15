@@ -11,6 +11,7 @@ import ast
 import tomllib
 from pathlib import Path
 
+import rag_adapters
 import rag_api
 import rag_contracts
 import rag_core
@@ -19,12 +20,13 @@ import rag_worker
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKER_SRC = REPO_ROOT / "apps" / "worker" / "src"
+ADAPTERS_SRC = REPO_ROOT / "packages" / "adapters" / "src"
 FORBIDDEN_MODULE = "rag_api"
 
 
 def test_all_workspace_packages_are_importable() -> None:
     """所有 workspace 包都能 import，且版本来自发行包元数据（单一真相）。"""
-    for module in (rag_core, rag_contracts, rag_db, rag_api, rag_worker):
+    for module in (rag_core, rag_contracts, rag_db, rag_adapters, rag_api, rag_worker):
         assert module.__version__
 
 
@@ -76,10 +78,47 @@ def test_shared_packages_do_not_depend_on_apps() -> None:
     一旦共享包依赖上层，依赖图就出现环：api 依赖 core，core 依赖 api，
     最终表现为"import 顺序敏感"和循环导入报错。
     """
-    shared = ["core", "contracts", "db"]
+    shared = ["core", "contracts", "db", "adapters"]
     for name in shared:
         pyproject_path = REPO_ROOT / "packages" / name / "pyproject.toml"
         pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
         dependencies = pyproject["project"]["dependencies"]
         offenders = [dep for dep in dependencies if dep.startswith(("rag-api", "rag-worker"))]
         assert not offenders, f"packages/{name} 依赖了上层包: {offenders}"
+
+
+def test_adapters_do_not_import_db_or_api() -> None:
+    """适配层只做协议转换，不认识 ORM 也不认识路由。
+
+    一旦它开始 import `rag_db`，"解析一个文件"就变成"解析一个文件并读表"，
+    适配层会被业务逻辑污染，换存储/换解析器时改动会向上蔓到 schema。
+    """
+    offenders: list[str] = []
+    for path in ADAPTERS_SRC.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            else:
+                continue
+            for name in names:
+                if name.split(".")[0] in {"rag_db", "rag_api", "rag_worker"}:
+                    offenders.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno} -> {name}")
+    assert not offenders, f"适配层越界依赖: {offenders}"
+
+
+def test_api_and_worker_both_declare_adapters() -> None:
+    """适配层两个消费者都必须显式声明依赖。
+
+    不声明也能 import（同一个 venv），但生产镜像按声明装依赖，
+    漏声明会在镜像里才炸——本地永远复现不了。
+    """
+    for app in ("api", "worker"):
+        pyproject_path = REPO_ROOT / "apps" / app / "pyproject.toml"
+        pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+        dependencies = pyproject["project"]["dependencies"]
+        assert any(dep.startswith("rag-adapters") for dep in dependencies), (
+            f"apps/{app} 未声明 rag-adapters"
+        )

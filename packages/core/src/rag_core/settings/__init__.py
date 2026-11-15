@@ -15,6 +15,7 @@ from rag_core.settings.identity import IdentitySettings, OIDCSettings
 from rag_core.settings.llm import LLMSettings, ModelPricing, TokenPricing
 from rag_core.settings.redis import RedisSettings
 from rag_core.settings.storage import StorageSettings
+from rag_core.settings.worker import WorkerSettings
 
 __all__ = [
     "ENV_SELECTOR",
@@ -29,6 +30,7 @@ __all__ = [
     "Settings",
     "StorageSettings",
     "TokenPricing",
+    "WorkerSettings",
     "find_project_root",
     "get_settings",
     "load_env_files",

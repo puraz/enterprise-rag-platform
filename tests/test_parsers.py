@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from rag_api.parsers import (
+from rag_adapters.parsers import (
     BaseParser,
     DocxParser,
     NullOcr,
@@ -219,9 +219,9 @@ def test_pdf_module_uses_pymupdf_not_fitz(sample_pdf: Path) -> None:
     `fitz` 是历史导入名，官方已弃用（有 FutureWarning）。
     用弃用 API 会在未来版本被移除时突然崩溃。
     """
-    source = (Path(__file__).parent.parent / "apps/api/src/rag_api/parsers/pdf.py").read_text(
-        encoding="utf-8"
-    )
+    source = (
+        Path(__file__).parent.parent / "packages/adapters/src/rag_adapters/parsers/pdf.py"
+    ).read_text(encoding="utf-8")
     # 允许注释里提到 fitz，但 import 必须是 pymupdf
     assert "import pymupdf" in source
     assert "import fitz\n" not in source
@@ -488,7 +488,7 @@ def test_all_parsers_return_nonempty_blocks() -> None:
 
         @property
         def capabilities(self):
-            from rag_api.parsers.base import ParserCapabilities
+            from rag_adapters.parsers.base import ParserCapabilities
 
             return ParserCapabilities(supported_formats=frozenset({DocumentFormat.TEXT}))
 
@@ -506,7 +506,7 @@ def test_verify_char_offsets_catches_broken_implementations() -> None:
     构造一个 block.text 与 text 切片不匹配的文档，
     校验器必须报错。
     """
-    from rag_api.parsers.base import PageInfo, ParsedDocument, TextBlock
+    from rag_adapters.parsers.base import PageInfo, ParsedDocument, TextBlock
 
     broken = ParsedDocument(
         text="hello world",

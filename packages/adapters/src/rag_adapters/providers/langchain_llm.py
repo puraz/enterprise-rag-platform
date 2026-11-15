@@ -54,7 +54,7 @@ import httpx
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
-from rag_api.providers.llm import (
+from rag_adapters.providers.llm import (
     LLMMessage,
     LLMProvider,
     LLMProviderError,

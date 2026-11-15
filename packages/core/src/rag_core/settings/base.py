@@ -26,6 +26,7 @@ from rag_core.settings.identity import IdentitySettings, OIDCSettings
 from rag_core.settings.llm import LLMSettings
 from rag_core.settings.redis import RedisSettings
 from rag_core.settings.storage import StorageSettings
+from rag_core.settings.worker import WorkerSettings
 
 # RAG_ENV 要参与"选哪个 .env 文件"，所以常量单独暴露
 ENV_SELECTOR = "RAG_ENV"
@@ -93,6 +94,7 @@ class Settings(BaseSettings):
     llm: LLMSettings = Field(default_factory=LLMSettings)
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
+    worker: WorkerSettings = Field(default_factory=WorkerSettings)
 
     @property
     def resolved_log_format(self) -> Literal["json", "console"]:

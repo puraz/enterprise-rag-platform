@@ -48,7 +48,7 @@ import asyncio
 import time
 from typing import Any
 
-from rag_api.providers.embedding import (
+from rag_adapters.providers.embedding import (
     EmbeddingCapabilities,
     EmbeddingProvider,
     EmbeddingProviderError,

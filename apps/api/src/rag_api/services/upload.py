@@ -54,7 +54,7 @@ from datetime import timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rag_api.storages.base import (
+from rag_adapters.storages.base import (
     MultipartUpload,
     PartInfo,
     StorageBackend,
@@ -461,7 +461,7 @@ class UploadService:
             inspect_file(filename=filename, head=head)
         except UnsupportedMediaTypeError:
             # 内容与扩展名不符：删对象再抛，避免存储里留下假文件
-            from rag_api.storages.base import StorageError
+            from rag_adapters.storages.base import StorageError
 
             try:
                 await self._storage.delete(key)

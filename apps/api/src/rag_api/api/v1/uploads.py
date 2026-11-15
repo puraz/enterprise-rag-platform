@@ -43,6 +43,7 @@ import uuid
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from rag_adapters.storages.base import PartInfo, StorageBackend
 from rag_api.deps import Principal, get_current_principal, get_db, get_storage
 from rag_api.openapi import (
     DELETE_ENDPOINT,
@@ -52,7 +53,6 @@ from rag_api.openapi import (
 from rag_api.permissions import PermissionContext, get_permission_context
 from rag_api.services.upload import UploadService
 from rag_api.services.upload_security import inspect_file
-from rag_api.storages.base import PartInfo, StorageBackend
 from rag_contracts.api.uploads import (
     CompleteUploadRequest,
     CompleteUploadResponse,

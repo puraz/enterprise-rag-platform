@@ -30,14 +30,14 @@ import shutil
 from collections.abc import Callable
 from pathlib import Path
 
-from rag_api.parsers.base import (
+from rag_adapters.parsers.base import (
     BaseParser,
     ParsedDocument,
     ParseError,
     UnsupportedFormatError,
 )
-from rag_api.parsers.pdf import PdfParser
-from rag_api.parsers.simple import (
+from rag_adapters.parsers.pdf import PdfParser
+from rag_adapters.parsers.simple import (
     DocxParser,
     PptxParser,
     TextLikeParser,

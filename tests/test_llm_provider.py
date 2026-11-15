@@ -21,15 +21,15 @@ from typing import Any
 import pytest
 from langchain_core.messages import AIMessage
 
-from rag_api.providers.gateway import ModelGateway, compute_cost
-from rag_api.providers.langchain_llm import (
+from rag_adapters.providers.gateway import ModelGateway, compute_cost
+from rag_adapters.providers.langchain_llm import (
     LangChainLLMError,
     LangChainLLMProvider,
     _classify_error,
     _to_lc_messages,
     _to_usage,
 )
-from rag_api.providers.llm import LLMMessage, LLMRole, TokenUsage
+from rag_adapters.providers.llm import LLMMessage, LLMRole, TokenUsage
 from rag_contracts.enums import ModelTaskType
 from rag_core.settings import get_settings
 from rag_core.settings.llm import LLMSettings, TokenPricing, off_peak_time, peak_time

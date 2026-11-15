@@ -23,14 +23,14 @@ from typing import Any
 
 import pytest
 
-from rag_api.storages.base import (
+from rag_adapters.storages.base import (
     MultipartUpload,
     ObjectNotFoundError,
     StorageError,
     build_storage_key,
     sanitize_key,
 )
-from rag_api.storages.local import LocalStorageBackend
+from rag_adapters.storages.local import LocalStorageBackend
 from rag_core.settings.storage import S3_MIN_PART_SIZE, StorageSettings
 
 
@@ -596,7 +596,7 @@ def _fake_s3_error(code: str) -> Exception:
 
 def test_s3_backend_basic_operations() -> None:
     """S3 后端的基本读写删（用 fake client）。"""
-    from rag_api.storages.s3 import S3StorageBackend
+    from rag_adapters.storages.s3 import S3StorageBackend
 
     client = _FakeS3Client()
     settings = StorageSettings(backend="s3", s3_bucket="test-bucket", part_size=S3_MIN_PART_SIZE)
@@ -612,7 +612,7 @@ def test_s3_backend_basic_operations() -> None:
 
 def test_s3_backend_translates_not_found() -> None:
     """S3 的 NoSuchKey 必须翻译成 ObjectNotFoundError（不可重试）。"""
-    from rag_api.storages.s3 import S3StorageBackend
+    from rag_adapters.storages.s3 import S3StorageBackend
 
     backend = S3StorageBackend(
         StorageSettings(backend="s3", part_size=S3_MIN_PART_SIZE),
@@ -633,7 +633,7 @@ def test_s3_backend_handles_paginated_parts() -> None:
     S3 每次最多返回 1000 个分片。大文件（>1000 片）不翻页会漏，
     导致 complete 时报"分片不完整"——但客户端明明传完了。
     """
-    from rag_api.storages.s3 import S3StorageBackend
+    from rag_adapters.storages.s3 import S3StorageBackend
 
     class _PagedClient(_FakeS3Client):
         def list_parts(self, **kwargs: Any) -> dict[str, Any]:
@@ -662,7 +662,7 @@ def test_s3_backend_handles_paginated_parts() -> None:
 
 def test_s3_presigned_url_available() -> None:
     """S3 支持预签名 URL（本地后端不支持）。"""
-    from rag_api.storages.s3 import S3StorageBackend
+    from rag_adapters.storages.s3 import S3StorageBackend
 
     backend = S3StorageBackend(
         StorageSettings(backend="s3", part_size=S3_MIN_PART_SIZE),
@@ -679,7 +679,7 @@ def test_s3_presigned_url_available() -> None:
 
 def test_factory_builds_configured_backend(tmp_path: Path) -> None:
     """工厂按配置构造后端。"""
-    from rag_api.storages.factory import build_storage
+    from rag_adapters.storages.factory import build_storage
     from rag_core.settings import get_settings
 
     settings = get_settings()
@@ -689,7 +689,7 @@ def test_factory_builds_configured_backend(tmp_path: Path) -> None:
 
 def test_factory_rejects_unknown_backend() -> None:
     """未知后端明确报错。"""
-    from rag_api.storages.factory import build_storage
+    from rag_adapters.storages.factory import build_storage
     from rag_core.errors import ConfigError
     from rag_core.settings import get_settings
 

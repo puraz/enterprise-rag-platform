@@ -10,12 +10,15 @@ dependencies = [
     "rag-core",
     "rag-contracts",
     "rag-db",
+    # 解析/存储/Embedding 都在这里（与 api 共用，不是复制）
+    "rag-adapters",
 ]
 
 [tool.uv.sources]
 rag-core = { workspace = true }
 rag-contracts = { workspace = true }
 rag-db = { workspace = true }
+rag-adapters = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

@@ -32,9 +32,10 @@
 
 ## 3. 目录与分层（东西该放哪）
 Python 包（uv workspace，src/ 布局）：
-- packages/core        `rag_core`        横切基础设施（配置/日志/异常/DB池/Redis/韧性），不含业务
+- packages/core        `rag_core`        横切基础设施（配置/日志/异常/DB池/Redis/韧性/PII），不含业务
 - packages/contracts   `rag_contracts`   Pydantic 契约 + 枚举 + 错误码 + 队列消息（叶子包，零内部依赖）
 - packages/db          `rag_db`          ORM 模型 + 仓储(SQL) + Alembic 迁移
+- packages/adapters    `rag_adapters`    可插拔适配层：文档解析 / 对象存储 / 模型 Provider
 - apps/api             `rag_api`         路由/服务/依赖注入
 - apps/worker          `rag_worker`      管线/定时任务
 
@@ -43,15 +44,25 @@ ORM 模型与仓储必须被 api 与 worker **同时**使用（worker 要改任�
 读文档元数据），但「worker 禁止 import apps/api」是硬约束，而 core 又规定
 「不含任何业务概念」。三条约束叠加后，模型与仓储只能落在第三个共享包里。
 
+**为什么有 packages/adapters（同一个矛盾的第二次出现）**：
+解析器（PyMuPDF）、存储后端（boto3）、Embedding（bge-m3）原本写在 `rag_api` 里，
+但 worker 才是它们的主要消费者（所有解析/向量化都在 worker 里跑）。
+两条硬约束再次交叉 → 只能下沉成共享包。
+判断标准：**api 与 worker 都要用，且不认识 ORM / 路由 / 请求上下文**。
+适配层**不得 import `rag_db`**：它只做协议转换，不读业务表；
+"查 blob 地址再下载"这类编排留在调用方（worker handler / service）。
+
 依赖方向（严格单向，`tests/test_workspace.py` 会检查）：
 ```
 contracts ← core ← db ← api / worker
+                 ↑
+              adapters ← api / worker
 ```
 api 与 worker **互不依赖**，只通过契约、数据库状态、队列消息通信。
 
 后端分层（apps/api 内）：api(路由) / schemas / services(业务) / deps(依赖注入) /
-          pipelines / retrievers / parsers / chunkers / storages /
-          providers / identity / evaluators / workers / openapi
+          pipelines / retrievers / chunkers / identity / evaluators / workers / openapi
+（parsers / storages / providers 已迁出到 packages/adapters）
 前端分层：routes / features / components / hooks / api(自动生成，别手改) / stores
 - 路由里不写业务逻辑；service 里不写 SQL；SQL 只在 packages/db 的 repository。
 - 依赖方向单向向内，禁止反向 import。
@@ -67,7 +78,7 @@ api 与 worker **互不依赖**，只通过契约、数据库状态、队列消�
 
 ## 4. 硬约束（违反即打回，没有例外）
 - **端边界**：跨端只走 API 或队列消息。apps/worker 禁止 import apps/api；
-  共享代码只能进 packages/contracts、packages/core 或 packages/db。
+  共享代码只能进 packages/contracts、packages/core、packages/db 或 packages/adapters。
 - **可插拔**：换 LLM/向量库/存储/IdP/队列/评估器，只应动一个适配层文件 + 一行配置。
   见到 `if provider == "xxx"` 一律改成能力匹配或策略注册。
 
@@ -415,3 +426,42 @@ FastAPI 默认的 `{"detail": ...}` 已由全局处理器转换，不得绕过�
 - **OCR 是可选能力**：`build_ocr_engine()` 检测不到 tesseract 时返回
   `NullOcr`，调用方降级；**启动日志必须告警并给出安装提示**，
   否则"扫描件解析不出内容"会变成没人知道原因的谜。
+
+### 4.11 Worker 与异步任务规范（`apps/worker/src/rag_worker/`）
+
+- **数据库是任务的权威来源，队列只是通知**：API 写文档+任务+outbox 同事务，
+  outbox 转发到队列让 worker 立刻处理，**同时 worker 每 2 秒轮询 DB 兜底**。
+  只靠队列 → Redis 丢数据则任务永久丢失；只靠轮询 → 延迟至少一个周期。
+- **认领必须跨租户，执行必须在租户内**（两套会话，不能混）：
+  | 用途 | 连接 | 原因 |
+  |---|---|---|
+  | claim / reclaim / 进度 / 完成 / 失败 | **admin（BYPASSRLS）** | 必须看到全部租户的队列 |
+  | handler 里的业务读写 | **租户会话（set_config）** | RLS 必须生效 |
+
+  `tasks` 在 `RLS_TABLES` 里，用普通会话扫会被过滤成空——**不报错，只是永远
+  捡不到任务**。反过来让业务读写也走 admin，等于把 RLS 整个撤掉。
+- **进度回写必须用独立短事务**：写进工作事务里，提交前谁都看不到，
+  前端进度会一直停在 0 然后跳到 100。`ProgressReporter` 自带会话工厂。
+- **`progress=100` 只由 `complete()` 设置**，handler 上报上限 99。
+  否则仍在跑（甚至马上要失败）的任务会显示"已完成"。
+- **业务提交与"标记任务成功"分两个事务**：合成大事务会让事务持续
+  整个任务时长（可能 10 分钟），占住连接、阻塞 vacuum、崩溃时白算。
+  代价是两步之间崩溃会重派 → **handler 必须幂等**（不是建议是必需）。
+  幂等做法：确定性存储键 + 乐观锁 / upsert。
+- **失败分类决定重试**：RETRYABLE 才重试（指数退避，上限 600s），
+  PERMANENT（文件损坏/payload 非法）与 FATAL（未知 bug/配置错）直接死信。
+  把永久失败重试 3 次是纯浪费：白占 3 个槽位几分钟，用户多等三轮退避。
+- **适配层异常靠 `retryable` 协议属性分类**，不用 isinstance：
+  core 不能 import adapters。`StorageError(retryable=True)` 若被当成 FATAL，
+  偶发网络抖动就变成永久失败。
+- **回收崩溃任务不能省**（`reclaim_stale`）：worker 被 kill 后任务永远停在
+  running，表现为"文档一直处理中而队列是空的"——没有报错，最难排查。
+  回收时 `retry_count + 1`，防毒任务被无限重派。
+- **SIGTERM 只置标志，不强杀在途任务**：强杀留下半成品数据，
+  且任务要等 10 分钟 lock_timeout 才回收。
+- **解析产物不进数据库**：全文写对象存储派生键
+  `parsed/{tenant}/{version}.txt`（确定性键，重跑不产生孤儿），
+  DB 只存 key + hash + 统计。全文进 JSONB 会撑大 TOAST、备份暴涨、
+  切分时整块反序列化进内存。
+- **取 ORM 关系必须 eager load**（`selectinload`）：async 会话里隐式懒加载
+  直接抛 `MissingGreenlet`，不是"慢一点"。

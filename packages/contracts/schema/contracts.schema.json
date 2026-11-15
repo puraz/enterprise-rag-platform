@@ -234,7 +234,7 @@
         "text",
         "image"
       ],
-      "description": "文档格式。决定用哪个 parser 实现。\n\n    新增格式时必须同步：\n    1. `rag_api.parsers` 下的解析器实现；\n    2. 前端上传组件的 `accept` 白名单；\n    3. 本文档的注释（说明该格式的已知坑）。"
+      "description": "文档格式。决定用哪个 parser 实现。\n\n    新增格式时必须同步：\n    1. `rag_adapters.parsers` 下的解析器实现；\n    2. 前端上传组件的 `accept` 白名单；\n    3. 本文档的注释（说明该格式的已知坑）。"
     },
     "SourceType": {
       "title": "SourceType",

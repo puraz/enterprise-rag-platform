@@ -37,6 +37,7 @@ from typing import Any
 
 from fastapi import APIRouter, FastAPI
 
+from rag_adapters.storages.factory import build_all_storages
 from rag_api.api.health import router as health_router
 from rag_api.api.v1.admin_audit import router as admin_audit_router
 from rag_api.api.v1.auth import build_auth_router, build_me_router
@@ -46,7 +47,6 @@ from rag_api.identity.factory import available_providers
 from rag_api.identity.tokens import TokenService
 from rag_api.middleware import AccessLogMiddleware, RequestContextMiddleware
 from rag_api.security.pii import redact_text as redact_pii
-from rag_api.storages.factory import build_all_storages
 from rag_core.db import Database, wait_until_ready
 from rag_core.errors import ConfigError
 from rag_core.logging import get_logger, register_text_redactor, setup_logging

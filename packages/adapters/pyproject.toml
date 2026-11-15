@@ -1,0 +1,40 @@
+[project]
+name = "rag-adapters"
+version = "0.1.0"
+description = "可插拔适配层：文档解析 / 对象存储 / 模型 Provider（api 与 worker 共用）"
+requires-python = ">=3.12,<3.13"
+# 为什么单独一个包，而不是留在 apps/api：
+#   worker 必须解析文档、下载对象、算 embedding，但「worker 禁止 import
+#   apps/api」是硬约束；core 又规定「不含业务概念」。三条约束叠加后，
+#   适配层只能落在共享包里——和 packages/db 的成因完全相同。
+#
+# 依赖只到 core/contracts：适配层不认识 ORM，也不认识路由。
+dependencies = [
+    "rag-core",
+    "rag-contracts",
+    # LLM（langchain-openai 自带 openai SDK），不自研 HTTP 客户端
+    "langchain-core>=0.3",
+    "langchain-openai>=0.3",
+    # 本地 embedding（bge-m3）+ CUDA
+    "sentence-transformers>=3.3",
+    "torch>=2.5",
+    # 对象存储：S3 协议一套代码兼容 AWS/MinIO/OSS/COS
+    "boto3>=1.35",
+    "types-boto3>=1.35",
+    # 解析：PDF 用 PyMuPDF（唯一能给 bbox），其余用轻量库
+    "pymupdf>=1.24",
+    "docx2txt>=0.8",
+    "python-pptx>=1.0",
+    "openpyxl>=3.1",
+]
+
+[tool.uv.sources]
+rag-core = { workspace = true }
+rag-contracts = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rag_adapters"]

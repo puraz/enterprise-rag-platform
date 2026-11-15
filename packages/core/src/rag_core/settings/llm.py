@@ -93,7 +93,7 @@ class LLMSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
 
     provider: str = "deepseek"
-    """供应商名。对应 `rag_api.providers` 注册表的键。"""
+    """供应商名。对应 `rag_adapters.providers` 注册表的键。"""
 
     api_key: str = ""
     """API Key。**只从环境变量 `RAG_LLM__API_KEY` 读取，不进库、不进日志**。

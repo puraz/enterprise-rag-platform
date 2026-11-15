@@ -31,7 +31,15 @@ dev = [
 line-length = 100
 target-version = "py312"
 # 显式列出，避免 glob 在 ruff 各版本行为差异；影响 isort 的第一方包判定
-src = ["packages/core/src", "packages/contracts/src", "apps/api/src", "apps/worker/src", "tests"]
+src = [
+    "packages/core/src",
+    "packages/contracts/src",
+    "packages/db/src",
+    "packages/adapters/src",
+    "apps/api/src",
+    "apps/worker/src",
+    "tests",
+]
 
 [tool.ruff.lint]
 # E/W pycodestyle | F pyflakes | I isort | N pep8-naming | UP pyupgrade
@@ -52,7 +60,7 @@ ignore = [
 exclude = ["packages/db/alembic/versions/*.py"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["rag_core", "rag_contracts", "rag_db", "rag_api", "rag_worker"]
+known-first-party = ["rag_core", "rag_contracts", "rag_db", "rag_adapters", "rag_api", "rag_worker"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S105", "S106"]  # 测试 fixture 里的假密码/假 token 不算泄密
@@ -79,7 +87,14 @@ warn_no_return = true
 show_error_codes = true
 pretty = true
 files = ["packages", "apps"]
-mypy_path = ["packages/core/src", "packages/contracts/src", "apps/api/src", "apps/worker/src"]
+mypy_path = [
+    "packages/core/src",
+    "packages/contracts/src",
+    "packages/db/src",
+    "packages/adapters/src",
+    "apps/api/src",
+    "apps/worker/src",
+]
 
 [[tool.mypy.overrides]]
 module = ["tests.*"]

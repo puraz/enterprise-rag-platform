@@ -50,7 +50,7 @@ import tempfile
 from collections.abc import AsyncIterator, Iterator
 from typing import Any, BinaryIO
 
-from rag_api.storages.base import (
+from rag_adapters.storages.base import (
     MultipartUpload,
     ObjectMetadata,
     ObjectNotFoundError,

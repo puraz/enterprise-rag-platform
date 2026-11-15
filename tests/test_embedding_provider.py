@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from rag_api.providers.embedding import (
+from rag_adapters.providers.embedding import (
     EmbeddingCapabilities,
     EmbeddingProvider,
     EmbeddingProviderError,
@@ -171,7 +171,7 @@ def test_factory_rejects_dimension_mismatch() -> None:
 
     工厂在构造时校验，让配置错误在**启动阶段**暴露。
     """
-    from rag_api.providers import factory as provider_factory
+    from rag_adapters.providers import factory as provider_factory
 
     settings = get_settings()
     # 临时替换注册表，注入错误维度的实现
@@ -199,7 +199,7 @@ def test_factory_rejects_unknown_provider() -> None:
 
     静默回退会让"本想用本地模型却实际走了 API"变成看不见的配置事故。
     """
-    from rag_api.providers import factory as provider_factory
+    from rag_adapters.providers import factory as provider_factory
     from rag_core.errors import ConfigError
 
     settings = get_settings()
@@ -313,7 +313,7 @@ def test_embedding_settings_rejects_invalid_dimension() -> None:
 @pytest.fixture(scope="module")
 def real_provider() -> Any:
     """真实 bge-m3 Provider（module 级复用，避免重复加载 2.2GB 模型）。"""
-    from rag_api.providers.bge import LocalBGEEmbedding
+    from rag_adapters.providers.bge import LocalBGEEmbedding
 
     settings = get_settings().embedding
     return LocalBGEEmbedding(settings)

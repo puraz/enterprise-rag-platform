@@ -235,7 +235,7 @@ export type DocumentVersionStatus =
 /**
  * 文档格式。决定用哪个 parser 实现。
  * 新增格式时必须同步：
- * 1. `rag_api.parsers` 下的解析器实现；
+ * 1. `rag_adapters.parsers` 下的解析器实现；
  * 2. 前端上传组件的 `accept` 白名单；
  * 3. 本文档的注释（说明该格式的已知坑）。
  */

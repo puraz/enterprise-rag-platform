@@ -38,7 +38,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from rag_api.parsers.base import (
+from rag_adapters.parsers.base import (
     BaseParser,
     ParsedDocument,
     ParseError,

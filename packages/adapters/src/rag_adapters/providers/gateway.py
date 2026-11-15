@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from rag_api.providers.llm import (
+from rag_adapters.providers.llm import (
     LLMMessage,
     LLMProvider,
     LLMProviderError,

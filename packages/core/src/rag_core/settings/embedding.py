@@ -30,7 +30,7 @@ class EmbeddingSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
 
     provider: str = "local_bge"
-    """实现名。对应 `rag_api.providers.factory` 的注册表键。
+    """实现名。对应 `rag_adapters.providers.factory` 的注册表键。
 
     可选：`local_bge`（sentence-transformers）、`openai`（API）、`fake`（测试）。
     """

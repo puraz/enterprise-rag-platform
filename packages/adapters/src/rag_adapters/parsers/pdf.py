@@ -56,7 +56,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from rag_api.parsers.base import (
+from rag_adapters.parsers.base import (
     BaseParser,
     PageInfo,
     ParsedDocument,
@@ -96,7 +96,7 @@ class PdfParser(BaseParser):
 
     def parse(self, path: Path, *, format: DocumentFormat) -> ParsedDocument:
         if format is not DocumentFormat.PDF:
-            from rag_api.parsers.base import UnsupportedFormatError
+            from rag_adapters.parsers.base import UnsupportedFormatError
 
             raise UnsupportedFormatError(format.value)
 
