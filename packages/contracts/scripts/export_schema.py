@@ -22,6 +22,7 @@ from rag_contracts.api.auth import (
     HealthResponse,
     LoginResponse,
 )
+from rag_contracts.api.pagination import PageMeta, PageRequest
 from rag_contracts.enums import (
     AuditAction,
     AuditOutcome,
@@ -64,6 +65,8 @@ EXPORTED_MODELS: tuple[type[BaseModel], ...] = (
     LoginResponse,
     CurrentUserResponse,
     HealthResponse,
+    PageMeta,
+    PageRequest,
 )
 
 # 需要导出的枚举。导出成 TS 字符串联合类型，而不是 TS enum
@@ -72,7 +75,8 @@ EXPORTED_MODELS: tuple[type[BaseModel], ...] = (
 # 枚举按业务域组织在 `rag_contracts.enums` 包内（tenancy.py / documents.py / …），
 # 新增域文件后必须把其中的枚举登记到这里——否则前端拿不到类型。
 # `tests/test_enums.py` 会自动扫描 enums 包校验是否漏登记，漏了会红。
-EXPORTED_ENUMS: dict[str, type[str]] = {
+# 枚举可能是 StrEnum（状态）或 IntEnum（错误码），用 `type` 而非 `type[str]`
+EXPORTED_ENUMS: dict[str, type] = {
     # ---- 错误码域（在 rag_contracts.errors，不是 enums 包）----
     "ErrorCode": ErrorCode,
     "ErrorCategory": ErrorCategory,
@@ -113,12 +117,23 @@ EXPORTED_ENUMS: dict[str, type[str]] = {
 }
 
 
-def _enum_schema(name: str, enum_type: type[str]) -> dict[str, Any]:
-    """把 StrEnum 导出成 JSON Schema 的 enum 定义。"""
-    values = [member.value for member in enum_type]  # type: ignore[attr-defined]
+def _enum_schema(name: str, enum_type: type) -> dict[str, Any]:
+    """把枚举导出成 JSON Schema 的 enum 定义。
+
+    支持两种：
+    - `StrEnum`（状态码类）→ `type: string`，值是字符串；
+    - `IntEnum`（错误码）→ `type: integer`，值是整数。
+
+    类型必须按实际值推断，不能一律写 string：
+    错误码是数字，若声明成 string，前端会得到 `"10101"` 这样的字符串字面量，
+    与响应里的数字 `10101` 类型不匹配。
+    """
+    members = list(enum_type)  # type: ignore[call-overload]
+    values = [member.value for member in members]
+    schema_type = "integer" if values and isinstance(values[0], int) else "string"
     return {
         "title": name,
-        "type": "string",
+        "type": schema_type,
         "enum": values,
         "description": (enum_type.__doc__ or "").strip(),
     }

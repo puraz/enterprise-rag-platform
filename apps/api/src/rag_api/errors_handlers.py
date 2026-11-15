@@ -138,7 +138,7 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException) 
     )
 
     return _json(
-        ErrorResponse(code=code, message=message, request_id=request_id),
+        ErrorResponse.build(code=code, message=message, request_id=request_id),
         exc.status_code,
     )
 
@@ -162,7 +162,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     )
 
     return _json(
-        ErrorResponse(
+        ErrorResponse.build(
             code=ErrorCode.INTERNAL_UNEXPECTED,
             message="服务内部错误，请提供 request_id 联系管理员",
             request_id=request_id,

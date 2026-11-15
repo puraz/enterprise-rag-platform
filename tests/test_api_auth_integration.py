@@ -111,7 +111,8 @@ def test_login_without_tenant_is_forbidden(app_client: TestClient) -> None:
 
     response = app_client.post("/api/v1/auth/dev-login", json={"credential": f"dev:{subject}"})
     assert response.status_code == 403
-    assert response.json()["code"] == "AUTHZ.FORBIDDEN"
+    assert response.json()["code"] == 20001
+    assert response.json()["code_name"] == "AUTHZ_FORBIDDEN"
 
 
 def test_token_bound_to_tenant(app_client: TestClient) -> None:

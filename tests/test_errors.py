@@ -36,36 +36,42 @@ from rag_core.errors import (
 
 
 def test_error_codes_are_unique() -> None:
-    """错误码字符串值不能重复。
+    """错误码数值不能重复。
 
-    成员名唯一由语言保证，但字符串值是我们手写的——重复会让前端
-    分支判断命中错误的处理逻辑（比如把限流当成配额耗尽）。
+    重复会让前端分支判断命中错误的处理逻辑
+    （比如把限流当成配额耗尽）。
     """
-    values = [code.value for code in ErrorCode]
+    values = [int(code) for code in ErrorCode]
     duplicates = {value for value in values if values.count(value) > 1}
     assert not duplicates, f"重复的错误码: {duplicates}"
 
 
-def test_error_code_format_is_domain_dot_reason() -> None:
-    """错误码必须是 `DOMAIN.REASON` 格式，前端按前缀分类处理。"""
-    for code in ErrorCode:
-        domain, _, reason = code.value.partition(".")
-        assert domain, f"{code.value} 缺少域名前缀"
-        assert reason, f"{code.value} 缺少含义部分"
-        assert domain.isupper(), f"{code.value} 的域名必须大写"
-        assert " " not in code.value
+def test_error_code_follows_domain_ranges() -> None:
+    """错误码必须落在合法号段内（0xxxx - 9xxxx）。
 
-
-def test_error_code_member_name_matches_value() -> None:
-    """成员名必须等于字符串值把点换成下划线。
-
-    允许两者不同会制造致命的困惑：日志里看到 `AUTH_TOKEN_EXPIRED`，
-    代码里却要写 `ErrorCode.AUTH_EXPIRED`，来回对照极易写错。
+    号段是扩容的基础：新增域从号段表申请，不重排已有码。
+    落在号段外的码（比如 123456）说明有人随手写了个数字，
+    以后会和其它域冲突。
     """
     for code in ErrorCode:
-        assert code.name == code.value.replace(".", "_"), (
-            f"成员名 {code.name} 与字符串值 {code.value} 不一致"
-        )
+        value = int(code)
+        assert 0 < value < 100_000, f"{code.name}={value} 超出号段范围"
+        # 域号 = value // 10000，必须在 0-9
+        assert 0 <= code.domain <= 9, f"{code.name}={value} 域号非法"
+
+
+def test_error_code_name_is_readable() -> None:
+    """语义名（成员名）必须全大写下划线，且能被 `code_name()` 查回。
+
+    语义名是日志与审计里唯一可读的标识——`10101` 在日志里毫无意义。
+    """
+    from rag_contracts.errors import code_name
+
+    for code in ErrorCode:
+        assert code.name == code.name.upper(), f"{code.name} 不是大写"
+        assert " " not in code.name
+        # 数字码 → 语义名的反查必须一致
+        assert code_name(int(code)) == code.name
 
 
 # ==================================================== 分类与状态码推导
@@ -171,12 +177,16 @@ def test_provider_errors_do_not_echo_prompt_content() -> None:
 
 
 def test_to_response_produces_contract_shape() -> None:
-    """对外响应必须是 ErrorResponse，且 request_id 必须被注入。"""
+    """对外响应必须是 ErrorResponse，且 request_id 与 code_name 都要填。"""
     error = NotFoundError("文档不存在")
     response = error.to_response("req-abc")
 
     assert isinstance(response, ErrorResponse)
-    assert response.code is ErrorCode.COMMON_NOT_FOUND
+    # code 是数字（前端做 switch 用）
+    assert response.code == int(ErrorCode.COMMON_NOT_FOUND)
+    assert isinstance(response.code, int)
+    # code_name 是语义名（日志/排障用）
+    assert response.code_name == "COMMON_NOT_FOUND"
     assert response.message == "文档不存在"
     assert response.request_id == "req-abc"
 
@@ -280,8 +290,15 @@ def test_system_errors_are_not_expected() -> None:
 
 
 def test_error_str_is_readable_in_logs() -> None:
-    """__str__ 要能直接用于日志，带码便于 grep。"""
-    assert str(NotFoundError("文档 d-1 不存在")) == "[COMMON.NOT_FOUND] 文档 d-1 不存在"
+    """__str__ 要同时带语义名与数字码。
+
+    日志里 grep `COMMON_NOT_FOUND` 比 grep `3` 可靠得多
+    （数字 3 会命中无数无关内容）。
+    """
+    text = str(NotFoundError("文档 d-1 不存在"))
+    assert "COMMON_NOT_FOUND" in text
+    assert str(int(ErrorCode.COMMON_NOT_FOUND)) in text
+    assert "文档 d-1 不存在" in text
 
 
 # ==================================================== 契约不可回退

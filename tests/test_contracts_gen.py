@@ -102,8 +102,9 @@ def test_enums_render_as_string_literal_union(gen_ts_mod: Any, bundle: dict[str,
     """
     source = gen_ts_mod.generate_ts(bundle)
     assert "export type ErrorCode =" in source
-    assert '"AUTH.TOKEN_EXPIRED"' in source
-    assert "enum ErrorCode" not in source
+    # ErrorCode 是 IntEnum → 数字字面量联合类型（前端可做穷尽检查）
+    assert "10101" in source, "数字错误码应渲染为数字字面量"
+    assert "enum ErrorCode" not in source, "不应生成 TS enum（有运行时开销）"
 
 
 def test_generated_source_has_no_any(gen_ts_mod: Any, bundle: dict[str, Any]) -> None:
@@ -126,8 +127,10 @@ def test_required_and_optional_fields_correct(gen_ts_mod: Any, bundle: dict[str,
     前端会漏拿到必填字段的空值检查。
     """
     source = gen_ts_mod.generate_ts(bundle)
-    # ErrorResponse.code 是必填（输出只排除 $defs 后仍保留 required）
-    assert "code: ErrorCode;" in source
+    # ErrorResponse.code 是必填（数字）
+    assert "code: number;" in source
+    # code_name 是必填字符串
+    assert "code_name: string;" in source
     # fields 有 default_factory，可省
     assert "fields?: FieldError[];" in source
 

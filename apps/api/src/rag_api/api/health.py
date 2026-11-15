@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request, Response
 
+from rag_api.openapi import PUBLIC_ENDPOINT
 from rag_contracts.api.auth import HealthResponse
 from rag_core.logging import get_logger
 
@@ -40,6 +41,7 @@ router = APIRouter(prefix="/health", tags=["health"])
     response_model=HealthResponse,
     summary="存活检查",
     description="只验证进程能响应，不检查依赖。失败时编排器应重启容器。",
+    responses=PUBLIC_ENDPOINT,
 )
 async def liveness(request: Request) -> HealthResponse:
     settings = request.app.state.settings
@@ -59,6 +61,10 @@ async def liveness(request: Request) -> HealthResponse:
         "失败时编排器应摘除流量（**不要重启**）："
         "依赖故障重启容器没有帮助，只会放大故障。"
     ),
+    responses={
+        **PUBLIC_ENDPOINT,
+        503: {"model": HealthResponse, "description": "依赖不可用（status=degraded）"},
+    },
 )
 async def readiness(request: Request, response: Response) -> HealthResponse:
     settings = request.app.state.settings

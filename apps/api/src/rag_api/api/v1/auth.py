@@ -36,6 +36,7 @@ from rag_api.deps import Principal, get_current_principal, get_db
 from rag_api.identity.factory import build_identity_provider
 from rag_api.identity.provider import ExternalIdentity, IdentityProviderError
 from rag_api.identity.tokens import TokenService
+from rag_api.openapi import AUTHENTICATED_ENDPOINT, PUBLIC_ENDPOINT
 from rag_contracts.api.auth import CurrentUserResponse, DevLoginRequest, LoginResponse
 from rag_contracts.enums import TenantRole
 from rag_core.db import Database
@@ -67,6 +68,9 @@ def build_me_router() -> APIRouter:
         response_model=CurrentUserResponse,
         summary="当前用户信息",
         description="返回 token 对应的用户与当前租户角色。",
+        # 关键：把 401/403/422/500 声明进 OpenAPI，
+        # 前端生成 TS 类型时才能看到错误响应的形状
+        responses=AUTHENTICATED_ENDPOINT,
     )
     async def get_me(
         principal: Principal = Depends(get_current_principal),  # noqa: B008
@@ -110,6 +114,7 @@ def _register_dev_routes(router: APIRouter) -> None:
             "注意：新用户若未加入任何租户会返回 403 —— 这是有意的设计，"
             "自动建租户会让任何人登录即拥有租户。本地开发请用 `/dev-bootstrap`。"
         ),
+        responses=PUBLIC_ENDPOINT,
     )
     async def dev_login(  # pyright: ignore[reportUnusedFunction]
         payload: DevLoginRequest,
@@ -155,6 +160,7 @@ def _register_dev_routes(router: APIRouter) -> None:
             "**生产环境不存在此端点**。真实流程里开通租户必须由管理员操作——"
             "自动建租户会让任何人登录即拥有租户，配额完全失控。"
         ),
+        responses=PUBLIC_ENDPOINT,
     )
     async def dev_bootstrap(  # pyright: ignore[reportUnusedFunction]
         payload: DevLoginRequest,

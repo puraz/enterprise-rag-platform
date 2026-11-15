@@ -13,68 +13,88 @@
 // ============================ 枚举 ============================
 
 /**
- * 全平台错误码。
- * 字符串值形如 `<域>.<含义>`，前缀即分类，便于前端一眼判断处理策略。
+ * 全平台业务错误码。
+ * 成员名是语义名（对应 `code_name`），值是数字码。
+ * 用 `IntEnum` 而不是 `StrEnum`：序列化时自然是数字，
+ * 且可以做数值比较（前端按号段判断）。
  */
 export type ErrorCode =
-  | "COMMON.VALIDATION_FAILED"
-  | "COMMON.BAD_REQUEST"
-  | "COMMON.NOT_FOUND"
-  | "COMMON.METHOD_NOT_ALLOWED"
-  | "COMMON.PAYLOAD_TOO_LARGE"
-  | "COMMON.UNSUPPORTED_MEDIA_TYPE"
-  | "COMMON.RATE_LIMITED"
-  | "COMMON.IDEMPOTENCY_CONFLICT"
-  | "COMMON.CONFLICT"
-  | "COMMON.PRECONDITION_FAILED"
-  | "AUTH.UNAUTHENTICATED"
-  | "AUTH.TOKEN_EXPIRED"
-  | "AUTH.TOKEN_INVALID"
-  | "AUTH.TOKEN_REVOKED"
-  | "AUTH.REFRESH_REUSED"
-  | "AUTH.INVALID_CREDENTIALS"
-  | "AUTH.ACCOUNT_DISABLED"
-  | "AUTH.IDP_UNAVAILABLE"
-  | "AUTHZ.FORBIDDEN"
-  | "AUTHZ.TENANT_MISMATCH"
-  | "AUTHZ.INSUFFICIENT_ROLE"
-  | "AUTHZ.DOCUMENT_ACCESS_DENIED"
-  | "AUTHZ.CLASSIFICATION_DENIED"
-  | "DOC.NOT_FOUND"
-  | "DOC.DUPLICATE"
-  | "DOC.STATUS_CONFLICT"
-  | "DOC.UNSUPPORTED_FORMAT"
-  | "DOC.PARSE_FAILED"
-  | "DOC.VERSION_NOT_FOUND"
-  | "CHUNK.NOT_FOUND"
-  | "KB.NOT_FOUND"
-  | "KB.NAME_CONFLICT"
-  | "CONV.NOT_FOUND"
-  | "CONV.BUSY"
-  | "UPLOAD.SESSION_NOT_FOUND"
-  | "UPLOAD.SESSION_EXPIRED"
-  | "UPLOAD.PART_MISMATCH"
-  | "UPLOAD.INCOMPLETE"
-  | "UPLOAD.HASH_MISMATCH"
-  | "UPLOAD.EMPTY_FILE"
-  | "UPLOAD.FILE_TOO_LARGE"
-  | "UPLOAD.MIME_MISMATCH"
-  | "TASK.NOT_FOUND"
-  | "TASK.NOT_CANCELLABLE"
-  | "INDEX.REBUILD_IN_PROGRESS"
-  | "INDEX.VERSION_NOT_FOUND"
-  | "QUOTA.EXCEEDED"
-  | "QUOTA.BUDGET_EXHAUSTED"
-  | "PROVIDER.UNAVAILABLE"
-  | "PROVIDER.TIMEOUT"
-  | "PROVIDER.RATE_LIMITED"
-  | "PROVIDER.AUTH_FAILED"
-  | "PROVIDER.CONTENT_FILTERED"
-  | "PROVIDER.INVALID_RESPONSE"
-  | "INTERNAL.UNEXPECTED"
-  | "INTERNAL.CONFIG_ERROR"
-  | "INTERNAL.DEPENDENCY_UNAVAILABLE"
-  | "INTERNAL.NOT_IMPLEMENTED";
+  | 1
+  | 2
+  | 3
+  | 4
+  | 5
+  | 6
+  | 7
+  | 8
+  | 9
+  | 10
+  | 10001
+  | 10101
+  | 10102
+  | 10103
+  | 10104
+  | 10105
+  | 10201
+  | 10202
+  | 10301
+  | 10302
+  | 20001
+  | 20101
+  | 20201
+  | 20301
+  | 20302
+  | 30001
+  | 30002
+  | 30003
+  | 31001
+  | 31002
+  | 31003
+  | 31004
+  | 31005
+  | 31101
+  | 31102
+  | 32001
+  | 32002
+  | 32003
+  | 40001
+  | 40002
+  | 41001
+  | 41002
+  | 41003
+  | 42001
+  | 42002
+  | 50001
+  | 50002
+  | 50101
+  | 50102
+  | 50103
+  | 50201
+  | 50202
+  | 50203
+  | 50204
+  | 50301
+  | 50302
+  | 60001
+  | 60002
+  | 60003
+  | 60101
+  | 60201
+  | 70001
+  | 70002
+  | 70003
+  | 80001
+  | 80101
+  | 80102
+  | 80201
+  | 80301
+  | 80302
+  | 80303
+  | 90001
+  | 90101
+  | 90201
+  | 90301
+  | 90302;
 
 /**
  * 错误大类。决定"该谁负责"和"前端该怎么处理"。
@@ -458,8 +478,10 @@ export type ModelCallStatus =
 
 /** 统一错误响应体。所有非 2xx 响应都必须是这个形状。 */
 export interface ErrorResponse {
-  /** 业务错误码，前端按此分支处理 */
-  code: ErrorCode;
+  /** 业务错误码（数字）。按域号段编码：0xxxx 通用、1xxxx 认证、2xxxx 授权、3xxxx 文档、4xxxx 检索、5xxxx 上传、6xxxx 任务、7xxxx 配额、8xxxx 供应商、9xxxx 内部。前端按此分支处理，**一旦发布不可变更语义** */
+  code: number;
+  /** 错误码的语义名，便于日志检索与排障（如 AUTH_TOKEN_EXPIRED） */
+  code_name: string;
   /** 面向用户的中文错误信息 */
   message: string;
   /** 请求追踪 ID，报障时提供此值 */
@@ -524,4 +546,32 @@ export interface HealthResponse {
   environment: string;
   /** 各依赖的检查结果（ok / 错误摘要） */
   checks?: Record<string, string>;
+}
+
+/** 分页元信息。 */
+export interface PageMeta {
+  /** 每页条数（服务端上限 100） */
+  limit: number;
+  /** 跳过的条数 */
+  offset: number;
+  /** 总条数。仅在请求带 `include_total=true` 时返回，否则为 null —— 大表上 COUNT(*) 很慢，不应默认执行 */
+  total?: number | null;
+  /** 是否还有下一页。无限滚动只需看这个字段 */
+  has_more: boolean;
+}
+
+/**
+ * 分页请求参数（可作为 query 依赖使用）。
+ * 路由层用法：
+ * async def list_documents(page: PageRequest = Depends(page_query)): ...
+ * 校验规则放在这里而不是每个路由各写一遍——否则不同接口的
+ * 上限会不一致（A 接口 50、B 接口 1000），前端无法统一处理。
+ */
+export interface PageRequest {
+  /** 每页条数，上限 100 */
+  limit?: number;
+  /** 跳过的条数 */
+  offset?: number;
+  /** 是否返回总条数（会触发额外 COUNT 查询） */
+  include_total?: boolean;
 }

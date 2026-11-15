@@ -49,12 +49,21 @@ contracts ← core ← db ← api / worker
 ```
 api 与 worker **互不依赖**，只通过契约、数据库状态、队列消息通信。
 
-后端分层（apps/api 内）：api(路由) / schemas / services(业务) / deps /
+后端分层（apps/api 内）：api(路由) / schemas / services(业务) / deps(依赖注入) /
           pipelines / retrievers / parsers / chunkers / storages /
-          providers / identity / evaluators / workers
+          providers / identity / evaluators / workers / openapi
 前端分层：routes / features / components / hooks / api(自动生成，别手改) / stores
 - 路由里不写业务逻辑；service 里不写 SQL；SQL 只在 packages/db 的 repository。
 - 依赖方向单向向内，禁止反向 import。
+
+**依赖注入按用途分包**（`rag_api/deps/`），不是一个 deps.py 堆到底：
+| 文件 | 职责 |
+|---|---|
+| `app.py` | 进程级单例（Database/Redis/TokenService/Settings），从 app.state 取 |
+| `auth.py` | `Principal`、`get_current_principal`（只验签不查库）、`require_platform_role` |
+| `database.py` | `get_db`（带租户上下文）/ `get_session`（无上下文）/ `get_admin_db`（跨租户） |
+| `pagination.py` | 分页参数统一解析与上限校验 |
+业务代码统一 `from rag_api.deps import get_db`，不直接 import 内部模块。
 
 ## 4. 硬约束（违反即打回，没有例外）
 - **端边界**：跨端只走 API 或队列消息。apps/worker 禁止 import apps/api；
@@ -71,11 +80,74 @@ api 与 worker **互不依赖**，只通过契约、数据库状态、队列消�
 - 全异步 I/O；CPU 密集(解析/OCR/embedding)隔离到进程池或 worker，不阻塞事件循环。
 - mypy 严格 + ruff + TS strict + eslint 必须通过；全量类型注解；中文注释。
 
+### 4.1 响应契约（前端对接的唯一形状）
+
+- **成功响应 = 裸数据**，不做 `{code, message, data}` 外层包裹。
+  错误靠 HTTP 状态码 + `ErrorResponse.code` 分支。
+- **错误响应唯一形状** = `rag_contracts.errors.ErrorResponse`：
+  `{code: int, code_name: str, message, request_id, fields, details}`。
+  FastAPI 默认的 `{"detail": ...}` 已由全局处理器转换，不得绕过。
+- **每个路由必须声明 `responses=`**，否则 OpenAPI 里只有 200，
+  前端生成 TS 时看不到错误类型。用 `rag_api/openapi.py` 的现成组合：
+  `PUBLIC_ENDPOINT` / `AUTHENTICATED_ENDPOINT` / `TENANT_ENDPOINT` /
+  `TENANT_WRITE_ENDPOINT` / `ADMIN_ENDPOINT` / `UPLOAD_ENDPOINT`。
+  `tests/test_openapi_contract.py` 会检查所有路由都有非 2xx 声明，
+  且错误 schema 必须是 `ErrorResponse`（健康检查例外）。
+- **状态码语义**：创建返回 `201`、无返回体用 `204`、异步任务已接受用 `202`；
+  不在业务异常里手写状态码，`AppError.http_status` 由 `category` 推导
+  （**不要按码的域号段推导**：0xxxx 通用域里既有 422 又有 404）。
+- **401 只用于身份不成立**，403 只用于身份成立但无权，
+  越权访问资源统一返回 404（不泄漏资源存在性）。
+
+### 4.1.1 业务错误码（双轨：数字码 + 语义名）
+
+- `code` 是**数字**（`IntEnum`），前端按它 `switch`、按号段批量判断、写告警规则。
+- `code_name` 是**语义名**，日志/审计/排障用它（`10101` 在日志里不可读）。
+- **HTTP 状态码与业务码解耦**：同一业务码在不同路由可能有不同状态码，
+  但业务码永不改变语义。
+- **号段规划**（每域 10000 个，新增域从号段表申请，不重排已有码）：
+
+  | 号段 | 域 |
+  |---|---|
+  | `0xxxx` | 通用/框架（校验、路由、限流） |
+  | `1xxxx` | 认证 AuthN（token、登录、IdP） |
+  | `2xxxx` | 授权 AuthZ（角色、ACL、密级、跨租户） |
+  | `3xxxx` | 知识库与文档 |
+  | `4xxxx` | 分块/索引/检索 |
+  | `5xxxx` | 上传与存储 |
+  | `6xxxx` | 任务与队列 |
+  | `7xxxx` | 配额与计费 |
+  | `8xxxx` | 外部供应商 |
+  | `9xxxx` | 内部系统 |
+
+- **码一旦发布不可改**：前端会硬编码。需要新语义时新增码、
+  把旧码标 deprecated，**绝不复用已废弃的码**。
+- 新增错误码必须同时更新：`rag_contracts.errors.codes.ErrorCode`、
+  对应异常类（`rag_core.errors`）、必要时 `_CODE_STATUS_OVERRIDES`。
+  `tests/test_error_codes.py` 检查号段合法性、唯一性、名字反查一致性。
+
+### 4.2 分页契约（已放宽"禁用 OFFSET"）
+
+- 列表接口统一返回 `Page[T]`：`{items: [...], meta: {limit, offset, total, has_more}}`。
+- 分页参数走 `rag_api.deps.page_query`（`limit` 上限 100、`offset` 上限 10000）。
+  `offset` 超限返回 400，引导前端用过滤条件收窄范围，不让深翻页扫全表。
+- **`total` 默认不返回**（`include_total=false`）：`COUNT(*)` 在大表上很慢。
+  管理端需要"共 N 条"时才显式请求；列表默认只依赖 `has_more` 做无限滚动。
+- 深翻页的大表（审计日志）单独提供游标接口，不复用本契约。
+
+### 4.3 OpenAPI 输出
+
+- 契约真相是 `packages/contracts` 的 Pydantic 模型；OpenAPI 由 FastAPI 生成，
+  再由 `make gen-contracts` 转成前端 TS（Pydantic → JSON Schema → TS）。
+- **改了响应模型必须重跑 `make gen-contracts`**，`make check` 会拦住漂移。
+
 ## 5. 禁区（never do）
 - 不手改 packages/contracts 里自动生成的前端类型（改源头 schema 再 gen）。
 - 不把 API Key、真实租户数据、用户文档内容写进日志/异常/trace/测试 fixture。
 - 不新增同步阻塞调用到事件循环里（含 boto3 直调，要放线程池）。
-- 不用 OFFSET 分页（用 keyset）；不写 `SELECT *`；不在循环里查库(N+1)。
+- 分页统一走 `Page[T]` + `page_query` 依赖（见 4.2）；`offset` 上限 10000，
+  超限返回 400 而不是静默扫全表。**大数据量的深翻页场景必须用游标**。
+- 不写 `SELECT *`；不在循环里查库(N+1)；列表查询必须显式 `limit`。
 - 不在管理面之外暴露管理接口；高危操作不加审计与二次确认。
 - 不编造供应商模型名/API/配置项——不确定就去官方文档核对或问我。
 
