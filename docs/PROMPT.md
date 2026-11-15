@@ -116,7 +116,7 @@ packages/
               src/rag_db/{base.py,models/,repositories/}
               alembic/ + alembic.ini             # 迁移唯一入口
   adapters/   pyproject.toml → 包名 rag-adapters  → import rag_adapters
-              src/rag_adapters/{parsers/,storages/,providers/}
+              src/rag_adapters/{parsers/,chunkers/,storages/,providers/}
 apps/
   api/        pyproject.toml → 包名 rag-api       → import rag_api
   worker/     pyproject.toml → 包名 rag-worker    → import rag_worker
@@ -334,7 +334,7 @@ contracts  ←  core  ←  db      ←  api / worker
 - **可插拔是硬验收法**：换 LLM 供应商、换向量库、换存储、换 IdP、换队列、换评估器，**各自只应动一个适配层文件 + 一行配置**；换前端框架不应动后端一行。凡是要写 `if provider == "xxx"` 的地方，一律改成能力匹配或策略注册。
 - **高可用验收法**：任一外部依赖挂掉，系统按降级链继续可用且有明确提示，不雪崩、不无限重试、不耗尽连接池。每个降级路径都要有对应的故障注入测试。
 - **并发安全验收法**：每条共享状态（配额、成本、任务状态、上传会话、缓存、索引版本）都要有一个并发用例证明它不会错；压测后数据对账必须通过。
-- 分层：`api / schemas / services / repositories / core / pipelines / retrievers / chunkers / identity / evaluators / workers / deps`（parsers/storages/providers 已下沉到 packages/adapters）；前端 `routes / features / components / hooks / api(自动生成) / stores`。**路由不写业务逻辑，service 不散落 SQL**，依赖方向单向向内。
+- 分层：`api / schemas / services / repositories / core / pipelines / retrievers / identity / evaluators / workers / deps`（parsers/chunkers/storages/providers 都在 packages/adapters）；前端 `routes / features / components / hooks / api(自动生成) / stores`。**路由不写业务逻辑，service 不散落 SQL**，依赖方向单向向内。
 - 依赖倒置 + 工厂 + 配置注入，全部外部能力面向抽象；`ResilientCaller` 是唯一的重试/熔断入口。
 - 全异步 I/O（asyncpg / httpx / boto3 放线程池），CPU 密集（解析、OCR、embedding）隔离到进程池或独立 worker。
 - 全量类型注解，mypy 严格 + ruff 通过；前端 TS strict + eslint 通过。

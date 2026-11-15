@@ -65,6 +65,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from rag_adapters.parsers import ParsedDocument, ParseError, parse_document, verify_char_offsets
+from rag_adapters.parsers.artifact import (
+    PARSED_JSONL_SUFFIX,
+    PARSED_TEXT_SUFFIX,
+    BlockRecord,
+    PageRecord,
+    dump_parsed,
+)
 from rag_contracts.enums import DocumentFormat, DocumentStatus
 from rag_core.errors import NotFoundError
 from rag_core.logging import get_logger
@@ -270,16 +277,61 @@ class ParseDocumentHandler:
         document_id: uuid.UUID,
     ) -> None:
         """落解析产物 + 回写统计 + 推进状态。"""
-        parsed_key = f"{PARSED_KEY_PREFIX}{version.tenant_id}/{version.id}.txt"
-        encoded = parsed.text.encode("utf-8")
-        content_hash = hashlib.sha256(encoded).hexdigest()
+        base_key = f"{PARSED_KEY_PREFIX}{version.tenant_id}/{version.id}"
+        text_key = base_key + PARSED_TEXT_SUFFIX
+        artifact_key = base_key + PARSED_JSONL_SUFFIX
+
+        encoded_text = parsed.text.encode("utf-8")
+        content_hash = hashlib.sha256(encoded_text).hexdigest()
 
         # 派生产物写回**主**后端（blob 所在的可能是个正在退役的旧后端）。
         # 确定性键 + 内容寻址语义：重派任务重写同一对象，内容不变。
+        #
+        # 写两份：
+        # 1. .txt —— 纯文本，供全文检索/调试/人工比对，人眼可读；
+        # 2. .jsonl —— 结构化（块 + 页 + 偏移 + bbox + 标题层级），
+        #    切分器按它填 chunk 的位置字段。**没有它就做不出引用高亮**。
         await self._primary_storage.put(
-            parsed_key,
-            encoded,
+            text_key,
+            encoded_text,
             content_type="text/plain; charset=utf-8",
+        )
+
+        artifact = dump_parsed(
+            text=parsed.text,
+            blocks=[
+                BlockRecord(
+                    text=block.text,
+                    block_type=block.block_type,
+                    char_start=block.char_start,
+                    char_end=block.char_end,
+                    page_no=block.page_no,
+                    bbox=block.bbox,
+                    level=block.level,
+                    metadata=dict(block.metadata),
+                )
+                for block in parsed.blocks
+            ],
+            pages=[
+                PageRecord(
+                    page_no=page.page_no,
+                    width=page.width,
+                    height=page.height,
+                    char_start=page.char_start,
+                    char_end=page.char_end,
+                    is_scanned=page.is_scanned,
+                )
+                for page in parsed.pages
+            ],
+            parser_name=parsed.parser_name,
+            document_format=parsed.format.value,
+            has_scanned_pages=parsed.has_scanned_pages,
+            metadata=dict(parsed.metadata),
+        )
+        await self._primary_storage.put(
+            artifact_key,
+            artifact,
+            content_type="application/x-ndjson",
         )
 
         # ---- 版本级：解析统计 + 产物指针 ----
@@ -289,7 +341,10 @@ class ParseDocumentHandler:
         version.page_count = parsed.page_count or None
         version.parse_metadata = {
             **(version.parse_metadata or {}),
-            "parsed_key": parsed_key,
+            # parsed_key 保留指向 .txt（已有的调试/比对工具按它找）
+            "parsed_key": text_key,
+            # artifact_key 是切分器的输入（结构化，含位置信息）
+            "artifact_key": artifact_key,
             "parsed_hash": content_hash,
             "block_count": len(parsed.blocks),
             "page_count": len(parsed.pages),
@@ -324,7 +379,8 @@ class ParseDocumentHandler:
             block_count=len(parsed.blocks),
             char_count=len(parsed.text),
             has_scanned_pages=parsed.has_scanned_pages,
-            parsed_key=parsed_key,
+            parsed_key=text_key,
+            artifact_key=artifact_key,
         )
 
 

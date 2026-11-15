@@ -77,6 +77,9 @@ known-first-party = ["rag_core", "rag_contracts", "rag_db", "rag_adapters", "rag
 # 枚举包同理：ConfidentialityLevel.SECRET = "secret" 是密级常量，
 # 不是密码。按文件豁免（范围比按规则全局豁免窄得多）。
 "packages/contracts/src/rag_contracts/enums/*.py" = ["S105"]
+# 可视化脚本内嵌一段 HTML/CSS 模板。CSS 单行规则拆行会破坏可读性，
+# 且这段代码不参与业务逻辑（纯展示）。
+"scripts/chunk_preview.py" = ["E501"]
 
 # ------------------------------- mypy -------------------------------
 [tool.mypy]

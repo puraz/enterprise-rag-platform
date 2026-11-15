@@ -465,3 +465,40 @@ FastAPI 默认的 `{"detail": ...}` 已由全局处理器转换，不得绕过�
   切分时整块反序列化进内存。
 - **取 ORM 关系必须 eager load**（`selectinload`）：async 会话里隐式懒加载
   直接抛 `MissingGreenlet`，不是"慢一点"。
+
+### 4.12 分块层规范（`packages/adapters/src/rag_adapters/chunkers/`）
+
+- **位置信息是引用高亮的前提**：chunk 必须带 `char_start`/`char_end`/`page_no`/`bbox`/`section_path`。
+  丢了 `page_no`/`bbox` 等于永久失去"点击引用跳原文"的能力，而且后续环节无法补回。
+- **解析产物必须是结构化的**：worker 写 `parsed/{tenant}/{version}.jsonl`
+  （文本 + 块列表 + 页列表 + 偏移 + bbox + 标题层级），**不能只存纯文本**。
+  纯文本里没有页码与坐标，切分时无从推断。同目录还写一份 `.txt` 供人工比对。
+- **产物带 `format_version`**：跨进程/跨部署传递，改字段必须递增版本并在读侧拒绝不兼容版本。
+  "尽力解析"会让旧产物被成功读取但字段全空——表现为"chunk 没有页码"，不报错。
+- **偏移一致性是最重要的断言**：`text[char_start:char_end] == content`。
+  算错的表现是答案对、高亮错，端到端测试几乎发现不了，只能靠 `verify_chunks()` 入库前拦截。
+- **合并块时只从源文本切片**（`parsed.text[start:end]`），**绝不 `"\\n\\n".join(block.text)`**：
+  块间分隔符由解析器决定，拼接结果与源文本区间不保证一致。
+- **块间只隔空白时可以合并**：不要要求 `left.char_end == right.char_start`（严格连续）。
+  解析器插了 `\n\n`，严格连续会让短标题块永远孤立。判据是 `gap.strip()` 为空。
+- **短块必须合并**：8 字符的孤立标题块向量几乎无信息量，却占一个检索结果位。
+  需要**两遍**合并（先向后、再向前）：首块无前驱、前块是受保护类型时，只能向后并。
+- **受保护类型不切分**（`table`/`code`/`formula`）：表格切开行列错位，代码切开失去语义。
+  它们也不能并进正文（chunk 类型无法表达），代价是可能产生超长块——这是必须接受的。
+- **`fixed` 策略故意不给 bbox**：滑窗边界是任意字符位置，没有对应版面框。
+  冒用起点块的 bbox 会让前端框错区域。用 `chunk_metadata.positioning = "char_offset"` 声明。
+- **父块不参与检索**（`chunk_level > 0`）：不向量化、检索时按 `level=0` 过滤。
+  **A11 的 `search_vector` 必须补上这个过滤**，否则父块与子块同时出现，同一内容占两个结果位。
+- **覆盖统计只算叶子块**：父块是子块超集，计入会让重叠率恒 100%、覆盖率恒 100%，
+  统计完全失去参考价值。分母也只算非空白字符（块间分隔符不属于任何块是正常的）。
+- **语义策略降级必须写日志**：缺 `embed_fn` / 单元太少 / embedding 失败三种情况都退化为
+  recursive。不记日志的话，`strategy=semantic` 的文档实际全在跑递归，对比实验数据全是假的。
+- **切分参数来自版本快照**（`document_versions.chunking_config`），不是知识库当前默认值。
+  用当前配置会让"重跑"与"首次"结果不同，A10 的版本回滚就失去意义。
+- **切分落库必须幂等**：同一事务内**先删该版本旧 chunk 再插入**。
+  重派任务直接 `bulk_create` 会撞 `uq_chunks_version_index`，
+  报错是"唯一约束冲突"，根因却是没做幂等。
+- **父子关系分两阶段落库**：chunker 只产出 `parent_index`（批次下标，它不该知道数据库 ID），
+  handler 先插全部块拿到 UUID，再回填 `parent_chunk_id`。
+- **向量化不进切分步骤**：`embedding` 留 NULL。一起做会让"向量服务临时故障"
+  导致切分成果全部丢失；分开后可按 chunk 续跑（`list_pending_embedding`）。

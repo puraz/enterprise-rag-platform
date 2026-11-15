@@ -30,6 +30,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from rag_core.logging import get_logger
+from rag_worker.handlers.chunk import ChunkDocumentHandler
 from rag_worker.handlers.parse import ParseDocumentHandler
 
 if TYPE_CHECKING:
@@ -50,6 +51,7 @@ def build_handlers(*, storages: dict[str, StorageBackend]) -> dict[str, TaskHand
 
     handlers: dict[str, TaskHandler] = {
         TaskType.PARSE_DOCUMENT.value: ParseDocumentHandler(storages=storages),
+        TaskType.CHUNK_DOCUMENT.value: ChunkDocumentHandler(storages=storages),
     }
 
     # 尚未实现的任务类型在这里显式列出，启动日志会打出"缺哪些"。

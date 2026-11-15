@@ -20,6 +20,16 @@
 调用方据此降级（扫描页只保留占位符）。启动日志会明确告警。
 """
 
+from rag_adapters.parsers.artifact import (
+    BlockRecord,
+    PageRecord,
+    ParsedArtifact,
+    ParsedArtifactError,
+    ParsedManifest,
+    dump_parsed,
+    load_parsed,
+    read_manifest,
+)
 from rag_adapters.parsers.base import (
     BaseParser,
     PageInfo,
@@ -44,12 +54,17 @@ from rag_adapters.parsers.simple import DocxParser, PptxParser, TextLikeParser, 
 
 __all__ = [
     "BaseParser",
+    "BlockRecord",
     "DocxParser",
     "NullOcr",
     "OcrEngine",
     "PageInfo",
+    "PageRecord",
     "ParseError",
+    "ParsedArtifact",
+    "ParsedArtifactError",
     "ParsedDocument",
+    "ParsedManifest",
     "ParserCapabilities",
     "PdfParser",
     "PptxParser",
@@ -60,7 +75,10 @@ __all__ = [
     "XlsxParser",
     "build_ocr_engine",
     "build_parser",
+    "dump_parsed",
+    "load_parsed",
     "parse_document",
+    "read_manifest",
     "supported_formats",
     "verify_char_offsets",
 ]
