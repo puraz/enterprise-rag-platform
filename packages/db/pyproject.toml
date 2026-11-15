@@ -9,6 +9,7 @@ dependencies = [
     # ORM 与迁移。api/worker 只依赖本包，不直接依赖 sqlalchemy 做业务查询
     "sqlalchemy[asyncio]>=2.0.36",
     "alembic>=1.14",
+    "pgvector>=0.3",
 ]
 
 [tool.uv.sources]

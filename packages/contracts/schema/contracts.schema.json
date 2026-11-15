@@ -239,6 +239,75 @@
         "deleted"
       ],
       "description": "物理文件状态。\n\n    单独设状态的原因：上传可能中断、校验可能失败、对象存储可能丢文件。\n    文档版本引用一个 blob 时，必须确认它真的可用。"
+    },
+    "ChunkType": {
+      "title": "ChunkType",
+      "type": "string",
+      "enum": [
+        "text",
+        "title",
+        "table",
+        "code",
+        "formula",
+        "image_caption",
+        "list"
+      ],
+      "description": "chunk 的内容类型。\n\n    整块不切的类型（TABLE / CODE / FORMULA）在切分时会被保护，\n    不参与递归合并 —— 表格被切断会让行列错位，代码被切断会失去语义。"
+    },
+    "ChunkingStrategy": {
+      "title": "ChunkingStrategy",
+      "type": "string",
+      "enum": [
+        "recursive",
+        "structured",
+        "semantic",
+        "sentence_window",
+        "parent_child",
+        "fixed"
+      ],
+      "description": "切分策略标识。\n\n    值必须与 `rag_api.chunkers` 注册表里的名字一致。\n    新增策略时要同时更新这里与注册表——不一致会导致 worker 找不到实现，\n    报错信息是\"未知策略\"，但实际是名字拼写不同。"
+    },
+    "IndexType": {
+      "title": "IndexType",
+      "type": "string",
+      "enum": [
+        "hnsw",
+        "ivfflat",
+        "none"
+      ],
+      "description": "向量索引类型。\n\n    HNSW vs IVFFlat 的取舍：\n    - HNSW：查询快、召回高、无需训练，但构建慢、内存占用大；\n    - IVFFlat：构建快、内存小，但需要数据量足够才能训练好，\n      且召回受 probes 影响明显。\n    本项目默认 HNSW：知识库规模通常是十万到百万级 chunk，\n    HNSW 的查询延迟优势更重要。"
+    },
+    "IndexVersionStatus": {
+      "title": "IndexVersionStatus",
+      "type": "string",
+      "enum": [
+        "building",
+        "ready",
+        "active",
+        "retired",
+        "failed"
+      ],
+      "description": "索引版本状态（A10 零停机重建用）。\n\n    双版本 + alias 切换的完整生命周期：\n\n        BUILDING → READY → ACTIVE → RETIRED\n                     │                 ▲\n                     └──(切换前可回滚)──┘\n\n    重建期间双写两个版本，切换瞬间只改 alias 指向。"
+    },
+    "DistanceMetric": {
+      "title": "DistanceMetric",
+      "type": "string",
+      "enum": [
+        "cosine",
+        "l2",
+        "inner_product"
+      ],
+      "description": "向量距离度量。\n\n    **必须与 embedding 模型的训练目标一致**：\n    - bge 系列、多数字段中文模型：用余弦（cosine）；\n    - OpenAI text-embedding-3：用余弦；\n    - 少数模型（如某些 e5 变体）训练时用内积。\n    用错度量不会报错，只会让召回悄悄变差——这是最难发现的检索问题之一。"
+    },
+    "RetrievalMode": {
+      "title": "RetrievalMode",
+      "type": "string",
+      "enum": [
+        "vector",
+        "keyword",
+        "hybrid"
+      ],
+      "description": "检索模式（A11 用）。"
     }
   },
   "models": {

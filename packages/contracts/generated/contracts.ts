@@ -248,6 +248,82 @@ export type BlobStatus =
   | "missing"
   | "deleted";
 
+/**
+ * chunk 的内容类型。
+ * 整块不切的类型（TABLE / CODE / FORMULA）在切分时会被保护，
+ * 不参与递归合并 —— 表格被切断会让行列错位，代码被切断会失去语义。
+ */
+export type ChunkType =
+  | "text"
+  | "title"
+  | "table"
+  | "code"
+  | "formula"
+  | "image_caption"
+  | "list";
+
+/**
+ * 切分策略标识。
+ * 值必须与 `rag_api.chunkers` 注册表里的名字一致。
+ * 新增策略时要同时更新这里与注册表——不一致会导致 worker 找不到实现，
+ * 报错信息是"未知策略"，但实际是名字拼写不同。
+ */
+export type ChunkingStrategy =
+  | "recursive"
+  | "structured"
+  | "semantic"
+  | "sentence_window"
+  | "parent_child"
+  | "fixed";
+
+/**
+ * 向量索引类型。
+ * HNSW vs IVFFlat 的取舍：
+ * - HNSW：查询快、召回高、无需训练，但构建慢、内存占用大；
+ * - IVFFlat：构建快、内存小，但需要数据量足够才能训练好，
+ * 且召回受 probes 影响明显。
+ * 本项目默认 HNSW：知识库规模通常是十万到百万级 chunk，
+ * HNSW 的查询延迟优势更重要。
+ */
+export type IndexType =
+  | "hnsw"
+  | "ivfflat"
+  | "none";
+
+/**
+ * 索引版本状态（A10 零停机重建用）。
+ * 双版本 + alias 切换的完整生命周期：
+ * BUILDING → READY → ACTIVE → RETIRED
+ * │                 ▲
+ * └──(切换前可回滚)──┘
+ * 重建期间双写两个版本，切换瞬间只改 alias 指向。
+ */
+export type IndexVersionStatus =
+  | "building"
+  | "ready"
+  | "active"
+  | "retired"
+  | "failed";
+
+/**
+ * 向量距离度量。
+ * **必须与 embedding 模型的训练目标一致**：
+ * - bge 系列、多数字段中文模型：用余弦（cosine）；
+ * - OpenAI text-embedding-3：用余弦；
+ * - 少数模型（如某些 e5 变体）训练时用内积。
+ * 用错度量不会报错，只会让召回悄悄变差——这是最难发现的检索问题之一。
+ */
+export type DistanceMetric =
+  | "cosine"
+  | "l2"
+  | "inner_product";
+
+/** 检索模式（A11 用）。 */
+export type RetrievalMode =
+  | "vector"
+  | "keyword"
+  | "hybrid";
+
 // =========================== 数据模型 ===========================
 
 /** 统一错误响应体。所有非 2xx 响应都必须是这个形状。 */

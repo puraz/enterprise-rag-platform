@@ -18,14 +18,20 @@ from pydantic import BaseModel
 
 from rag_contracts.enums import (
     BlobStatus,
+    ChunkingStrategy,
+    ChunkType,
     ConfidentialityLevel,
+    DistanceMetric,
     DocumentFormat,
     DocumentStatus,
     DocumentVersionStatus,
+    IndexType,
+    IndexVersionStatus,
     KnowledgeBaseStatus,
     KnowledgeBaseVisibility,
     MembershipStatus,
     PlatformRole,
+    RetrievalMode,
     SourceType,
     TenantRole,
     TenantStatus,
@@ -65,6 +71,13 @@ EXPORTED_ENUMS: dict[str, type[str]] = {
     "DocumentFormat": DocumentFormat,
     "SourceType": SourceType,
     "BlobStatus": BlobStatus,
+    # ---- 检索/分块域（rag_contracts.enums.retrieval）----
+    "ChunkType": ChunkType,
+    "ChunkingStrategy": ChunkingStrategy,
+    "IndexType": IndexType,
+    "IndexVersionStatus": IndexVersionStatus,
+    "DistanceMetric": DistanceMetric,
+    "RetrievalMode": RetrievalMode,
 }
 
 

@@ -50,6 +50,14 @@ from rag_contracts.enums.documents import (
     KnowledgeBaseVisibility,
     SourceType,
 )
+from rag_contracts.enums.retrieval import (
+    ChunkingStrategy,
+    ChunkType,
+    DistanceMetric,
+    IndexType,
+    IndexVersionStatus,
+    RetrievalMode,
+)
 from rag_contracts.enums.tenancy import (
     MembershipStatus,
     PlatformRole,
@@ -62,14 +70,20 @@ from rag_contracts.enums.tenancy import (
 # 域归属看上面的 import 段——那里是按域分组的，且带了注释。
 __all__ = [
     "BlobStatus",
+    "ChunkType",
+    "ChunkingStrategy",
     "ConfidentialityLevel",
+    "DistanceMetric",
     "DocumentFormat",
     "DocumentStatus",
     "DocumentVersionStatus",
+    "IndexType",
+    "IndexVersionStatus",
     "KnowledgeBaseStatus",
     "KnowledgeBaseVisibility",
     "MembershipStatus",
     "PlatformRole",
+    "RetrievalMode",
     "SourceType",
     "TenantRole",
     "TenantStatus",

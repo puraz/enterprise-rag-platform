@@ -8,6 +8,7 @@
 """
 
 from rag_db.models.blob import Blob
+from rag_db.models.chunk import Chunk, IndexVersion
 from rag_db.models.document import Document, DocumentVersion
 from rag_db.models.health import SchemaHealth
 from rag_db.models.knowledge import KnowledgeBase
@@ -17,9 +18,11 @@ from rag_db.models.user import IdentityLink, User
 
 __all__ = [
     "Blob",
+    "Chunk",
     "Document",
     "DocumentVersion",
     "IdentityLink",
+    "IndexVersion",
     "KnowledgeBase",
     "SchemaHealth",
     "Tenant",
