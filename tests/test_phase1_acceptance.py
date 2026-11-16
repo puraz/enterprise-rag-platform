@@ -267,3 +267,115 @@ def test_ci_workflow_is_valid() -> None:
 
     # integration 必须用带 pgvector 的镜像
     assert "pgvector" in jobs["integration"]["services"]["postgres"]["image"]
+
+
+# ==================================================== 评估报告的对比环节
+
+
+def test_compare_with_previous_skips_non_retrieval_reports(tmp_path: Path) -> None:
+    """`compare_with_previous` 必须跳过非检索报告，且不崩。
+
+    ## 实测踩到的坑
+
+    `tests/eval/reports/` 里混着三种文件：
+
+    | 文件 | 形状 |
+    |---|---|
+    | `{timestamp}-{label}.json` | 检索报告（有 `label`/`k`/`metrics.recall`） |
+    | `ragas-*.json` | Ragas 报告（有 `label`/`faithfulness`，**没有** `k`/`metrics`） |
+    | `ragas-samples-*.json` | 样本导出，是 **list** |
+
+    初版只判断 `data.get("label") != ... and data.get("k") == ...`，
+    遇到 list 直接 `AttributeError: 'list' object has no attribute 'get'`。
+    表现为：跑完 `run_eval.py --setup` 在**最后的对比环节**崩掉，
+    看起来像 setup 失败（实际语料已建好）。
+
+    这里用真实的临时目录 + 三种真实形状做出验证，而不是断言源码字符串
+    ——源码断言挡不住"逻辑还在但判据写错"。
+    """
+    import json
+    import sys
+
+    sys.path.insert(0, str(REPO_ROOT / "tests" / "eval"))
+    from run_eval import Report, compare_with_previous
+
+    # 三种真实形状的报告
+    (tmp_path / "20260101T000000Z-old.json").write_text(
+        json.dumps(
+            {
+                "label": "old",
+                "k": 10,
+                "metrics": {
+                    "recall": 0.9,
+                    "mrr": 0.8,
+                    "hit_rate": 0.9,
+                    "false_positive_rate": 0.1,
+                    "avg_latency_ms": 100.0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "ragas-trial.json").write_text(
+        json.dumps({"label": "ragas", "faithfulness": 0.7}), encoding="utf-8"
+    )
+    (tmp_path / "ragas-samples.json").write_text(
+        json.dumps([{"q": "x"}, {"q": "y"}]), encoding="utf-8"
+    )
+
+    # 把模块的 REPORTS_DIR 临时指过去（不污染真实报告目录）
+    import run_eval
+
+    original = run_eval.REPORTS_DIR
+    run_eval.REPORTS_DIR = tmp_path
+    try:
+        report = Report(label="new", k=10, results=[], elapsed_s=0.1)
+        # **不抛异常**就是主要断言：遇到 list 或 Ragas 报告必须安静跳过
+        compare_with_previous(report)
+    finally:
+        run_eval.REPORTS_DIR = original
+
+
+def test_compare_with_previous_handles_corrupt_json(tmp_path: Path) -> None:
+    """单个损坏的报告文件不能让整个评估流程崩掉。
+
+    报告目录是运行产物累积地，出现半截文件（进程被 kill）是常态。
+    "跳过它"比"整个 eval 失败"合理——它只是少一个对比基准。
+    """
+    import json
+    import sys
+
+    sys.path.insert(0, str(REPO_ROOT / "tests" / "eval"))
+    import run_eval
+    from run_eval import Report, compare_with_previous
+
+    (tmp_path / "broken.json").write_text("{not valid json", encoding="utf-8")
+
+    # **必须放两份**：`compare_with_previous` 在 `len(reports) < 2` 时
+    # 直接返回，只有一份的话根本走不到解析循环——测试会"通过"而
+    # 实际什么都没验证（这正是初版测试的漏洞，破坏性验证时发现的）。
+    # 这份必须是**完整**的检索报告：对比环节会读 metrics 的全部五个键，
+    # 只给 recall 会 KeyError（测试数据不完整，不是被测代码的问题）。
+    (tmp_path / "20260101T000000Z-old.json").write_text(
+        json.dumps(
+            {
+                "label": "old",
+                "k": 10,
+                "metrics": {
+                    "recall": 0.9,
+                    "mrr": 0.8,
+                    "hit_rate": 0.9,
+                    "false_positive_rate": 0.1,
+                    "avg_latency_ms": 100.0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    original = run_eval.REPORTS_DIR
+    run_eval.REPORTS_DIR = tmp_path
+    try:
+        compare_with_previous(Report(label="x", k=10, results=[], elapsed_s=0.1))
+    finally:
+        run_eval.REPORTS_DIR = original

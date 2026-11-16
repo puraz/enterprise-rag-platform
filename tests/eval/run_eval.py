@@ -785,6 +785,37 @@ def save_report(report: Report) -> Path:
     return path
 
 
+def _is_retrieval_report(data: object) -> bool:
+    """判断一份 JSON 是不是检索报告（而不是 Ragas 报告或样本导出）。
+
+    ## 为什么必须显式判断类型
+
+    `REPORTS_DIR` 里混着三种文件：
+
+    | 文件 | 形状 |
+    |---|---|
+    | `{timestamp}-{label}.json` | 检索报告：有 `label`/`k`/`metrics.recall` |
+    | `ragas-*.json` | Ragas 报告：有 `label`/`faithfulness`，**没有** `k`/`metrics` |
+    | `ragas-samples-*.json` | 样本导出：是 **list**，连 dict 都不是 |
+
+    初版只写 `data.get("label") != report.label and data.get("k") == report.k`
+    ——遇到 list 直接 `AttributeError: 'list' object has no attribute 'get'`
+    （实测：跑完 `--setup` 在最后的对比环节崩掉，看起来像 setup 失败）。
+
+    即使绕开 list，Ragas 报告也有风险：它没有 `k` 字段，`data.get("k")`
+    返回 None 恰好不等于 `report.k`，所以被跳过——**这是巧合而不是设计**。
+    一旦某个 Ragas 报告的 label 与 k 碰巧对上，`previous["metrics"]`
+    会 KeyError。
+
+    判据与 `scripts/check_regression.py::_load_latest` 保持一致：
+    `metrics` 是 dict 且含 `recall`。两处用同一判据，避免漂移。
+    """
+    if not isinstance(data, dict):
+        return False
+    metrics = data.get("metrics")
+    return isinstance(metrics, dict) and "recall" in metrics
+
+
 def compare_with_previous(report: Report) -> None:
     """与上一次报告对比（同 k）。
 
@@ -797,19 +828,32 @@ def compare_with_previous(report: Report) -> None:
         print("\n（无历史报告可对比）")
         return
 
-    # 找与当前 label 不同的最近一份
+    # 找与当前 label 不同的最近一份**检索报告**
     previous: dict[str, object] | None = None
+    skipped: list[str] = []
     for path in reversed(reports):
-        data = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            data: object = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            # 单个文件损坏不该让整个评估流程崩掉——它只是"没有可对比的历史"
+            skipped.append(f"{path.name}({type(exc).__name__})")
+            continue
+
+        if not _is_retrieval_report(data):
+            skipped.append(path.name)
+            continue
+        assert isinstance(data, dict)  # _is_retrieval_report 已保证
         if data.get("label") != report.label and data.get("k") == report.k:
             previous = data
             break
+
+    if skipped:
+        print(f"\n（跳过 {len(skipped)} 份非检索报告：{', '.join(skipped[:3])}）")
+
     if previous is None:
         print("\n（无同 k 的历史报告可对比）")
         return
 
-    prev_metrics = previous["metrics"]
-    assert isinstance(prev_metrics, dict)
     print(f"\n  对比上一次（{previous['label']}）：")
     pairs = (
         ("Recall", "recall", True),
@@ -818,8 +862,16 @@ def compare_with_previous(report: Report) -> None:
         ("误报率", "false_positive_rate", False),
         ("延迟(ms)", "avg_latency_ms", False),
     )
+    # `previous` 是 `dict[str, object]`（报告是外部 JSON，字段类型运行时才知道）。
+    # `_is_retrieval_report` 已保证 `metrics` 是 dict 且含 `recall`，
+    # 但 mypy 看不到跨函数收窄，所以这里显式再断言一次——比 `type: ignore`
+    # 诚实：它是"真的有这个保证"，而不是"我知道类型不对但别看"。
+    raw_metrics = previous["metrics"]
+    assert isinstance(raw_metrics, dict)
+    prev_metrics: dict[str, object] = raw_metrics
+
     for label, key, higher_is_better in pairs:
-        old = float(prev_metrics[key])  # type: ignore[index]
+        old = float(str(prev_metrics[key]))
         new = {
             "recall": report.recall,
             "mrr": report.mrr,
