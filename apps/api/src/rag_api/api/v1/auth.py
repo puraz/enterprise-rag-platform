@@ -37,7 +37,13 @@ from rag_api.identity.factory import build_identity_provider
 from rag_api.identity.provider import ExternalIdentity, IdentityProviderError
 from rag_api.identity.tokens import TokenService
 from rag_api.openapi import AUTHENTICATED_ENDPOINT, PUBLIC_ENDPOINT
-from rag_contracts.api.auth import CurrentUserResponse, DevLoginRequest, LoginResponse
+from rag_contracts.api.auth import (
+    CurrentUserResponse,
+    DevLoginRequest,
+    LoginResponse,
+    RefreshRequest,
+    RefreshResponse,
+)
 from rag_contracts.enums import TenantRole
 from rag_core.db import Database
 from rag_core.errors import AuthenticationError
@@ -54,6 +60,49 @@ log = get_logger(__name__)
 def build_auth_router(*, dev_enabled: bool) -> APIRouter:
     """构造认证路由。dev 端点只在 `dev_enabled` 时挂载。"""
     router = APIRouter(prefix="/auth", tags=["auth"])
+
+    @router.post(
+        "/refresh",
+        response_model=RefreshResponse,
+        summary="刷新 access token",
+        description=(
+            "用 refresh token 换一对新 token（access + refresh 都换）。\n\n"
+            "旧的 refresh token 立刻作废。同一个 token 被用第二次说明有第三方"
+            "持有它（凭据泄漏），系统会作废整族——攻击者与受害者都必须重新登录。\n\n"
+            "客户端必须保存返回的新 refresh token，且并发刷新时只发一次请求"
+            "（否则后几次会撞复用检测）。"
+        ),
+        responses=PUBLIC_ENDPOINT,
+    )
+    async def refresh_token_endpoint(  # pyright: ignore[reportUnusedFunction]
+        payload: RefreshRequest,
+        request: Request,
+    ) -> RefreshResponse:
+        from rag_api.identity.refresh import RefreshTokenStore
+
+        token_service: TokenService = request.app.state.token_service
+        redis = request.app.state.redis
+
+        # rotate 内部做：校验 → 标记旧 token 已用 → 签发新 token。
+        # 检测到复用时抛 RefreshTokenReusedError（已作废整族）。
+        user_id, tenant_id, new_refresh, _family = await RefreshTokenStore(
+            redis.client
+        ).rotate(refresh_token=payload.refresh_token)
+
+        access_token, expires_at = token_service.issue(
+            user_id=user_id, tenant_id=tenant_id
+        )
+        log.info(
+            "token_refreshed",
+            user_id=str(user_id),
+            tenant_id=str(tenant_id),
+        )
+        return RefreshResponse(
+            access_token=access_token,
+            refresh_token=new_refresh,
+            expires_at=expires_at,
+        )
+
     if dev_enabled:
         _register_dev_routes(router)
     return router
@@ -97,6 +146,22 @@ def build_me_router() -> APIRouter:
     return router
 
 
+async def _issue_refresh_token(
+    request: Request, *, user_id: uuid.UUID, tenant_id: uuid.UUID
+) -> str:
+    """签发 refresh token。
+
+    **只在登录时签一次**（首次，family_id=None 表示新族）。
+    后续续期走 `/auth/refresh` 的 rotate（保持同一 family）。
+    """
+    from rag_api.identity.refresh import RefreshTokenStore
+
+    token, _family = await RefreshTokenStore(request.app.state.redis.client).issue(
+        user_id=user_id, tenant_id=tenant_id
+    )
+    return token
+
+
 def _register_dev_routes(router: APIRouter) -> None:
     """挂载 dev 专用端点。
 
@@ -134,6 +199,11 @@ def _register_dev_routes(router: APIRouter) -> None:
         token, expires_at = token_service.issue(
             user_id=resolved.user_id, tenant_id=resolved.tenant_id
         )
+        # 签发 refresh token（A7 的轮换机制在此之前没有暴露端点，
+        # 导致 access token 15 分钟过期后只能重新登录）
+        refresh = await _issue_refresh_token(
+            request, user_id=resolved.user_id, tenant_id=resolved.tenant_id
+        )
         log.info(
             "dev_login_succeeded",
             user_id=str(resolved.user_id),
@@ -142,6 +212,7 @@ def _register_dev_routes(router: APIRouter) -> None:
         )
         return LoginResponse(
             access_token=token,
+            refresh_token=refresh,
             expires_at=expires_at,
             user_id=resolved.user_id,
             tenant_id=resolved.tenant_id,
@@ -220,8 +291,12 @@ def _register_dev_routes(router: APIRouter) -> None:
             tenant_id=str(tenant_id),
             is_new_user=is_new,
         )
+        refresh = await _issue_refresh_token(
+            request, user_id=user_id, tenant_id=tenant_id
+        )
         return LoginResponse(
             access_token=token,
+            refresh_token=refresh,
             expires_at=expires_at,
             user_id=user_id,
             tenant_id=tenant_id,

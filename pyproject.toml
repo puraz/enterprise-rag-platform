@@ -12,7 +12,12 @@ package = false
 
 [tool.uv.workspace]
 # packages/* 是共享库，apps/* 是可独立部署的端；两边都是 workspace 成员。
-members = ["packages/*", "apps/*"]
+#
+# **必须排除 apps/web 与 apps/admin**：它们是 Node/pnpm 项目，没有
+# pyproject.toml。uv 的 glob 会因此报 "missing a pyproject.toml"。
+# Python workspace 与 Node workspace 是两套独立体系（uv.lock vs pnpm-lock.yaml）。
+members = ["packages/*", "apps/api", "apps/worker"]
+exclude = ["apps/web", "apps/admin"]
 
 [dependency-groups]
 dev = [

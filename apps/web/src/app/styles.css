@@ -1,0 +1,251 @@
+/**
+ * 全局样式与设计令牌。
+ *
+ * ## 为什么用 Tailwind v4 的 CSS-first 配置
+ *
+ * v4 不再需要 `tailwind.config.js`——所有令牌（颜色/间距/字体）都写在
+ * `@theme` 块里。好处是：令牌与使用它们的 CSS 在同一个文件，
+ * 改配色不用在两个文件之间跳。且构建时只生成用到的类。
+ *
+ * ## 设计基调：克制、中性、信息密度高
+ *
+ * 目标读者是企业员工，每天用几小时。所以：
+ *
+ * | 不要 | 要 |
+ * |---|---|
+ * | 大圆角（xl/2xl）+ 重阴影 | 1px 边框 + 极淡背景分层 |
+ * | 紫色/靛蓝渐变 | 中性灰阶 + 单一强调色（墨蓝） |
+ * | emoji 图标 | 线性图标 16px |
+ * | 大面积留白 + 巨型标题 | 紧凑布局，行高 1.6 |
+ * | 到处都是动效 | 只在新消息/流式光标/hover 三处 |
+ *
+ * 参考：Linear、Vercel Dashboard、Notion——它们的共同点是
+ * **界面不抢注意力**，内容才是主角。
+ */
+
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------- 设计令牌 */
+
+@theme {
+  /* 中性灰阶：界面 95% 的面积由它构成 */
+  --color-ink-950: oklch(0.18 0.012 250);
+  --color-ink-900: oklch(0.24 0.012 250);
+  --color-ink-800: oklch(0.32 0.012 250);
+  --color-ink-700: oklch(0.42 0.011 250);
+  --color-ink-600: oklch(0.52 0.010 250);
+  --color-ink-500: oklch(0.62 0.009 250);
+  --color-ink-400: oklch(0.72 0.008 250);
+  --color-ink-300: oklch(0.82 0.006 250);
+  --color-ink-200: oklch(0.90 0.004 250);
+  --color-ink-150: oklch(0.945 0.003 250);
+  --color-ink-100: oklch(0.968 0.002 250);
+  --color-ink-50: oklch(0.985 0.001 250);
+
+  /**
+   * 强调色：单一墨蓝。
+   *
+   * 为什么不用渐变或多色：企业工具里颜色应当**承载语义**
+   * （蓝=可操作，红=危险，绿=成功）。装饰性渐变会让"这个蓝色
+   * 是按钮还是背景"变得含糊。
+   */
+  --color-accent-700: oklch(0.45 0.13 258);
+  --color-accent-600: oklch(0.52 0.14 258);
+  --color-accent-500: oklch(0.58 0.15 258);
+  --color-accent-100: oklch(0.94 0.03 258);
+
+  /* 语义色：只在真正需要时出现 */
+  --color-danger: oklch(0.55 0.19 25);
+  --color-danger-soft: oklch(0.96 0.02 25);
+  --color-success: oklch(0.55 0.14 155);
+  --color-warning: oklch(0.68 0.14 75);
+
+  /* 字体：系统字体栈，中文优先落思源/苹方 */
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Noto Sans CJK SC",
+    "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", "Cascadia Code", "Noto Sans Mono", monospace;
+
+  /* 圆角：只到 md（6px）。xl/2xl 是"AI 味"的主要来源之一 */
+  --radius-sm: 3px;
+  --radius-md: 6px;
+}
+
+/* ---------------------------------------------------------------- 基础样式 */
+
+@layer base {
+  html {
+    /* 中文正文 14px 比 16px 更适合高信息密度界面 */
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+    /* 关闭 iOS 点击高亮（会闪蓝框，很廉价） */
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    @apply bg-ink-50 text-ink-900 font-sans;
+    /* 行高 1.6：中文在这个值上比 1.5 易读、比 1.75 紧凑 */
+    line-height: 1.6;
+  }
+
+  /* 聚焦环：键盘用户可见，鼠标用户不打扰 */
+  :focus-visible {
+    outline: 2px solid var(--color-accent-500);
+    outline-offset: 2px;
+  }
+
+  /* 滚动条：细、低对比。默认滚动条在深色侧栏里很突兀 */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-ink-300) transparent;
+  }
+
+  /* 选中文本用强调色的浅版 */
+  ::selection {
+    background: var(--color-accent-100);
+    color: var(--color-ink-950);
+  }
+}
+
+/* ---------------------------------------------------------------- 组件工具类 */
+
+@layer components {
+  /**
+   * 卡片/面板：用 1px 边框而非阴影做分层。
+   *
+   * 阴影适合"浮起来的东西"（弹窗、下拉）。列表项和面板用阴影会让
+   * 整页看起来毛躁——而且多个阴影叠加时边界会糊。
+   */
+  .surface {
+    @apply bg-white border border-ink-200 rounded-md;
+  }
+
+  /**
+   * 按钮：基础形状 + 四种视觉变体。
+   *
+   * ## 为什么用选择器分组而不是"挂两个 class"
+   *
+   * Tailwind v4 的 `@apply` **只能引用工具类**，不能引用自定义组件类
+   * （实测报 `Cannot apply unknown utility class 'btn'`）。
+   *
+   * 一开始的做法是把形状与配色拆成两组：组件里同时挂 `btn` + `btn-primary`。
+   * 但它有个致命缺陷——**漏写 `btn` 就静默降级成裸按钮**（实测在登录页
+   * 踩到了：链接只有背景色、没有高度和内边距，看起来像个带下划线的文字）。
+   *
+   * 改成把形状写进**每个变体的选择器列表**：任何 `btn-*` 单个类都自带
+   * 完整外观，漏挂不会降级。`btn` 保留为"只要形状不要配色"的逃生口。
+   */
+  .btn,
+  .btn-primary,
+  .btn-secondary,
+  .btn-ghost,
+  .btn-danger {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-md
+           px-3 h-8 text-[13px] font-medium
+           transition-colors duration-100 select-none no-underline
+           disabled:opacity-40 disabled:pointer-events-none;
+  }
+
+  .btn-primary {
+    @apply bg-ink-900 text-white hover:bg-ink-800 active:bg-ink-950;
+  }
+
+  .btn-secondary {
+    @apply bg-white text-ink-800 border border-ink-200
+           hover:bg-ink-50 hover:border-ink-300;
+  }
+
+  .btn-ghost {
+    @apply text-ink-700 hover:bg-ink-100 hover:text-ink-900;
+  }
+
+  .btn-danger {
+    @apply bg-danger text-white hover:opacity-90;
+  }
+
+  /* 输入框：边框只在聚焦时变强调色，平时保持中性 */
+  .input {
+    @apply w-full rounded-md border border-ink-200 bg-white
+           px-3 h-9 text-[13px] text-ink-900 placeholder:text-ink-400
+           focus:border-accent-500 focus:outline-none
+           transition-colors duration-100;
+  }
+
+  /* 元信息文本：标签、时间、计数 */
+  .meta {
+    @apply text-[12px] text-ink-500 tabular-nums;
+  }
+
+  /* 侧栏项 */
+  .nav-item {
+    @apply flex items-center gap-2 rounded-md px-2 h-8 text-[13px]
+           text-ink-700 hover:bg-ink-100 hover:text-ink-900
+           transition-colors duration-100;
+  }
+
+  .nav-item-active {
+    @apply bg-ink-150 text-ink-900 font-medium;
+  }
+}
+
+/* ---------------------------------------------------------------- 动效（仅三处） */
+
+@layer utilities {
+  /**
+   * 新消息淡入。位移 4px + 透明度，180ms。
+   *
+   * 为什么只有 4px：大位移（20px+）在消息列表里会显得弹跳，
+   * 连续多条消息时视觉噪音很大。
+   */
+  @keyframes msg-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .animate-msg-in {
+    animation: msg-in 180ms ease-out;
+  }
+
+  /**
+   * 流式光标：1px 竖线闪烁。
+   *
+   * 用 step-end 而非线性：线性闪烁看起来像呼吸灯（装饰性），
+   * 阶跃更像终端光标（功能性）。
+   */
+  @keyframes caret-blink {
+    0%,
+    50% {
+      opacity: 1;
+    }
+    50.1%,
+    100% {
+      opacity: 0;
+    }
+  }
+
+  .streaming-caret::after {
+    content: "";
+    display: inline-block;
+    width: 2px;
+    height: 1em;
+    margin-left: 2px;
+    vertical-align: text-bottom;
+    background: var(--color-ink-700);
+    animation: caret-blink 1s step-end infinite;
+  }
+
+  /* 尊重系统的"减少动效"设置（无障碍要求） */
+  @media (prefers-reduced-motion: reduce) {
+    .animate-msg-in,
+    .streaming-caret::after {
+      animation: none;
+    }
+  }
+}
