@@ -71,7 +71,7 @@ from sqlalchemy import text
 
 from rag_adapters.providers.embedding import EmbeddingProvider, EmbeddingTask
 from rag_adapters.providers.llm import LLMMessage, LLMProvider, LLMRole
-from rag_adapters.retrieval.citations_builder import Material
+from rag_adapters.retrieval.citations_builder import Material, assemble_citations
 from rag_adapters.retrieval.graph import (
     build_answerability_prompt,
     build_generation_prompt,
@@ -231,6 +231,7 @@ class ChatService:
         query: str,
         conversation_id: uuid.UUID | None = None,
         knowledge_base_ids: list[uuid.UUID] | None = None,
+        permission_ctx: Any = None,
     ) -> AsyncIterator[ChatEvent]:
         """流式问答。产出 `ChatEvent` 序列。
 
@@ -246,6 +247,17 @@ class ChatService:
         **不在这里做事务提交**：事务边界由路由层（`get_db` 依赖）控制。
         服务层只 flush，不 commit——与 worker handler 的约定一致
         （见 AGENTS.md 4.11）。
+
+        ## `permission_ctx` 为什么是必需的安全参数
+
+        检索返回的是**文档正文**。不过滤 ACL 等于"用户可以通过提问
+        把无权文档的内容问出来"——比直接返回文档更隐蔽，因为泄漏
+        发生在答案里（AGENTS.md 4.8："检索是最危险的路径"）。
+
+        参数类型是 `Any` 而不是 `PermissionContext`：`services` 层
+        不 import `permissions`（避免 app 内部循环依赖）。缺省 `None`
+        表示**不做过滤**，只允许在内部脚本/评估里用；
+        路由层必须传，`test_acl_retrieval.py` 会盯着这一点。
         """
         started = time.perf_counter()
 
@@ -316,12 +328,13 @@ class ChatService:
 
         # ---- 检索 ----
         try:
-            retrieval_state, materials = await self._retrieve(
+            retrieval_state, materials, visible_document_ids = await self._retrieve(
                 tenant_id=tenant_id,
                 query=query,
                 history=history,
                 knowledge_base_ids=knowledge_base_ids,
                 conversation=conversation,
+                permission_ctx=permission_ctx,
             )
         except AppError as exc:
             await self._messages.mark_failed(
@@ -376,8 +389,12 @@ class ChatService:
                 text("UPDATE messages SET refused = true, refusal_reason = :r WHERE id = :mid"),
                 {"r": reason.value, "mid": assistant.id},
             )
-            # 拒答也要发 retrieval（引用为空）+ done
-            yield ChatEvent("retrieval", {"citations": [], "refused": True})
+            # 拒答也要发 retrieval（sources_found 为命中数，拒答时可能仍 >0）
+            # + done。前端靠 `refused=true` 决定显示拒答 UI。
+            yield ChatEvent(
+                "retrieval",
+                {"sources_found": len(materials), "refused": True},
+            )
             yield ChatEvent("delta", {"text": REFUSAL_MESSAGE, "message_id": str(assistant.id)})
             yield ChatEvent(
                 "done",
@@ -396,18 +413,23 @@ class ChatService:
             )
             return
 
-        # ---- 组装引用（在生成前算好，先发给前端）----
-        citations = await self._build_citations(
-            tenant_id=tenant_id,
-            query=retrieval_state.rewritten_query or query,
-            materials=materials,
-        )
+        # ---- 通知前端"检索完成" ----
+        #
+        # **只发数量，不发引用**。
+        #
+        # 初版在这里把全部检索命中当成 `Citation` 列表发给前端，于是：
+        # 1. 答案还没生成，就显示「来源 1 2 3 4 5」；
+        # 2. 编号按**材料顺序**编，而答案里的 `[n]` 是模型自己写的——
+        #    模型先引用第 2 条材料时，答案写 `[1]` 而引用卡片 1 指向
+        #    第 1 条材料，用户点开看到的是**错的那段原文**；
+        # 3. 检索 5 条 ≠ 引用 5 条，另外 4 条是噪音却看起来像"依据"。
+        #
+        # 引用必须在生成结束后按答案里的标记组装（见下面 `assemble_citations`）。
+        # 代价是生成期间看不到引用——这个取舍是对的：引用是"依据"，
+        # 依据必须是真的。
         yield ChatEvent(
             "retrieval",
-            {
-                "citations": [c.model_dump(mode="json") for c in citations],
-                "refused": False,
-            },
+            {"sources_found": len(materials), "refused": False},
         )
 
         # ---- 流式生成 ----
@@ -464,6 +486,31 @@ class ChatService:
         answer = "".join(collected)
         gen_latency_ms = int((time.perf_counter() - gen_started) * 1000)
 
+        # ---- 组装引用（生成结束后，按答案里的 [n] 标记）----
+        #
+        # ## 为什么必须等到生成结束
+        #
+        # 引用的定义是"答案的哪句话依据了哪段原文"。答案没定稿时，
+        # 这个映射不存在——生成前能拿到的只有"检索命中了哪几段"，
+        # 那是**候选**不是**依据**。
+        #
+        # 初版把候选当依据提前发给前端，导致三个错误（见 `retrieval`
+        # 事件处的注释）：编号对不上、数量对不上、时机不对。
+        #
+        # `assemble_citations` 做对了这些：
+        # - 按答案里 `[n]` **首次出现顺序**重新连续编号；
+        # - 同一材料被引用多次只出一条（保证 index 连续）；
+        # - 越界编号（模型引用了不存在的材料）**丢弃引用但保留答案**；
+        # - 片段级定位（`locate_in_chunk`）：quote 是答案那句话对应的原文，
+        #   不是整块 chunk 的前 300 字；
+        # - `visible_document_ids` 二次校验，防越权引用混进答案。
+        citations_result, citation_stats = assemble_citations(
+            answer=answer,
+            materials=materials,
+            visible_document_ids=visible_document_ids,
+        )
+        citations = citations_result.citations
+
         # ---- 落库：消息 + 成本 ----
         usage = _extract_usage(usage_holder)
         cost_usd = 0.0
@@ -503,6 +550,14 @@ class ChatService:
                         "candidate_count": len(retrieval_state.candidates),
                         "final_count": len(retrieval_state.final),
                         "rewritten_query": retrieval_state.rewritten_query,
+                        # 引用质量指标：让管理端能看出"模型是不是经常
+                        # 引用不存在的编号"（out_of_range）与"引用了但
+                        # 定位不到原文"（locate_failed）。两者都不报错，
+                        # 只能靠埋点观察。
+                        "citation_markers": citation_stats.markers_found,
+                        "citation_built": citation_stats.citations_built,
+                        "citation_out_of_range": citation_stats.out_of_range,
+                        "citation_locate_failed": citation_stats.locate_failed,
                     },
                     ensure_ascii=False,
                 ),
@@ -563,7 +618,8 @@ class ChatService:
         history: list[tuple[str, str]],
         knowledge_base_ids: list[uuid.UUID] | None,
         conversation: Conversation,
-    ) -> tuple[Any, list[Material]]:
+        permission_ctx: Any = None,
+    ) -> tuple[Any, list[Material], set[uuid.UUID]]:
         """执行检索，把结果转成 `Material`（含页信息）。
 
         ## 多轮的关键：先用历史做独立化改写
@@ -597,6 +653,34 @@ class ChatService:
             [conversation.knowledge_base_id] if conversation.knowledge_base_id else None
         )
 
+        # ---- ACL 过滤条件 ----
+        #
+        # **这是安全边界，不是优化**。检索返回的是文档正文，不过滤等于
+        # 用户能通过提问把无权文档的内容问出来。
+        #
+        # ## 为什么用 `confidentiality_filter_for_chunks` 而不是
+        #    `document_access_filter`
+        #
+        # 两者语义相同（未删除 + 密级 ≤ 上限 + 库可见），但**生成的 SQL 不同**：
+        #
+        # - `document_access_filter` 直接引用 `Document.xxx` 列。把它塞进
+        #   `select(Chunk).where(...)` 时，SQLAlchemy 会把 `documents` 表加进
+        #   FROM 且**没有 join 条件** —— 变成 `FROM chunks, documents` 的
+        #   笛卡尔积。实测就是这样：过滤条件对着"所有文档"求值，
+        #   而不是"这条 chunk 所属的文档"，SECRET 内容照样漏出来。
+        #
+        # - `confidentiality_filter_for_chunks` 用
+        #   `Chunk.document_id.in_(SELECT documents.id WHERE ...)`，
+        #   是纯子查询，不会污染 FROM 子句。**chunk 级查询必须用它。**
+        #
+        # 这个差异不报错、不告警，只有"逐角色对比检索结果"的测试能发现
+        # （见 tests/test_acl_retrieval.py）。
+        access_filter: Any = None
+        if permission_ctx is not None:
+            from rag_api.permissions.acl import confidentiality_filter_for_chunks
+
+            access_filter = confidentiality_filter_for_chunks(permission_ctx)
+
         hits: list[tuple[Any, float]] = []
         if kb_ids:
             for kb_id in kb_ids:
@@ -609,6 +693,7 @@ class ChatService:
                     knowledge_base_ids=[kb_id],
                     limit=self._config.vector_limit,
                     index_version_ids=[version.id],
+                    access_filter=access_filter,
                 )
                 hits.extend(page)
             hits.sort(key=lambda item: item[1])
@@ -619,6 +704,7 @@ class ChatService:
                 tenant_id=tenant_id,
                 query_embedding=query_vector,
                 limit=self._config.vector_limit,
+                access_filter=access_filter,
             )
 
         materials: list[Material] = []
@@ -658,7 +744,21 @@ class ChatService:
             for m in materials
         ]
         state.final = state.candidates[: self._config.final_limit]
-        return state, materials[: self._config.final_limit]
+        final_materials = materials[: self._config.final_limit]
+
+        # 可见文档集：由**检索结果自身**推导。
+        #
+        # 为什么这是"第二道校验"而不是多余：
+        # `search_vector` 已经用 `confidentiality_filter_for_chunks` 过滤过，
+        # 理论上 materials 里只会有可见文档。但 AGENTS.md 4.15 要求
+        # 生成后**再校验一次引用**，因为这些都可能引入未过滤内容：
+        # - 模型"记错"来源（把 A 文档的内容归到 B）；
+        # - 父块回填 / 上下文压缩带进了别的 chunk；
+        # - 未来加多查询融合时某个子查询漏了过滤条件。
+        #
+        # 引用越界是最隐蔽的泄漏：它嵌在答案里，用户看不出异常。
+        visible_document_ids = {material.document_id for material in final_materials}
+        return state, final_materials, visible_document_ids
 
     async def _standalone_query(
         self, *, tenant_id: uuid.UUID, query: str, history: list[tuple[str, str]]
@@ -787,37 +887,6 @@ class ChatService:
             task_type=ModelTaskType.CHAT,
         )
         return parse_self_check_output(response.content)
-
-    async def _build_citations(
-        self, *, tenant_id: uuid.UUID, query: str, materials: list[Material]
-    ) -> list[Citation]:
-        """组装引用（只含本轮检索来源）。"""
-        # `assemble_citations` 需要"答案里有 [n] 标记"才能定位。
-        # 但我们是流式生成，答案还没定稿——所以这里直接按材料顺序
-        # 生成引用（前端展示"这一段来自哪里"），不做片段定位。
-        #
-        # **取舍**：不做定位意味着高亮是整块而非那一句（ADR 0004 的
-        # 遗留项）。要精确定位需要在生成完成后二次组装，但那会让
-        # 引用在流式结束后才出现——前端体验更差。
-        citations: list[Citation] = []
-        for index, material in enumerate(materials, start=1):
-            citations.append(
-                Citation(
-                    index=index,
-                    document_id=material.document_id,
-                    document_title=material.document_title,
-                    chunk_id=material.chunk_id,
-                    chunk_index=material.chunk_index,
-                    page_no=material.page_no,
-                    char_start=material.char_start,
-                    char_end=material.char_end,
-                    bbox=material.bbox,
-                    section_path=list(material.section_path),
-                    quote=material.content[:300],
-                    relevance_score=material.relevance_score,
-                )
-            )
-        return citations
 
     async def _mark_interrupted(
         self, *, assistant_id: uuid.UUID, content: str, started: float

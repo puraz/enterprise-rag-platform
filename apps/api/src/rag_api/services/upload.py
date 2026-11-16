@@ -131,8 +131,11 @@ class UploadService:
     ) -> InitiateResult:
         """开始上传。
 
-        **先查秒传，再建会话**。顺序不能反：先建会话再查会留下
-        无用的会话记录（客户端拿到秒传结果后不会再用它）。
+        **先校验目标知识库，再查秒传，最后建会话**。顺序的理由：
+        - 先校验 KB：库不存在/已归档时就该直接拒绝，不该让用户白传 2GB
+          然后才在 `POST /documents` 那一步发现；
+        - 秒传在会话之前：先建会话再查会留下无用的会话记录
+          （客户端拿到秒传结果后不会再用它）。
         """
         if total_size <= 0:
             raise BadRequestError("文件大小必须大于 0")
@@ -141,6 +144,14 @@ class UploadService:
                 f"文件超过上限 {self._settings.max_file_size // 1024 // 1024}MB",
                 details={"max_size": self._settings.max_file_size},
             )
+
+        # ---- 目标知识库校验 ----
+        #
+        # 为什么在上传阶段就校验：initiate 时客户端已经指定了目标库，
+        # 此时拒绝的成本最低。等到 complete 或 create_document 才拦，
+        # 用户已经花了带宽和几分钟等待。
+        if knowledge_base_id is not None:
+            await self._require_active_kb(tenant_id=tenant_id, kb_id=knowledge_base_id)
 
         # ---- 秒传 ----
         if content_hash:
@@ -321,10 +332,63 @@ class UploadService:
             raise NotFoundError("上传会话不存在")
         return found
 
+    # ------------------------------------------------------------ 内部辅助
+
+    async def _require_active_kb(self, *, tenant_id: uuid.UUID, kb_id: uuid.UUID) -> None:
+        """校验知识库存在、属于本租户、且未归档。
+
+        ## 为什么这一层校验不能省
+
+        `upload_sessions.knowledge_base_id` 只是个普通外键。不校验就能：
+
+        1. **跨租户**：拿别人租户的 kb_id 建会话，complete 后再用
+           `POST /documents` 建文档——虽然那时也会被 `_require_kb` 拦住，
+           但上传的字节已经落进了存储，白占空间；
+        2. **已归档的库**：归档库里不该再进新文档。
+
+        提前拦在这里，错误信息也更有用（"知识库已归档" vs 大文件传完
+        才报"无法建文档"）。
+        """
+        from rag_contracts.enums import KnowledgeBaseStatus
+        from rag_core.errors import ConflictError, NotFoundError
+        from rag_db.repositories import KnowledgeBaseRepository
+
+        kb = await KnowledgeBaseRepository(self._session).get(
+            tenant_id=tenant_id, kb_id=kb_id
+        )
+        if kb is None:
+            raise NotFoundError("知识库不存在")
+        if kb.status != KnowledgeBaseStatus.ACTIVE.value:
+            raise ConflictError(
+                "知识库已归档，无法上传文档",
+                details={"status": str(kb.status)},
+            )
+
     async def get_session_filename(self, *, tenant_id: uuid.UUID, session_id: uuid.UUID) -> str:
         """取会话的原始文件名（用于 complete 时确定扩展名/魔数）。"""
         row, _ = await self._load_upload_for_part(tenant_id=tenant_id, session_id=session_id)
         return row.filename
+
+    async def get_session_owner(self, *, tenant_id: uuid.UUID, session_id: uuid.UUID) -> uuid.UUID:
+        """取上传会话的创建者 ID（归属校验用）。
+
+        ## 为什么需要这个方法
+
+        上传会话只按 `tenant_id` 查（`_load_upload_for_part`），所以
+        **同租户内任何成员都能操作他人会话**——上传分片、合并、甚至中止。
+        这是同租户内的越权。
+
+        路由层拿到 `created_by` 后调 `ensure_own_resource`：
+        本人或管理员放行，其他人 404（不泄漏会话存在性）。
+
+        ## 为什么不在 service 里直接判权限
+
+        service 不认识 `PermissionContext`（那是 web 层的概念）。
+        把"谁是所有者"（事实）与"这个人能不能操作"（策略）分开，
+        worker / 脚本复用 service 时不会被 web 权限模型绑住。
+        """
+        row, _ = await self._load_upload_for_part(tenant_id=tenant_id, session_id=session_id)
+        return row.created_by
 
     async def complete(
         self,

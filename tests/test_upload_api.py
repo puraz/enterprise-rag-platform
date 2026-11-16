@@ -42,38 +42,104 @@ def _login(client: TestClient, subject: str) -> dict[str, str]:
 
 
 def _cleanup() -> None:
-    """清理测试数据（用管理连接绕过 RLS）。"""
+    """清理测试数据（用管理连接绕过 RLS）。
+
+    ## 为什么删除顺序这么长
+
+    `B4` 之前上传链路止于 blob，旧版清理只删 `upload_sessions` + `blobs`
+    就够。现在上传会继续建 `documents` / `document_versions` / `tasks`，
+    而 `documents.created_by` / `knowledge_bases.created_by` 是
+    `ON DELETE RESTRICT`——**用户行被引用时删不掉**，清理会抛
+    `RestrictViolationError`，把整个测试文件染红。
+
+    顺序：任务 → 文档（先解 current_version 引用）→ 版本 → 知识库
+    → blob → 上传会话 → 成员 → 租户 → 身份 → 用户。
+
+    ## 为什么按 `created_by → users.email` 定位而不是 slug LIKE
+
+    旧版用 `slug LIKE 'dev-%'` 找租户。这会**误删真实的开发账号**
+    （`dev-eval@eval.local`）及其数据——实测把开发环境的库清空过。
+    改成"只删本测试建的邮箱域名下的租户"。
+    """
     import asyncio
 
     from sqlalchemy import text
 
     from rag_core.db import Database
 
+    # 本文件的 subject 形如 `up-{8位hex}`（见各处 _login 调用），
+    # dev-bootstrap 生成的 slug 是 `dev-{subject}`。
+    #
+    # **不能用 `dev-%` 匹配**：真实开发账号（`dev-eval@eval.local`）
+    # 也在 `dev-` 下，会被一起删掉。实测把开发环境的库清空过。
+    _email_pattern = "up-%@dev.local"
+    _slug_pattern = "dev-up-%"
+
     async def _run() -> None:
         db = Database(get_settings())
         try:
             async with db.transaction_bypass_rls() as session:
+                # B4 之后上传会连带建这些表；顺序必须是子 → 父。
+                #
+                # 每条语句都写全（不用字符串拼接）：SQL 里没有插值，
+                # 参数化传 email_pattern，静态检查与人工 review 都能直接读懂。
+                for statement in (
+                    "DELETE FROM tasks WHERE tenant_id IN ("
+                    "  SELECT id FROM tenants WHERE id IN ("
+                    "    SELECT tenant_id FROM tenant_memberships WHERE user_id IN ("
+                    "      SELECT id FROM users WHERE email LIKE :email_pattern)))",
+                    "UPDATE documents SET current_version_id = NULL WHERE tenant_id IN ("
+                    "  SELECT id FROM tenants WHERE id IN ("
+                    "    SELECT tenant_id FROM tenant_memberships WHERE user_id IN ("
+                    "      SELECT id FROM users WHERE email LIKE :email_pattern)))",
+                    "DELETE FROM documents WHERE tenant_id IN ("
+                    "  SELECT id FROM tenants WHERE id IN ("
+                    "    SELECT tenant_id FROM tenant_memberships WHERE user_id IN ("
+                    "      SELECT id FROM users WHERE email LIKE :email_pattern)))",
+                    "DELETE FROM document_versions WHERE tenant_id IN ("
+                    "  SELECT id FROM tenants WHERE id IN ("
+                    "    SELECT tenant_id FROM tenant_memberships WHERE user_id IN ("
+                    "      SELECT id FROM users WHERE email LIKE :email_pattern)))",
+                    "DELETE FROM knowledge_bases WHERE tenant_id IN ("
+                    "  SELECT id FROM tenants WHERE id IN ("
+                    "    SELECT tenant_id FROM tenant_memberships WHERE user_id IN ("
+                    "      SELECT id FROM users WHERE email LIKE :email_pattern)))",
+                ):
+                    await session.execute(text(statement), {"email_pattern": _email_pattern})
+
                 await session.execute(
                     text(
                         "DELETE FROM upload_sessions WHERE created_by IN "
-                        "(SELECT id FROM users WHERE email LIKE '%@dev.local')"
-                    )
+                        "(SELECT id FROM users WHERE email LIKE :email_pattern)"
+                    ),
+                    {"email_pattern": _email_pattern},
                 )
                 await session.execute(
                     text(
                         "DELETE FROM blobs WHERE tenant_id IN "
-                        "(SELECT id FROM tenants WHERE slug LIKE 'dev-%')"
-                    )
+                        "(SELECT id FROM tenants WHERE slug LIKE :slug_pattern)"
+                    ),
+                    {"slug_pattern": _slug_pattern},
                 )
                 await session.execute(
                     text(
                         "DELETE FROM tenant_memberships WHERE user_id IN "
-                        "(SELECT id FROM users WHERE email LIKE '%@dev.local')"
-                    )
+                        "(SELECT id FROM users WHERE email LIKE :email_pattern)"
+                    ),
+                    {"email_pattern": _email_pattern},
                 )
-                await session.execute(text("DELETE FROM tenants WHERE slug LIKE 'dev-%'"))
+                await session.execute(
+                    text(
+                        "DELETE FROM tenants WHERE slug LIKE :slug_pattern "
+                        "AND id NOT IN (SELECT tenant_id FROM tenant_memberships)"
+                    ),
+                    {"slug_pattern": _slug_pattern},
+                )
                 await session.execute(text("DELETE FROM identity_links WHERE issuer = 'dev'"))
-                await session.execute(text("DELETE FROM users WHERE email LIKE '%@dev.local'"))
+                await session.execute(
+                    text("DELETE FROM users WHERE email LIKE :email_pattern"),
+                    {"email_pattern": _email_pattern},
+                )
         finally:
             await db.close()
 

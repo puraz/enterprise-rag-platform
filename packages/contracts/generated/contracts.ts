@@ -571,6 +571,8 @@ export interface DevLoginRequest {
 export interface LoginResponse {
   /** 本系统签发的 access token */
   access_token: string;
+  /** 刷新令牌（只在这里返回一次）。客户端应保存并在 access token 过期时用它换新的一对 token。**轮换语义**：每次刷新都会作废旧 refresh token 并签发新的，所以客户端必须覆盖保存，不能在并发请求里重复使用同一个。 */
+  refresh_token: string;
   /** 固定为 Bearer */
   token_type?: string;
   /** token 过期时间（Unix 秒），前端据此提前刷新 */
@@ -583,6 +585,31 @@ export interface LoginResponse {
   display_name: string;
   /** 是否本次登录新建的用户（首登） */
   is_new_user: boolean;
+}
+
+/**
+ * 刷新 token 请求。
+ * ## 为什么 refresh token 放在 body 而不是 Authorization 头
+ * 语义上它是"凭据"而不是"身份声明"：用 Authorization 头会让中间层
+ * （网关、日志）把它当 access token 记录到访问日志里。
+ * 放 body 则只出现在请求体（通常不记日志）。
+ */
+export interface RefreshRequest {
+  /** 登录时返回的 refresh token */
+  refresh_token: string;
+}
+
+/**
+ * 刷新结果：一对新 token。
+ * **旧的 refresh token 已作废**（轮换）。客户端必须用新的替换旧的，
+ * 否则下次刷新会因"复用检测"导致整族作废、强制重新登录。
+ */
+export interface RefreshResponse {
+  access_token: string;
+  refresh_token: string;
+  token_type?: string;
+  /** access token 过期时间（Unix 秒） */
+  expires_at: number;
 }
 
 /** `GET /me` 的响应。 */
@@ -879,13 +906,25 @@ export interface MessageItem {
   /** 引用列表（只含本轮检索来源） */
   citations?: Citation[];
   created_at: string;
+  /** 用户反馈：like / dislike */
+  rating?: FeedbackRating | null;
+  /** 点踩原因 */
+  feedback_reason?: FeedbackReason | null;
   input_tokens?: number;
   output_tokens?: number;
   cost_usd?: number;
   latency_ms?: number | null;
 }
 
-/** SSE `done` 事件的 payload。 */
+/**
+ * SSE `done` 事件的 payload。
+ * ## `citations` 是"答案实际引用的"，不是"检索到的"
+ * 由 `assemble_citations` 在生成结束后按答案里的 `[n]` 标记组装：
+ * 按首次出现顺序连续编号、同一材料去重、越界编号丢弃、
+ * 引用的文档必须通过可见性二次校验。
+ * **`index` 从 1 连续、不跳号**：前端按 `index` 找引用条目，
+ * 跳号会让它拿到错条目且不报错。
+ */
 export interface ChatDonePayload {
   message_id: string;
   conversation_id: string;
@@ -898,4 +937,208 @@ export interface ChatDonePayload {
   latency_ms?: number;
   /** 是否走了降级路径（供应商降级/rerank 挂） */
   degraded?: boolean;
+}
+
+/**
+ * 消息反馈请求体。
+ * ## 为什么必须是请求体模型，不能是三个散装参数
+ * 初版在路由签名里直接写了 `rating: FeedbackRating`、`reason`、`comment`
+ * 三个标量参数。FastAPI 对**标量参数默认按 query 解析**，于是前端按 REST
+ * 惯例 POST 一个 JSON body 时，服务端去 query 里找 `rating` → 422：
+ * {"fields":[{"location":["query","rating"],"message":"Field required"}]}
+ * 实测现象：前端点赞点了没反应（422 被吞在 `.then` 里），图标永远不亮。
+ * 请求体模型既修正了解析位置，也让契约能导出给前端做类型约束。
+ */
+export interface FeedbackRequest {
+  /** like / dislike */
+  rating: FeedbackRating;
+  /** 点踩原因（点踩必填、点赞不需要）。自由文本无法聚合统计 */
+  reason?: FeedbackReason | null;
+  /** 补充说明。上限 1000 字符——过长的自由文本可能是误粘贴 */
+  comment?: string | null;
+}
+
+/**
+ * SSE `retrieval` 事件的 payload。
+ * ## 只有"找到几段"，没有引用
+ * 见模块 docstring 的说明：生成前不知道模型会引用哪几条材料，
+ * 提前发引用会让编号与答案里的 `[n]` 对不上。
+ * 前端用它做两件事：
+ * 1. 从"检索中"切到"生成中"（`sources_found` 出现即表示检索完成）；
+ * 2. 显示"已检索到 N 段资料"，让首 token 的等待期可感知。
+ * `sources_found == 0` 通常意味着材料不足，紧接着会收到拒答
+ * （`refused=true` 与一条 `delta` 拒答文案）。
+ */
+export interface ChatRetrievalPayload {
+  /** 检索命中的材料段数。**不是引用数**——答案可能只用到其中几条 */
+  sources_found: number;
+  /** 是否已判定拒答（材料不足）。为 true 时不会再有正常生成 */
+  refused?: boolean;
+}
+
+/** 创建知识库。 */
+export interface CreateKnowledgeBaseRequest {
+  /** 库名。租户内唯一（同名返回 409） */
+  name: string;
+  /** 用途说明，展示在列表里 */
+  description?: string | null;
+  /** 可见范围：private（仅创建者）/ tenant（租户内公开） */
+  visibility?: KnowledgeBaseVisibility;
+  /** 库级密级。文档密级不得低于它——否则机密文档能混进公开库，整个库变成一个随便问的入口 */
+  confidentiality?: ConfidentialityLevel;
+  /** 切分策略：fixed / recursive / structured / sentence_window / parent_child / semantic */
+  chunking_strategy?: string;
+  /** 目标块大小（字符） */
+  chunk_size?: number;
+  /** 相邻块重叠（字符） */
+  chunk_overlap?: number;
+}
+
+/**
+ * 更新知识库（只允许改元数据）。
+ * 为什么不能改 visibility / chunking：见模块 docstring 末段。
+ */
+export interface UpdateKnowledgeBaseRequest {
+  name?: string | null;
+  description?: string | null;
+  /** 调高密级会让原本可读的文档变不可读（安全方向）；调低需审计 */
+  confidentiality?: ConfidentialityLevel | null;
+}
+
+/**
+ * 知识库列表项 / 详情。
+ * 单对象就直接返回它（不包一层 `{knowledge_base: {...}}`）——
+ * 成功响应只有三种形态：单对象 / 分页集合 / 无内容。
+ * ## 字段名与 DB 列名不同，映射在路由层显式做
+ * DB 叫 `default_chunk_size`（强调"新文档继承的默认值"），
+ * 对外叫 `chunk_size`（对使用者来说就是这个库的切分大小）。
+ * 不用 `validation_alias` 自动映射：那样 `KnowledgeBaseItem(...)`
+ * 显式构造时报"字段缺失"（alias 只影响**解析**，不影响构造），
+ * 错误信息还指着 `default_chunk_size` 这个前端从没见过的名字。
+ */
+export interface KnowledgeBaseItem {
+  id: string;
+  name: string;
+  description?: string | null;
+  status: KnowledgeBaseStatus;
+  visibility: KnowledgeBaseVisibility;
+  confidentiality: ConfidentialityLevel;
+  /** 库内文档数（不含已删除） */
+  document_count: number;
+  /** 默认切分策略（新文档继承它） */
+  chunking_strategy: string;
+  chunk_size: number;
+  chunk_overlap: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * 把已上传的 blob 登记为文档。
+ * ## 为什么上传与建文档分成两个接口
+ * 两条路径在 complete 之后是**同一条**：
+ * POST /uploads → ... → POST /uploads/{id}/complete → {blob_id}
+ * ↓
+ * POST /documents
+ * 秒传命中也只拿到 `blob_id`（没有分片、没有 upload_id），走的完全是
+ * 最后这一步。如果建文档逻辑塞进 `complete`，秒传就得另写一份——
+ * 两份代码迟早不一致。
+ * 分开还有一个好处：`complete` 只做存储层的事（合并、校验、落 blob），
+ * `POST /documents` 只做业务层的事（建文档、建版本、入队）。
+ * 职责单一，各自可独立测试。
+ */
+export interface CreateDocumentRequest {
+  /** 已完成的物理文件 ID（来自上传 complete 或秒传） */
+  blob_id: string;
+  /** 目标知识库 */
+  knowledge_base_id: string;
+  /** 文档标题。省略时用 original_filename 去掉扩展名 */
+  title?: string | null;
+  /** 原始文件名。决定文档格式（扩展名）与审计记录 */
+  original_filename: string;
+  /** 文档密级。省略时继承知识库密级。只能更严不能更松：比库级更松会绕过库的密级约束 */
+  confidentiality?: ConfidentialityLevel | null;
+}
+
+/**
+ * 建文档的响应（202 Accepted 语义）。
+ * ## 为什么不是 201
+ * 201 表示"资源已完整创建"。这里只创建了**文档元数据**，
+ * 真正的内容（chunk / 向量）还在异步管线里。用 202 表达
+ * "已接受，处理是异步的"，前端据此决定"跳详情页并轮询"而不是
+ * "以为已经可检索了"。
+ * `task_id` 是轮询进度的抓手，也是排查"为什么文档一直 pending"的入口。
+ */
+export interface CreateDocumentResponse {
+  document_id: string;
+  task_id: string;
+  /** 当前状态，正常为 pending */
+  status: DocumentStatus;
+  /** 该 blob 是否已被其它文档引用（秒传 / 重复上传同一文件） */
+  deduplicated_blob?: boolean;
+}
+
+/** 文档列表项。 */
+export interface DocumentItem {
+  id: string;
+  knowledge_base_id: string;
+  title: string;
+  original_filename: string;
+  format: DocumentFormat;
+  status: DocumentStatus;
+  confidentiality: ConfidentialityLevel;
+  chunk_count: number;
+  page_count?: number | null;
+  /** 原始文件大小 */
+  size_bytes: number;
+  /** 当前版本序号，0 表示尚无版本 */
+  current_version_no: number;
+  /** 失败错误码（仅 failed 状态有值） */
+  error_code?: string | null;
+  /** 失败原因（仅内部可见，不含文档正文） */
+  error_message?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * 文档详情：列表项 + 版本历史。
+ * ## 为什么版本历史只在详情里
+ * 列表页一次拉 20 个文档，每个再带 5 个版本就是 100 个额外对象。
+ * 版本历史只在"我要回滚 / 对比"时才需要，按需加载更合理。
+ */
+export interface DocumentDetail {
+  id: string;
+  knowledge_base_id: string;
+  title: string;
+  original_filename: string;
+  format: DocumentFormat;
+  status: DocumentStatus;
+  confidentiality: ConfidentialityLevel;
+  chunk_count: number;
+  page_count?: number | null;
+  /** 原始文件大小 */
+  size_bytes: number;
+  /** 当前版本序号，0 表示尚无版本 */
+  current_version_no: number;
+  /** 失败错误码（仅 failed 状态有值） */
+  error_code?: string | null;
+  /** 失败原因（仅内部可见，不含文档正文） */
+  error_message?: string | null;
+  created_at: string;
+  updated_at: string;
+  /** 版本列表（新版本在前） */
+  versions?: DocumentVersionItem[];
+}
+
+/** 文档版本项。 */
+export interface DocumentVersionItem {
+  id: string;
+  version_no: number;
+  status: DocumentVersionStatus;
+  is_current: boolean;
+  chunk_count: number;
+  page_count?: number | null;
+  parser_name?: string | null;
+  created_at: string;
 }

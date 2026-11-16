@@ -755,3 +755,61 @@ FastAPI 默认的 `{"detail": ...}` 已由全局处理器转换，不得绕过�
   改用子查询选 id 再更新。
 - **审计在 `finally` 里写**：流结束/出错/断连都要留痕。
   审计 `details` 不放问题原文（保留期长且可能含 PII），只放 ID 与计数。
+
+### 4.20 知识库与文档接口规范（`/api/v1/knowledge-bases`、`/api/v1/documents`）
+
+- **上传与建文档是两步，不能合并**：`POST /uploads/{id}/complete` 只产出
+  `blob_id`；`POST /documents` 负责建文档+版本+入队。秒传命中时没有
+  `upload_id`、没有分片，与首次上传共用 `POST /documents`——
+  塞进 `complete` 就要写两份代码，两份迟早不一致。
+- **`IngestionService` 的五件事必须同事务**：建 documents / 建
+  document_versions（`is_current=true`）/ blob 引用 +1 / 库文档计数 +1 /
+  enqueue `parse_document`。缺任何一件都让文档永远停在 pending，
+  **且没有报错**（每个组件单独看都正常，错的是组装）。
+- **`deduplicated_blob` 不能看 `ref_count`**：它是混合计数器
+  （上传会话持有 + 每个文档引用），第一次建文档后就是 2。
+  从文档侧数 `count(DISTINCT document_id)`，> 1 才是重复。
+- **chunk 级查询只能用 `confidentiality_filter_for_chunks`**，
+  不能用 `document_access_filter`。后者直接引用 `Document.xxx` 列，
+  塞进 `select(Chunk).where(...)` 会生成 `FROM chunks, documents`
+  **没有 join 条件**——笛卡尔积，SECRET 内容照样漏出来，且不报错。
+- **检索必须传 `access_filter`**：`search_vector` 与 `search_keyword`
+  都已经支持，但**不传就是静默不过滤**。安全性依赖调用方记得传，
+  `tests/test_acl_retrieval.py` 里有一条"不传 filter 时 SECRET 泄漏"
+  的对照测试，用来提醒这个约定。
+- **建文档返回 202 不是 201**：只建了元数据，chunk/向量还在异步管线里。
+  201 会让前端以为立刻可检索。
+- **文档密级不得低于库级密级**：库里标"机密"但文档填"公开"，
+  等于库的密级被单条文档绕过。用 `LEVEL_RANK` 比较，不能用字符串序。
+- **删除知识库要求库内无文档**（409 + 文档数）：级联删除会牵扯
+  chunk、向量、blob 引用，任一处漏掉就是孤儿数据。
+- **删除文档要减 blob 引用计数 + 库文档计数**：不减会让存储永不释放，
+  或让库永远显示"1 个文档"却删不掉。
+- **上传会话要校验归属**：只按 `tenant_id` 查会让同租户任何成员能往
+  别人的上传里塞分片、甚至 abort（已传分片被清理）。用
+  `ensure_own_resource`，越权返回 404。
+- **`visibility=department` 创建时拒绝**：`departments` 表未建模，
+  放行会建出"自己都看不到"的库——数据建成功但谁都访问不到，且不报错。
+- **更新知识库只允许 name/description/confidentiality**：改 visibility
+  是权限变更（该走专门接口 + 审计）；改 chunking 会让已入库 chunk
+  与新配置不一致。
+
+### 4.21 引用事件规范（SSE `retrieval` vs `done`）
+
+- **`retrieval` 事件不带 citations**，只发 `{sources_found: int, refused: bool}`。
+  引用是"答案的哪句话依据了哪段原文"，答案没定稿时这个映射不存在。
+- **引用必须在生成结束后按答案里的 `[n]` 标记组装**：
+  用 `assemble_citations`（`rag_adapters/retrieval/citations_builder.py`），
+  不要自己写 `enumerate(materials)` 的等价逻辑。
+- **为什么这条是硬约束**：初版在生成前把全部检索命中当引用发给前端，
+  导致三个错误且**都不报错**——(1) 事件里的 index 按材料顺序编、答案里的
+  `[n]` 是模型写的，两者对不上时用户点开看到**错的原文**；
+  (2) 检索 5 条 ≠ 引用 5 条，多出的 4 条是噪音却像依据；
+  (3) 生成前给出的是候选不是依据。
+- **`visible_document_ids` 必须传**：SQL 已过滤，但模型可能记错来源、
+  父块回填可能带进未过滤内容。引用越界是最隐蔽的泄漏形态（嵌在答案里）。
+- **越界编号丢弃引用但保留答案**：抛异常会让"编号写错"变成"整个答案丢失"。
+- **`index` 必须从 1 连续**：`ChatDonePayload.citations` 是裸 list，
+  不会触发 `AnswerWithCitations` 的连续性校验，须由 `assemble_citations` 保证。
+- **生成期间不显示引用编号**：前端等 `done` 再渲染。等待期用
+  "已检索到 N 段资料"提示，既让等待可感知又不误导。

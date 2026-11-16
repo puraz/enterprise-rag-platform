@@ -175,6 +175,7 @@ class ModelGateway:
         provider_name: str | None = None,
         idempotent: bool = True,
         fallback_provider: str | None = None,
+        priced_at: datetime | None = None,
     ) -> tuple[LLMResponse, CallCost]:
         """执行一次调用。`fallback_provider` 非空时，主 provider 失败会尝试它。
 
@@ -201,6 +202,7 @@ class ModelGateway:
                 max_tokens=max_tokens,
                 json_mode=json_mode,
                 idempotent=idempotent,
+                priced_at=priced_at,
             )
 
         resolved = provider_name or self._settings.provider
@@ -264,13 +266,20 @@ class ModelGateway:
         max_tokens: int | None,
         json_mode: bool,
         idempotent: bool,
+        priced_at: datetime | None = None,
     ) -> tuple[LLMResponse, CallCost]:
         """单次调用（不含降级）。
+
+        **不能直接调 `_complete_once`，要用 `_call_with`**：这里要挂
+        ResilientCaller（重试/熔断/预算），跳过它等于关闭韧性层。
 
         `idempotent=False` 时**不重试**（例如带副作用的调用）。
         普通补全是幂等的（同样的输入得到同样输出，不计费重复）——
         注意：重试会**产生多次计费**，所以成本要按实际调用次数累加，
         不能只记第一次。
+
+        `priced_at` 只给测试用：让"峰谷定价"的断言能固定在某个时段。
+        生产传 None，用 `datetime.now(UTC)`。
         """
         resolved_provider = provider_key
         provider = self._providers.get(resolved_provider)
@@ -307,7 +316,7 @@ class ModelGateway:
             )
             raise
 
-        cost = self._compute_call_cost(response, at=datetime.now(UTC))
+        cost = self._compute_call_cost(response, at=priced_at or datetime.now(UTC))
         if stats.retries:
             log.info(
                 "llm_call_needed_retry",

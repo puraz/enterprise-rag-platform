@@ -61,8 +61,14 @@ from rag_api.openapi import (
     TENANT_ENDPOINT,
     TENANT_WRITE_ENDPOINT,
 )
+from rag_api.permissions import PermissionContext, get_permission_context
 from rag_api.services.chat import ChatEvent, ChatService
-from rag_contracts.api.chat import ChatRequest, ConversationItem, MessageItem
+from rag_contracts.api.chat import (
+    ChatRequest,
+    ConversationItem,
+    FeedbackRequest,
+    MessageItem,
+)
 from rag_contracts.api.pagination import Page, PageMeta
 from rag_contracts.enums.conversations import FeedbackRating, FeedbackReason
 from rag_core.logging import get_logger
@@ -194,6 +200,9 @@ async def chat(
     payload: ChatRequest,
     request: Request,
     principal: Principal = Depends(get_current_principal),
+    # **权限上下文必须注入**：检索返回的是文档正文，不过滤 ACL
+    # 等于用户能通过提问把无权文档的内容问出来（AGENTS.md 4.8）。
+    ctx: PermissionContext = Depends(get_permission_context),
     session: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     service = _build_service(request, session)
@@ -212,6 +221,8 @@ async def chat(
                 query=payload.query,
                 conversation_id=payload.conversation_id,
                 knowledge_base_ids=payload.knowledge_base_ids or None,
+                # 传 ACL 上下文：检索侧据此过滤越权文档
+                permission_ctx=ctx,
             ):
                 if event.event in {"done", "error"}:
                     final_event = event
@@ -368,13 +379,17 @@ async def delete_conversation(
 )
 async def submit_feedback(
     message_id: uuid.UUID,
-    rating: FeedbackRating,
+    payload: FeedbackRequest,
     principal: Principal = Depends(get_current_principal),
     session: AsyncSession = Depends(get_db),
-    reason: FeedbackReason | None = None,
-    comment: str | None = None,
 ) -> dict[str, object]:
     """记录用户反馈。
+
+    ## 为什么反馈是请求体而不是 query 参数
+
+    见 `FeedbackRequest` 的 docstring：散装标量参数会被 FastAPI 按 query
+    解析，前端按 REST 惯例发 JSON body 就会 422。这个 bug 单元测试里用
+    TestClient 直接传参数是测不出的，只有端到端点一次才暴露。
 
     ## 为什么点踩原因用固定枚举
 
@@ -398,14 +413,8 @@ async def submit_feedback(
 
         raise ValidationFailedError("只能对助手回答提交反馈")
 
-    # 评论长度限制：反馈会进评估集，过长的自由文本可能是误粘贴
-    if comment is not None and len(comment) > 1000:
-        from rag_core.errors import ValidationFailedError
-
-        raise ValidationFailedError("反馈评论不能超过 1000 字符")
-
     # 点踩才需要原因（点赞不需要解释）
-    if rating == FeedbackRating.DISLIKE and reason is None:
+    if payload.rating == FeedbackRating.DISLIKE and payload.reason is None:
         from rag_core.errors import ValidationFailedError
 
         raise ValidationFailedError("点踩时请选择原因")
@@ -413,9 +422,9 @@ async def submit_feedback(
     await repo.set_feedback(
         tenant_id=principal.tenant_id,
         message_id=message_id,
-        rating=rating,
-        reason=reason,
-        comment=comment,
+        rating=payload.rating,
+        reason=payload.reason,
+        comment=payload.comment,
     )
     return {"ok": True}
 
@@ -517,6 +526,8 @@ def _to_message_item(row: Message) -> MessageItem:
         refusal_reason=row.refusal_reason,
         citations=citations,
         created_at=row.created_at,
+        rating=FeedbackRating(row.rating) if row.rating else None,
+        feedback_reason=FeedbackReason(row.feedback_reason) if row.feedback_reason else None,
         input_tokens=row.input_tokens,
         output_tokens=row.output_tokens,
         cost_usd=row.cost_usd,

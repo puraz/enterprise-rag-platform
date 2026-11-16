@@ -375,6 +375,7 @@ class ChunkRepository:
         keywords: Sequence[str],
         knowledge_base_ids: Sequence[uuid.UUID] | None = None,
         limit: int = 10,
+        access_filter: Any = None,
     ) -> list[tuple[Chunk, float]]:
         """关键词检索（BM25 的简化替代：ts_rank 全文检索）。
 
@@ -386,6 +387,12 @@ class ChunkRepository:
         注意：默认的 `simple` 分词器不认识中文，会把整个句子当一个词。
         A10 需要装 zhparser 或改用 pg_bigm / pg_trgm。
         这里先用 `to_tsvector('simple', ...)` 让整条链路可跑通并写清限制。
+
+        ## `access_filter` 与 `search_vector` 必须同时传
+
+        双路检索（向量 + 关键词）做 RRF 融合。如果只给向量路加了 ACL
+        而关键词路没加，融合结果里会混进越权内容——而且因为 RRF 只看
+        排名，越权项可能被抬到前面。**漏一处等于全漏**。
         """
         if not keywords:
             return []
@@ -397,20 +404,22 @@ class ChunkRepository:
             func.to_tsquery("simple", query_text),
         ).label("rank")
 
-        stmt = (
-            select(Chunk, rank)
-            .where(
-                Chunk.tenant_id == tenant_id,
-                Chunk.is_current.is_(True),
-                func.to_tsvector("simple", Chunk.content).op("@@")(
-                    func.to_tsquery("simple", query_text)
-                ),
-            )
-            .order_by(rank.desc())
-            .limit(limit)
-        )
+        conditions = [
+            Chunk.tenant_id == tenant_id,
+            Chunk.is_current.is_(True),
+            # 父块不参与检索（与 search_vector 保持一致——否则父块与子块
+            # 同时出现，同一内容占两个结果位）
+            Chunk.chunk_level == 0,
+            func.to_tsvector("simple", Chunk.content).op("@@")(
+                func.to_tsquery("simple", query_text)
+            ),
+        ]
         if knowledge_base_ids:
-            stmt = stmt.where(Chunk.knowledge_base_id.in_(knowledge_base_ids))
+            conditions.append(Chunk.knowledge_base_id.in_(list(knowledge_base_ids)))
+        if access_filter is not None:
+            conditions.append(access_filter)
+
+        stmt = select(Chunk, rank).where(*conditions).order_by(rank.desc()).limit(limit)
 
         result = await self._session.execute(stmt)
         # 关键词检索的 rank 越大越相关，统一转成"距离"语义（越小越好）取负

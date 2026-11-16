@@ -697,6 +697,11 @@
           "title": "Access Token",
           "type": "string"
         },
+        "refresh_token": {
+          "description": "刷新令牌（只在这里返回一次）。客户端应保存并在 access token 过期时用它换新的一对 token。**轮换语义**：每次刷新都会作废旧 refresh token 并签发新的，所以客户端必须覆盖保存，不能在并发请求里重复使用同一个。",
+          "title": "Refresh Token",
+          "type": "string"
+        },
         "token_type": {
           "default": "Bearer",
           "description": "固定为 Bearer",
@@ -736,6 +741,7 @@
       },
       "required": [
         "access_token",
+        "refresh_token",
         "expires_at",
         "user_id",
         "tenant_id",
@@ -744,6 +750,54 @@
         "is_new_user"
       ],
       "title": "LoginResponse",
+      "type": "object"
+    },
+    "RefreshRequest": {
+      "additionalProperties": false,
+      "description": "刷新 token 请求。\n\n## 为什么 refresh token 放在 body 而不是 Authorization 头\n\n语义上它是\"凭据\"而不是\"身份声明\"：用 Authorization 头会让中间层\n（网关、日志）把它当 access token 记录到访问日志里。\n放 body 则只出现在请求体（通常不记日志）。",
+      "properties": {
+        "refresh_token": {
+          "description": "登录时返回的 refresh token",
+          "maxLength": 200,
+          "minLength": 20,
+          "title": "Refresh Token",
+          "type": "string"
+        }
+      },
+      "required": [
+        "refresh_token"
+      ],
+      "title": "RefreshRequest",
+      "type": "object"
+    },
+    "RefreshResponse": {
+      "description": "刷新结果：一对新 token。\n\n**旧的 refresh token 已作废**（轮换）。客户端必须用新的替换旧的，\n否则下次刷新会因\"复用检测\"导致整族作废、强制重新登录。",
+      "properties": {
+        "access_token": {
+          "title": "Access Token",
+          "type": "string"
+        },
+        "refresh_token": {
+          "title": "Refresh Token",
+          "type": "string"
+        },
+        "token_type": {
+          "default": "Bearer",
+          "title": "Token Type",
+          "type": "string"
+        },
+        "expires_at": {
+          "description": "access token 过期时间（Unix 秒）",
+          "title": "Expires At",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "access_token",
+        "refresh_token",
+        "expires_at"
+      ],
+      "title": "RefreshResponse",
       "type": "object"
     },
     "CurrentUserResponse": {
@@ -2162,6 +2216,28 @@
           "title": "Citation",
           "type": "object"
         },
+        "FeedbackRating": {
+          "description": "用户反馈。",
+          "enum": [
+            "like",
+            "dislike"
+          ],
+          "title": "FeedbackRating",
+          "type": "string"
+        },
+        "FeedbackReason": {
+          "description": "点踩原因（可选，用于构建改进数据集）。\n\n固定枚举而不是自由文本：自由文本无法聚合统计，\n而\"哪类问题最常被踩\"是优化 prompt 的关键输入。",
+          "enum": [
+            "not_relevant",
+            "wrong_fact",
+            "incomplete",
+            "no_citation",
+            "too_verbose",
+            "other"
+          ],
+          "title": "FeedbackReason",
+          "type": "string"
+        },
         "MessageRole": {
           "description": "消息角色。\n\n与 `LLMRole`（provider 层）分开：这里是**业务角色**，\n将来可能要加 `tool`（工具返回）等业务概念，而 provider 层\n只认识 system/user/assistant 三种。",
           "enum": [
@@ -2250,6 +2326,30 @@
           "format": "date-time",
           "title": "Created At",
           "type": "string"
+        },
+        "rating": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FeedbackRating"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "用户反馈：like / dislike"
+        },
+        "feedback_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FeedbackReason"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "点踩原因"
         },
         "input_tokens": {
           "default": 0,
@@ -2439,7 +2539,7 @@
         }
       },
       "additionalProperties": false,
-      "description": "SSE `done` 事件的 payload。",
+      "description": "SSE `done` 事件的 payload。\n\n## `citations` 是\"答案实际引用的\"，不是\"检索到的\"\n\n由 `assemble_citations` 在生成结束后按答案里的 `[n]` 标记组装：\n按首次出现顺序连续编号、同一材料去重、越界编号丢弃、\n引用的文档必须通过可见性二次校验。\n\n**`index` 从 1 连续、不跳号**：前端按 `index` 找引用条目，\n跳号会让它拿到错条目且不报错。",
       "properties": {
         "message_id": {
           "format": "uuid",
@@ -2510,6 +2610,951 @@
         "conversation_id"
       ],
       "title": "ChatDonePayload",
+      "type": "object"
+    },
+    "FeedbackRequest": {
+      "$defs": {
+        "FeedbackRating": {
+          "description": "用户反馈。",
+          "enum": [
+            "like",
+            "dislike"
+          ],
+          "title": "FeedbackRating",
+          "type": "string"
+        },
+        "FeedbackReason": {
+          "description": "点踩原因（可选，用于构建改进数据集）。\n\n固定枚举而不是自由文本：自由文本无法聚合统计，\n而\"哪类问题最常被踩\"是优化 prompt 的关键输入。",
+          "enum": [
+            "not_relevant",
+            "wrong_fact",
+            "incomplete",
+            "no_citation",
+            "too_verbose",
+            "other"
+          ],
+          "title": "FeedbackReason",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "description": "消息反馈请求体。\n\n## 为什么必须是请求体模型，不能是三个散装参数\n\n初版在路由签名里直接写了 `rating: FeedbackRating`、`reason`、`comment`\n三个标量参数。FastAPI 对**标量参数默认按 query 解析**，于是前端按 REST\n惯例 POST 一个 JSON body 时，服务端去 query 里找 `rating` → 422：\n\n    {\"fields\":[{\"location\":[\"query\",\"rating\"],\"message\":\"Field required\"}]}\n\n实测现象：前端点赞点了没反应（422 被吞在 `.then` 里），图标永远不亮。\n\n请求体模型既修正了解析位置，也让契约能导出给前端做类型约束。",
+      "properties": {
+        "rating": {
+          "$ref": "#/$defs/FeedbackRating",
+          "description": "like / dislike"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FeedbackReason"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "点踩原因（点踩必填、点赞不需要）。自由文本无法聚合统计"
+        },
+        "comment": {
+          "anyOf": [
+            {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "补充说明。上限 1000 字符——过长的自由文本可能是误粘贴",
+          "title": "Comment"
+        }
+      },
+      "required": [
+        "rating"
+      ],
+      "title": "FeedbackRequest",
+      "type": "object"
+    },
+    "ChatRetrievalPayload": {
+      "additionalProperties": false,
+      "description": "SSE `retrieval` 事件的 payload。\n\n## 只有\"找到几段\"，没有引用\n\n见模块 docstring 的说明：生成前不知道模型会引用哪几条材料，\n提前发引用会让编号与答案里的 `[n]` 对不上。\n\n前端用它做两件事：\n1. 从\"检索中\"切到\"生成中\"（`sources_found` 出现即表示检索完成）；\n2. 显示\"已检索到 N 段资料\"，让首 token 的等待期可感知。\n\n`sources_found == 0` 通常意味着材料不足，紧接着会收到拒答\n（`refused=true` 与一条 `delta` 拒答文案）。",
+      "properties": {
+        "sources_found": {
+          "description": "检索命中的材料段数。**不是引用数**——答案可能只用到其中几条",
+          "minimum": 0,
+          "title": "Sources Found",
+          "type": "integer"
+        },
+        "refused": {
+          "default": false,
+          "description": "是否已判定拒答（材料不足）。为 true 时不会再有正常生成",
+          "title": "Refused",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "sources_found"
+      ],
+      "title": "ChatRetrievalPayload",
+      "type": "object"
+    },
+    "CreateKnowledgeBaseRequest": {
+      "$defs": {
+        "ConfidentialityLevel": {
+          "description": "密级。数值越大越敏感。\n\n密级与 ACL 是**正交**的两道门：\n- ACL 回答\"你能不能看这个库/文档\"；\n- 密级回答\"你这个人的密级够不够\"。\n缺任何一道都会出事：只有 ACL 时，\"有权限的人\"可能是实习生；\n只有密级时，\"够级的人\"可能不在这个部门。",
+          "enum": [
+            "public",
+            "internal",
+            "confidential",
+            "secret"
+          ],
+          "title": "ConfidentialityLevel",
+          "type": "string"
+        },
+        "KnowledgeBaseVisibility": {
+          "description": "知识库可见范围。\n\n这是**库级**的粗粒度控制；文档级的 ACL 与密级是更细的一层（A7 实现）。\n两层并存的原因：绝大多数场景只需库级控制（整个部门库），\n逐文档配 ACL 成本太高；但敏感文档确实需要单独收紧。",
+          "enum": [
+            "private",
+            "tenant",
+            "department"
+          ],
+          "title": "KnowledgeBaseVisibility",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "description": "创建知识库。",
+      "properties": {
+        "name": {
+          "description": "库名。租户内唯一（同名返回 409）",
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "用途说明，展示在列表里",
+          "title": "Description"
+        },
+        "visibility": {
+          "$ref": "#/$defs/KnowledgeBaseVisibility",
+          "default": "tenant",
+          "description": "可见范围：private（仅创建者）/ tenant（租户内公开）"
+        },
+        "confidentiality": {
+          "$ref": "#/$defs/ConfidentialityLevel",
+          "default": "internal",
+          "description": "库级密级。文档密级不得低于它——否则机密文档能混进公开库，整个库变成一个随便问的入口"
+        },
+        "chunking_strategy": {
+          "default": "recursive",
+          "description": "切分策略：fixed / recursive / structured / sentence_window / parent_child / semantic",
+          "maxLength": 64,
+          "title": "Chunking Strategy",
+          "type": "string"
+        },
+        "chunk_size": {
+          "default": 800,
+          "description": "目标块大小（字符）",
+          "maximum": 4000,
+          "minimum": 100,
+          "title": "Chunk Size",
+          "type": "integer"
+        },
+        "chunk_overlap": {
+          "default": 100,
+          "description": "相邻块重叠（字符）",
+          "maximum": 1000,
+          "minimum": 0,
+          "title": "Chunk Overlap",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "CreateKnowledgeBaseRequest",
+      "type": "object"
+    },
+    "UpdateKnowledgeBaseRequest": {
+      "$defs": {
+        "ConfidentialityLevel": {
+          "description": "密级。数值越大越敏感。\n\n密级与 ACL 是**正交**的两道门：\n- ACL 回答\"你能不能看这个库/文档\"；\n- 密级回答\"你这个人的密级够不够\"。\n缺任何一道都会出事：只有 ACL 时，\"有权限的人\"可能是实习生；\n只有密级时，\"够级的人\"可能不在这个部门。",
+          "enum": [
+            "public",
+            "internal",
+            "confidential",
+            "secret"
+          ],
+          "title": "ConfidentialityLevel",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "description": "更新知识库（只允许改元数据）。\n\n为什么不能改 visibility / chunking：见模块 docstring 末段。",
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "confidentiality": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConfidentialityLevel"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "调高密级会让原本可读的文档变不可读（安全方向）；调低需审计"
+        }
+      },
+      "title": "UpdateKnowledgeBaseRequest",
+      "type": "object"
+    },
+    "KnowledgeBaseItem": {
+      "$defs": {
+        "ConfidentialityLevel": {
+          "description": "密级。数值越大越敏感。\n\n密级与 ACL 是**正交**的两道门：\n- ACL 回答\"你能不能看这个库/文档\"；\n- 密级回答\"你这个人的密级够不够\"。\n缺任何一道都会出事：只有 ACL 时，\"有权限的人\"可能是实习生；\n只有密级时，\"够级的人\"可能不在这个部门。",
+          "enum": [
+            "public",
+            "internal",
+            "confidential",
+            "secret"
+          ],
+          "title": "ConfidentialityLevel",
+          "type": "string"
+        },
+        "KnowledgeBaseStatus": {
+          "description": "知识库状态。",
+          "enum": [
+            "active",
+            "archived",
+            "deleted"
+          ],
+          "title": "KnowledgeBaseStatus",
+          "type": "string"
+        },
+        "KnowledgeBaseVisibility": {
+          "description": "知识库可见范围。\n\n这是**库级**的粗粒度控制；文档级的 ACL 与密级是更细的一层（A7 实现）。\n两层并存的原因：绝大多数场景只需库级控制（整个部门库），\n逐文档配 ACL 成本太高；但敏感文档确实需要单独收紧。",
+          "enum": [
+            "private",
+            "tenant",
+            "department"
+          ],
+          "title": "KnowledgeBaseVisibility",
+          "type": "string"
+        }
+      },
+      "description": "知识库列表项 / 详情。\n\n单对象就直接返回它（不包一层 `{knowledge_base: {...}}`）——\n成功响应只有三种形态：单对象 / 分页集合 / 无内容。\n\n## 字段名与 DB 列名不同，映射在路由层显式做\n\nDB 叫 `default_chunk_size`（强调\"新文档继承的默认值\"），\n对外叫 `chunk_size`（对使用者来说就是这个库的切分大小）。\n不用 `validation_alias` 自动映射：那样 `KnowledgeBaseItem(...)`\n显式构造时报\"字段缺失\"（alias 只影响**解析**，不影响构造），\n错误信息还指着 `default_chunk_size` 这个前端从没见过的名字。",
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "status": {
+          "$ref": "#/$defs/KnowledgeBaseStatus"
+        },
+        "visibility": {
+          "$ref": "#/$defs/KnowledgeBaseVisibility"
+        },
+        "confidentiality": {
+          "$ref": "#/$defs/ConfidentialityLevel"
+        },
+        "document_count": {
+          "description": "库内文档数（不含已删除）",
+          "minimum": 0,
+          "title": "Document Count",
+          "type": "integer"
+        },
+        "chunking_strategy": {
+          "description": "默认切分策略（新文档继承它）",
+          "title": "Chunking Strategy",
+          "type": "string"
+        },
+        "chunk_size": {
+          "minimum": 1,
+          "title": "Chunk Size",
+          "type": "integer"
+        },
+        "chunk_overlap": {
+          "minimum": 0,
+          "title": "Chunk Overlap",
+          "type": "integer"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "status",
+        "visibility",
+        "confidentiality",
+        "document_count",
+        "chunking_strategy",
+        "chunk_size",
+        "chunk_overlap",
+        "created_at",
+        "updated_at"
+      ],
+      "title": "KnowledgeBaseItem",
+      "type": "object"
+    },
+    "CreateDocumentRequest": {
+      "$defs": {
+        "ConfidentialityLevel": {
+          "description": "密级。数值越大越敏感。\n\n密级与 ACL 是**正交**的两道门：\n- ACL 回答\"你能不能看这个库/文档\"；\n- 密级回答\"你这个人的密级够不够\"。\n缺任何一道都会出事：只有 ACL 时，\"有权限的人\"可能是实习生；\n只有密级时，\"够级的人\"可能不在这个部门。",
+          "enum": [
+            "public",
+            "internal",
+            "confidential",
+            "secret"
+          ],
+          "title": "ConfidentialityLevel",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "description": "把已上传的 blob 登记为文档。\n\n## 为什么上传与建文档分成两个接口\n\n两条路径在 complete 之后是**同一条**：\n\n    POST /uploads → ... → POST /uploads/{id}/complete → {blob_id}\n                                                        ↓\n                                               POST /documents\n\n秒传命中也只拿到 `blob_id`（没有分片、没有 upload_id），走的完全是\n最后这一步。如果建文档逻辑塞进 `complete`，秒传就得另写一份——\n两份代码迟早不一致。\n\n分开还有一个好处：`complete` 只做存储层的事（合并、校验、落 blob），\n`POST /documents` 只做业务层的事（建文档、建版本、入队）。\n职责单一，各自可独立测试。",
+      "properties": {
+        "blob_id": {
+          "description": "已完成的物理文件 ID（来自上传 complete 或秒传）",
+          "format": "uuid",
+          "title": "Blob Id",
+          "type": "string"
+        },
+        "knowledge_base_id": {
+          "description": "目标知识库",
+          "format": "uuid",
+          "title": "Knowledge Base Id",
+          "type": "string"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "文档标题。省略时用 original_filename 去掉扩展名",
+          "title": "Title"
+        },
+        "original_filename": {
+          "description": "原始文件名。决定文档格式（扩展名）与审计记录",
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Original Filename",
+          "type": "string"
+        },
+        "confidentiality": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConfidentialityLevel"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "文档密级。省略时继承知识库密级。只能更严不能更松：比库级更松会绕过库的密级约束"
+        }
+      },
+      "required": [
+        "blob_id",
+        "knowledge_base_id",
+        "original_filename"
+      ],
+      "title": "CreateDocumentRequest",
+      "type": "object"
+    },
+    "CreateDocumentResponse": {
+      "$defs": {
+        "DocumentStatus": {
+          "description": "文档处理状态机。\n\n完整流转：\n\n    PENDING ──▶ PARSING ──▶ CHUNKING ──▶ EMBEDDING ──▶ INDEXING ──▶ READY\n       │           │           │            │            │\n       └───────────┴───────────┴────────────┴────────────┴──▶ FAILED\n                                                              │\n                                                          (重试) ──▶ PENDING\n\n约束（A3-4 的任务表会用同样的状态集）：\n- 只有 READY 的文档能参与检索；\n- FAILED 的文档保留原始 blob，允许重试而不必重新上传；\n- 状态流转必须走乐观锁（`version`），否则并发重试会互相覆盖。",
+          "enum": [
+            "pending",
+            "parsing",
+            "chunking",
+            "embedding",
+            "indexing",
+            "ready",
+            "failed"
+          ],
+          "title": "DocumentStatus",
+          "type": "string"
+        }
+      },
+      "description": "建文档的响应（202 Accepted 语义）。\n\n## 为什么不是 201\n\n201 表示\"资源已完整创建\"。这里只创建了**文档元数据**，\n真正的内容（chunk / 向量）还在异步管线里。用 202 表达\n\"已接受，处理是异步的\"，前端据此决定\"跳详情页并轮询\"而不是\n\"以为已经可检索了\"。\n\n`task_id` 是轮询进度的抓手，也是排查\"为什么文档一直 pending\"的入口。",
+      "properties": {
+        "document_id": {
+          "format": "uuid",
+          "title": "Document Id",
+          "type": "string"
+        },
+        "task_id": {
+          "format": "uuid",
+          "title": "Task Id",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/DocumentStatus",
+          "description": "当前状态，正常为 pending"
+        },
+        "deduplicated_blob": {
+          "default": false,
+          "description": "该 blob 是否已被其它文档引用（秒传 / 重复上传同一文件）",
+          "title": "Deduplicated Blob",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "document_id",
+        "task_id",
+        "status"
+      ],
+      "title": "CreateDocumentResponse",
+      "type": "object"
+    },
+    "DocumentItem": {
+      "$defs": {
+        "ConfidentialityLevel": {
+          "description": "密级。数值越大越敏感。\n\n密级与 ACL 是**正交**的两道门：\n- ACL 回答\"你能不能看这个库/文档\"；\n- 密级回答\"你这个人的密级够不够\"。\n缺任何一道都会出事：只有 ACL 时，\"有权限的人\"可能是实习生；\n只有密级时，\"够级的人\"可能不在这个部门。",
+          "enum": [
+            "public",
+            "internal",
+            "confidential",
+            "secret"
+          ],
+          "title": "ConfidentialityLevel",
+          "type": "string"
+        },
+        "DocumentFormat": {
+          "description": "文档格式。决定用哪个 parser 实现。\n\n新增格式时必须同步：\n1. `rag_adapters.parsers` 下的解析器实现；\n2. 前端上传组件的 `accept` 白名单；\n3. 本文档的注释（说明该格式的已知坑）。",
+          "enum": [
+            "pdf",
+            "docx",
+            "pptx",
+            "xlsx",
+            "csv",
+            "markdown",
+            "html",
+            "text",
+            "image"
+          ],
+          "title": "DocumentFormat",
+          "type": "string"
+        },
+        "DocumentStatus": {
+          "description": "文档处理状态机。\n\n完整流转：\n\n    PENDING ──▶ PARSING ──▶ CHUNKING ──▶ EMBEDDING ──▶ INDEXING ──▶ READY\n       │           │           │            │            │\n       └───────────┴───────────┴────────────┴────────────┴──▶ FAILED\n                                                              │\n                                                          (重试) ──▶ PENDING\n\n约束（A3-4 的任务表会用同样的状态集）：\n- 只有 READY 的文档能参与检索；\n- FAILED 的文档保留原始 blob，允许重试而不必重新上传；\n- 状态流转必须走乐观锁（`version`），否则并发重试会互相覆盖。",
+          "enum": [
+            "pending",
+            "parsing",
+            "chunking",
+            "embedding",
+            "indexing",
+            "ready",
+            "failed"
+          ],
+          "title": "DocumentStatus",
+          "type": "string"
+        }
+      },
+      "description": "文档列表项。",
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "knowledge_base_id": {
+          "format": "uuid",
+          "title": "Knowledge Base Id",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "original_filename": {
+          "title": "Original Filename",
+          "type": "string"
+        },
+        "format": {
+          "$ref": "#/$defs/DocumentFormat"
+        },
+        "status": {
+          "$ref": "#/$defs/DocumentStatus"
+        },
+        "confidentiality": {
+          "$ref": "#/$defs/ConfidentialityLevel"
+        },
+        "chunk_count": {
+          "minimum": 0,
+          "title": "Chunk Count",
+          "type": "integer"
+        },
+        "page_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page Count"
+        },
+        "size_bytes": {
+          "description": "原始文件大小",
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "current_version_no": {
+          "description": "当前版本序号，0 表示尚无版本",
+          "minimum": 0,
+          "title": "Current Version No",
+          "type": "integer"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "失败错误码（仅 failed 状态有值）",
+          "title": "Error Code"
+        },
+        "error_message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "失败原因（仅内部可见，不含文档正文）",
+          "title": "Error Message"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "knowledge_base_id",
+        "title",
+        "original_filename",
+        "format",
+        "status",
+        "confidentiality",
+        "chunk_count",
+        "size_bytes",
+        "current_version_no",
+        "created_at",
+        "updated_at"
+      ],
+      "title": "DocumentItem",
+      "type": "object"
+    },
+    "DocumentDetail": {
+      "$defs": {
+        "ConfidentialityLevel": {
+          "description": "密级。数值越大越敏感。\n\n密级与 ACL 是**正交**的两道门：\n- ACL 回答\"你能不能看这个库/文档\"；\n- 密级回答\"你这个人的密级够不够\"。\n缺任何一道都会出事：只有 ACL 时，\"有权限的人\"可能是实习生；\n只有密级时，\"够级的人\"可能不在这个部门。",
+          "enum": [
+            "public",
+            "internal",
+            "confidential",
+            "secret"
+          ],
+          "title": "ConfidentialityLevel",
+          "type": "string"
+        },
+        "DocumentFormat": {
+          "description": "文档格式。决定用哪个 parser 实现。\n\n新增格式时必须同步：\n1. `rag_adapters.parsers` 下的解析器实现；\n2. 前端上传组件的 `accept` 白名单；\n3. 本文档的注释（说明该格式的已知坑）。",
+          "enum": [
+            "pdf",
+            "docx",
+            "pptx",
+            "xlsx",
+            "csv",
+            "markdown",
+            "html",
+            "text",
+            "image"
+          ],
+          "title": "DocumentFormat",
+          "type": "string"
+        },
+        "DocumentStatus": {
+          "description": "文档处理状态机。\n\n完整流转：\n\n    PENDING ──▶ PARSING ──▶ CHUNKING ──▶ EMBEDDING ──▶ INDEXING ──▶ READY\n       │           │           │            │            │\n       └───────────┴───────────┴────────────┴────────────┴──▶ FAILED\n                                                              │\n                                                          (重试) ──▶ PENDING\n\n约束（A3-4 的任务表会用同样的状态集）：\n- 只有 READY 的文档能参与检索；\n- FAILED 的文档保留原始 blob，允许重试而不必重新上传；\n- 状态流转必须走乐观锁（`version`），否则并发重试会互相覆盖。",
+          "enum": [
+            "pending",
+            "parsing",
+            "chunking",
+            "embedding",
+            "indexing",
+            "ready",
+            "failed"
+          ],
+          "title": "DocumentStatus",
+          "type": "string"
+        },
+        "DocumentVersionItem": {
+          "description": "文档版本项。",
+          "properties": {
+            "id": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            },
+            "version_no": {
+              "minimum": 1,
+              "title": "Version No",
+              "type": "integer"
+            },
+            "status": {
+              "$ref": "#/$defs/DocumentVersionStatus"
+            },
+            "is_current": {
+              "title": "Is Current",
+              "type": "boolean"
+            },
+            "chunk_count": {
+              "minimum": 0,
+              "title": "Chunk Count",
+              "type": "integer"
+            },
+            "page_count": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Page Count"
+            },
+            "parser_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Parser Name"
+            },
+            "created_at": {
+              "format": "date-time",
+              "title": "Created At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "version_no",
+            "status",
+            "is_current",
+            "chunk_count",
+            "created_at"
+          ],
+          "title": "DocumentVersionItem",
+          "type": "object"
+        },
+        "DocumentVersionStatus": {
+          "description": "文档版本状态。\n\n与 `DocumentStatus` 分开：文档整体状态取\"当前版本\"的状态，\n但历史版本有独立生命周期（可能已归档、已被新版本取代）。",
+          "enum": [
+            "processing",
+            "ready",
+            "failed",
+            "superseded"
+          ],
+          "title": "DocumentVersionStatus",
+          "type": "string"
+        }
+      },
+      "description": "文档详情：列表项 + 版本历史。\n\n## 为什么版本历史只在详情里\n\n列表页一次拉 20 个文档，每个再带 5 个版本就是 100 个额外对象。\n版本历史只在\"我要回滚 / 对比\"时才需要，按需加载更合理。",
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "knowledge_base_id": {
+          "format": "uuid",
+          "title": "Knowledge Base Id",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "original_filename": {
+          "title": "Original Filename",
+          "type": "string"
+        },
+        "format": {
+          "$ref": "#/$defs/DocumentFormat"
+        },
+        "status": {
+          "$ref": "#/$defs/DocumentStatus"
+        },
+        "confidentiality": {
+          "$ref": "#/$defs/ConfidentialityLevel"
+        },
+        "chunk_count": {
+          "minimum": 0,
+          "title": "Chunk Count",
+          "type": "integer"
+        },
+        "page_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page Count"
+        },
+        "size_bytes": {
+          "description": "原始文件大小",
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "current_version_no": {
+          "description": "当前版本序号，0 表示尚无版本",
+          "minimum": 0,
+          "title": "Current Version No",
+          "type": "integer"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "失败错误码（仅 failed 状态有值）",
+          "title": "Error Code"
+        },
+        "error_message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "失败原因（仅内部可见，不含文档正文）",
+          "title": "Error Message"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "title": "Updated At",
+          "type": "string"
+        },
+        "versions": {
+          "description": "版本列表（新版本在前）",
+          "items": {
+            "$ref": "#/$defs/DocumentVersionItem"
+          },
+          "title": "Versions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "knowledge_base_id",
+        "title",
+        "original_filename",
+        "format",
+        "status",
+        "confidentiality",
+        "chunk_count",
+        "size_bytes",
+        "current_version_no",
+        "created_at",
+        "updated_at"
+      ],
+      "title": "DocumentDetail",
+      "type": "object"
+    },
+    "DocumentVersionItem": {
+      "$defs": {
+        "DocumentVersionStatus": {
+          "description": "文档版本状态。\n\n与 `DocumentStatus` 分开：文档整体状态取\"当前版本\"的状态，\n但历史版本有独立生命周期（可能已归档、已被新版本取代）。",
+          "enum": [
+            "processing",
+            "ready",
+            "failed",
+            "superseded"
+          ],
+          "title": "DocumentVersionStatus",
+          "type": "string"
+        }
+      },
+      "description": "文档版本项。",
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "version_no": {
+          "minimum": 1,
+          "title": "Version No",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/DocumentVersionStatus"
+        },
+        "is_current": {
+          "title": "Is Current",
+          "type": "boolean"
+        },
+        "chunk_count": {
+          "minimum": 0,
+          "title": "Chunk Count",
+          "type": "integer"
+        },
+        "page_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page Count"
+        },
+        "parser_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parser Name"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "version_no",
+        "status",
+        "is_current",
+        "chunk_count",
+        "created_at"
+      ],
+      "title": "DocumentVersionItem",
       "type": "object"
     }
   }

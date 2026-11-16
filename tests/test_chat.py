@@ -34,9 +34,6 @@ from rag_contracts.enums.conversations import (
     RefusalReason,
 )
 
-pytestmark = pytest.mark.integration
-
-
 # ==================================================== 纯单测：历史裁剪
 
 
@@ -223,6 +220,7 @@ async def _cleanup(factory: object, tenant_id: uuid.UUID) -> None:
         await session.commit()
 
 
+@pytest.mark.integration
 async def test_sequence_allocation_is_atomic(db_factory: object) -> None:
     """**并发分配序号必须无重复**。
 
@@ -269,6 +267,7 @@ async def test_sequence_allocation_is_atomic(db_factory: object) -> None:
         await _cleanup(db_factory, tenant_id)
 
 
+@pytest.mark.integration
 async def test_conversation_is_private_to_user(db_factory: object) -> None:
     """**安全关键**：会话必须按 user_id 隔离，不只是 tenant_id。
 
@@ -314,6 +313,7 @@ async def test_conversation_is_private_to_user(db_factory: object) -> None:
         await _cleanup(db_factory, tenant_id)
 
 
+@pytest.mark.integration
 async def test_soft_delete_hides_conversation(db_factory: object) -> None:
     """软删后查不到，但数据仍在（审计需要）。"""
     from sqlalchemy import text
@@ -350,6 +350,7 @@ async def test_soft_delete_hides_conversation(db_factory: object) -> None:
         await _cleanup(db_factory, tenant_id)
 
 
+@pytest.mark.integration
 async def test_streaming_message_reset_by_cleanup(db_factory: object) -> None:
     """滞留的 streaming 消息会被清理任务标成 interrupted。
 
@@ -399,6 +400,7 @@ async def test_streaming_message_reset_by_cleanup(db_factory: object) -> None:
         await _cleanup(db_factory, tenant_id)
 
 
+@pytest.mark.integration
 async def test_refusal_requires_reason_constraint(db_factory: object) -> None:
     """数据库层强制"拒答必须带原因"（不是仅靠应用层检查）。"""
     from sqlalchemy import text
@@ -439,6 +441,7 @@ async def test_refusal_requires_reason_constraint(db_factory: object) -> None:
 
 
 @pytest.mark.slow
+@pytest.mark.integration
 async def test_multi_turn_standalone_rewrite() -> None:
     """**多轮 RAG 的核心验证**：追问的指代必须被独立化。
 
@@ -470,12 +473,21 @@ async def test_multi_turn_standalone_rewrite() -> None:
             row = await session.execute(
                 text("SELECT id FROM users WHERE email = 'eval@eval.local' LIMIT 1")
             )
-            user_id = row.scalar_one()
+            user_id = row.scalar_one_or_none()
+            if user_id is None:
+                pytest.skip("评估用户未建（先跑 tests/eval/run_eval.py --setup）")
             row = await session.execute(
                 text("SELECT id FROM knowledge_bases WHERE tenant_id = :t LIMIT 1"),
                 {"t": tenant_id},
             )
-            kb_id = row.scalar_one()
+            kb_id = row.scalar_one_or_none()
+            if kb_id is None:
+                # **三个前置数据都要检查**，不能只查第一个。
+                #
+                # 初版只检查 tenant 存在就继续，于是"租户在但知识库被删了"
+                # 会抛 `NoResultFound`——看起来像代码 bug，实际是环境不完整。
+                # 环境依赖型测试必须把全部前置条件都断言到，缺任何一个都 skip。
+                pytest.skip("评估知识库未建（先跑 tests/eval/run_eval.py --setup）")
 
         async def ask(query: str, conversation_id: uuid.UUID | None) -> tuple[uuid.UUID, str]:
             async with db.transaction(tenant_id=tenant_id) as session:
@@ -530,3 +542,49 @@ async def test_multi_turn_standalone_rewrite() -> None:
         await llm.aclose()
         await embedder.aclose()
         await db.close()
+
+
+# ==================================================== 契约：反馈请求体
+
+
+def test_feedback_request_parses_json_body() -> None:
+    """反馈必须是请求体模型，不能是散装标量参数。
+
+    ## 为什么这条测试值得单写
+
+    初版把 `rating` / `reason` / `comment` 写成路由函数的三个标量参数。
+    FastAPI 对**标量参数默认按 query 解析**，前端按 REST 惯例 POST JSON body：
+
+        POST /api/v1/messages/{id}/feedback
+        {"rating": "like"}
+
+    服务端去 `?rating=` 里找 → 422 `{"location":["query","rating"]}`。
+
+    这个 bug 在单元测试里不会暴露（TestClient 也能直接传 query），
+    只有端到端点一次点赞才看得到：**用户点了没反应，图标永远不变**。
+
+    所以这里钉两件事：
+    1. `FeedbackRequest` 能从 JSON body 解析（字段名与前端一致）；
+    2. `extra="forbid"`——前端多发字段要报错，而不是静默接受。
+    """
+    from pydantic import ValidationError
+
+    from rag_contracts.api.chat import FeedbackRequest
+
+    # 点赞：不需要 reason
+    like = FeedbackRequest.model_validate({"rating": "like"})
+    assert like.rating.value == "like"
+    assert like.reason is None
+
+    # 点踩：必须带 reason（业务校验在路由层做，这里只验形状可承载）
+    dislike = FeedbackRequest.model_validate({"rating": "dislike", "reason": "not_relevant"})
+    assert dislike.rating.value == "dislike"
+    assert dislike.reason is not None
+
+    # 未知字段必须报错：静默忽略会让前端拼错字段名后毫无反馈
+    with pytest.raises(ValidationError):
+        FeedbackRequest.model_validate({"rating": "like", "ratings": "typo"})
+
+    # 超过 1000 字符的评论要在契约层拦住（不靠业务层记得检查）
+    with pytest.raises(ValidationError):
+        FeedbackRequest.model_validate({"rating": "like", "comment": "x" * 1001})

@@ -123,6 +123,42 @@ _EXTENSION_TO_MAGIC: dict[str, frozenset[str]] = {
     ".tiff": frozenset({"tiff"}),
 }
 
+# 扩展名 → `DocumentFormat` 枚举值。
+#
+# ## 为什么这张表必须与 `_EXTENSION_TO_MAGIC` 共存于本文件
+#
+# 两张表回答的是同一件事的两面：
+# - `_EXTENSION_TO_MAGIC`：这个扩展名"内容应该长什么样"（安全校验）；
+# - `_EXTENSION_TO_FORMAT`：这个扩展名"该交给哪个解析器"（业务路由）。
+#
+# 分开维护会让它们漂移——比如有人加了 `.rtf` 到白名单却忘了给格式，
+# 上传成功但建文档时报"不支持"，用户看到的是自相矛盾的行为。
+# 放在一起，加一个格式时两个字典就在眼前。
+#
+# `json` 归到 TEXT：解析器的 `parse_text` 直接按纯文本读，不做结构解析。
+# 把 JSON 当结构化数据入库需要专门的分块策略，当前不划算。
+_EXTENSION_TO_FORMAT: dict[str, str] = {
+    ".pdf": "pdf",
+    ".docx": "docx",
+    ".pptx": "pptx",
+    ".xlsx": "xlsx",
+    ".csv": "csv",
+    ".md": "markdown",
+    ".markdown": "markdown",
+    ".txt": "text",
+    ".json": "text",
+    ".html": "html",
+    ".htm": "html",
+    ".png": "image",
+    ".jpg": "image",
+    ".jpeg": "image",
+    ".gif": "image",
+    ".webp": "image",
+    ".bmp": "image",
+    ".tif": "image",
+    ".tiff": "image",
+}
+
 # 视为纯文本的扩展名（无魔数）
 _TEXT_EXTENSIONS = frozenset({".csv", ".md", ".markdown", ".txt", ".html", ".htm", ".json"})
 
@@ -208,6 +244,40 @@ def extract_extension(filename: str) -> str:
     if dot <= 0 or dot == len(filename) - 1:
         return ""
     return filename[dot:].lower()
+
+
+def document_format_for(filename: str) -> str:
+    """按文件名推导文档格式（`DocumentFormat` 的字符串值）。
+
+    ## 为什么不从 `content_type` 推
+
+    客户端声明的 Content-Type 不可信（可以随意填 `application/pdf`
+    实际传 exe）。扩展名在 `inspect_file` 阶段已经与魔数交叉校验过，
+    是当前唯一可信的格式来源。
+
+    ## 为什么单独成一个函数而不是塞进 `inspect_file`
+
+    `inspect_file` 是**上传安全**的一部分（initiate / complete 都调），
+    它只关心"这个文件能不能收"。而格式推导是**建文档**时才需要的，
+    失败语义也不同（前者 415 拒绝上传，后者 422 拒绝建文档）。
+    混在一起会让上传因为"格式映射表漏了一项"而失败——那是
+    契约问题，不该拦在上传环节。
+
+    Raises:
+        UnsupportedMediaTypeError: 扩展名不在白名单或无扩展名。
+    """
+    # 复用白名单校验：保证这里与上传阶段的判断完全一致。
+    # 两处各写一遍 `if ext not in ...` 迟早会不一致。
+    ext = validate_extension(filename)
+    fmt = _EXTENSION_TO_FORMAT.get(ext)
+    if fmt is None:
+        # 白名单里有但格式映射忘了登记：这是代码缺陷，不是用户问题。
+        # 用 415 而不是 500，因为用户能做的只有换格式。
+        raise UnsupportedMediaTypeError(
+            f"文件类型 {ext} 暂不支持解析",
+            details={"extension": ext},
+        )
+    return fmt
 
 
 def validate_extension(filename: str) -> str:

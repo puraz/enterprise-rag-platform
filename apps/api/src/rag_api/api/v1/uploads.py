@@ -50,7 +50,7 @@ from rag_api.openapi import (
     TENANT_ENDPOINT,
     TENANT_WRITE_ENDPOINT,
 )
-from rag_api.permissions import PermissionContext, get_permission_context
+from rag_api.permissions import PermissionContext, ensure_own_resource, get_permission_context
 from rag_api.services.upload import UploadService
 from rag_api.services.upload_security import inspect_file
 from rag_contracts.api.uploads import (
@@ -142,6 +142,7 @@ async def upload_part(
     part_number: int,
     request: Request,
     principal: Principal = Depends(get_current_principal),
+    ctx: PermissionContext = Depends(get_permission_context),
     session: AsyncSession = Depends(get_db),
     storage: StorageBackend = Depends(get_storage),
 ) -> UploadPartResponse:
@@ -169,6 +170,13 @@ async def upload_part(
     # 这里通过 service 反查 session —— 需要 tenant 隔离，不能直接用 upload_id 查库。
     service = _service(session, storage)
 
+    # **归属校验**：同租户内任何成员都能猜到别人的会话 ID，
+    # 没有这一步就能往别人的上传里塞分片（污染对方文件）。
+    owner_id = await service.get_session_owner(
+        tenant_id=principal.tenant_id, session_id=upload_id
+    )
+    ensure_own_resource(resource_user_id=owner_id, ctx=ctx)
+
     part: PartInfo = await service.upload_part(
         tenant_id=principal.tenant_id,
         session_id=upload_id,
@@ -193,10 +201,17 @@ async def upload_part(
 async def get_upload_status(
     upload_id: uuid.UUID,
     principal: Principal = Depends(get_current_principal),
+    ctx: PermissionContext = Depends(get_permission_context),
     session: AsyncSession = Depends(get_db),
     storage: StorageBackend = Depends(get_storage),
 ) -> UploadSessionStatusResponse:
     service = _service(session, storage)
+    # 归属校验：会话列表含文件名与分片进度，属他人隐私
+    owner_id = await service.get_session_owner(
+        tenant_id=principal.tenant_id, session_id=upload_id
+    )
+    ensure_own_resource(resource_user_id=owner_id, ctx=ctx)
+
     status, total_parts, part_size, uploaded, missing = await service.session_status(
         tenant_id=principal.tenant_id, session_id=upload_id
     )
@@ -229,10 +244,17 @@ async def complete_upload(
     upload_id: uuid.UUID,
     payload: CompleteUploadRequest,
     principal: Principal = Depends(get_current_principal),
+    ctx: PermissionContext = Depends(get_permission_context),
     session: AsyncSession = Depends(get_db),
     storage: StorageBackend = Depends(get_storage),
 ) -> CompleteUploadResponse:
     service = _service(session, storage)
+
+    # 归属校验：合并会消耗对方已上传的分片并重置会话状态
+    owner_id = await service.get_session_owner(
+        tenant_id=principal.tenant_id, session_id=upload_id
+    )
+    ensure_own_resource(resource_user_id=owner_id, ctx=ctx)
 
     # 合并前用存储层的实际分片列表（不信任客户端传的）
     _status, _total, _size, uploaded, missing = await service.session_status(
@@ -271,8 +293,16 @@ async def complete_upload(
 async def abort_upload(
     upload_id: uuid.UUID,
     principal: Principal = Depends(get_current_principal),
+    ctx: PermissionContext = Depends(get_permission_context),
     session: AsyncSession = Depends(get_db),
     storage: StorageBackend = Depends(get_storage),
 ) -> None:
     service = _service(session, storage)
+    # 归属校验：**中止是破坏性操作**——让别人能中止你的上传，
+    # 等同于可以随时打断你的工作（且已传分片被清理，必须从头再来）
+    owner_id = await service.get_session_owner(
+        tenant_id=principal.tenant_id, session_id=upload_id
+    )
+    ensure_own_resource(resource_user_id=owner_id, ctx=ctx)
+
     await service.abort(tenant_id=principal.tenant_id, session_id=upload_id)

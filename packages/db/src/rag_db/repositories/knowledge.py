@@ -96,20 +96,41 @@ class KnowledgeBaseRepository:
         *,
         tenant_id: uuid.UUID,
         limit: int = 50,
+        offset: int = 0,
         after_id: uuid.UUID | None = None,
-    ) -> list[KnowledgeBase]:
-        """keyset 分页列出活跃知识库。
+        access_filter: Any = None,
+        include_total: bool = False,
+    ) -> tuple[list[KnowledgeBase], int | None]:
+        """列出活跃知识库。返回 `(rows, total)`。
 
         排序键用 `(updated_at DESC, id DESC)`：只按 updated_at 排序时，
         同一毫秒更新的两行顺序不稳定，分页会漏读或重复。
         id 作为决胜键保证全序。
+
+        ## 为什么 `access_filter` 必须进 WHERE
+
+        `knowledge_base_visibility_filter()` 产出的是 SQL 条件。
+        如果"查出来再在 Python 里过滤"，会同时踩三个坑：分页错乱
+        （limit 20 查出 20 条、过滤后剩 3 条）、越权内容进应用内存、
+        浪费大量 I/O。过滤必须在数据库里做。
+
+        ## 为什么兼容两种分页
+
+        `after_id` 是 keyset（游标）分页，`offset` 是传统分页。
+        保留 keyset 是因为大表深翻页时它才是对的；但对外的
+        `Page[T]` 契约用 limit/offset，所以两者都要支持。
+        同时传时 `after_id` 优先（它更精确）。
         """
+        conditions = [
+            KnowledgeBase.tenant_id == tenant_id,
+            KnowledgeBase.status == KnowledgeBaseStatus.ACTIVE.value,
+        ]
+        if access_filter is not None:
+            conditions.append(access_filter)
+
         stmt = (
             select(KnowledgeBase)
-            .where(
-                KnowledgeBase.tenant_id == tenant_id,
-                KnowledgeBase.status == KnowledgeBaseStatus.ACTIVE,
-            )
+            .where(*conditions)
             .order_by(KnowledgeBase.updated_at.desc(), KnowledgeBase.id.desc())
             .limit(limit)
         )
@@ -124,8 +145,128 @@ class KnowledgeBaseRepository:
                         & (KnowledgeBase.id < cursor_row.id)
                     )
                 )
+        elif offset > 0:
+            stmt = stmt.offset(offset)
+
         result = await self._session.execute(stmt)
-        return list(result.scalars())
+        rows = list(result.scalars())
+
+        total: int | None = None
+        if include_total:
+            # COUNT 在大表上很慢，所以只在显式请求时执行
+            # （契约里 `total` 默认 None，见 PageMeta 的说明）
+            count_stmt = select(func.count()).select_from(KnowledgeBase).where(*conditions)
+            total = int((await self._session.execute(count_stmt)).scalar_one())
+
+        return rows, total
+
+    async def list_visible(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        kb_id: uuid.UUID,
+        access_filter: Any = None,
+    ) -> KnowledgeBase | None:
+        """取单个知识库，但要求它满足可见性条件。
+
+        `get()` 只做租户隔离；详情接口还需要"这个用户能不能看这个库"。
+        两个方法分开是因为上传流程里 `get()` 的用途是"库存在吗"，
+        而详情接口的用途是"库可见吗"——语义不同，不能混用。
+        """
+        conditions = [
+            KnowledgeBase.id == kb_id,
+            KnowledgeBase.tenant_id == tenant_id,
+            KnowledgeBase.status == KnowledgeBaseStatus.ACTIVE.value,
+        ]
+        if access_filter is not None:
+            conditions.append(access_filter)
+        result = await self._session.execute(
+            select(KnowledgeBase).where(*conditions).limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def update_metadata(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        kb_id: uuid.UUID,
+        name: str | None = None,
+        description: str | None = None,
+        confidentiality: str | None = None,
+    ) -> KnowledgeBase | None:
+        """更新元数据，返回更新后的行（不存在返回 None）。
+
+        **只允许这三个字段**：`visibility` 是权限变更（该走专门接口 +
+        审计），chunking 参数改了会让已入库 chunk 与新配置不一致。
+        把这个约束写进仓储而不是只靠路由层自觉——绕开路由直接调
+        仓储的代码（脚本、worker）也应该受同一约束。
+
+        用 `model_dump(exclude_none=True)` 的思路：值为 None 表示"不改"，
+        而不是"改成 NULL"。`description` 想清空时传空字符串。
+        """
+        values: dict[str, Any] = {}
+        if name is not None:
+            values["name"] = name
+        if description is not None:
+            values["description"] = description
+        if confidentiality is not None:
+            values["confidentiality"] = confidentiality
+        if not values:
+            return await self.get(tenant_id=tenant_id, kb_id=kb_id)
+
+        result = await self._session.execute(
+            update(KnowledgeBase)
+            .where(
+                KnowledgeBase.id == kb_id,
+                KnowledgeBase.tenant_id == tenant_id,
+                KnowledgeBase.status == KnowledgeBaseStatus.ACTIVE.value,
+            )
+            .values(**values)
+            .returning(KnowledgeBase)
+        )
+        return result.scalar_one_or_none()
+
+    async def archive(self, *, tenant_id: uuid.UUID, kb_id: uuid.UUID) -> bool:
+        """归档知识库（软删）。返回是否真的改动了行。
+
+        ## 为什么状态置 ARCHIVED 而不是删除行
+
+        `documents.knowledge_base_id` 是 `ON DELETE CASCADE`——物理删库
+        会连带删掉文档元数据，而 chunk 与向量是异步清理的，中间窗口里
+        检索会返回"指向已不存在文档"的结果。
+
+        归档保留全部数据：检索默认排除（`list_active` 与
+        `knowledge_base_visibility_filter` 都只看 `status=active`），
+        但历史审计、成本归属、版本回滚都还能查。
+        """
+        result = await self._session.execute(
+            update(KnowledgeBase)
+            .where(
+                KnowledgeBase.id == kb_id,
+                KnowledgeBase.tenant_id == tenant_id,
+                KnowledgeBase.status == KnowledgeBaseStatus.ACTIVE.value,
+            )
+            .values(status=KnowledgeBaseStatus.ARCHIVED.value)
+            .returning(KnowledgeBase.id)
+        )
+        return result.scalar_one_or_none() is not None
+
+    async def count_documents(self, *, kb_id: uuid.UUID) -> int:
+        """统计库内未删除文档数。
+
+        删除知识库前的 409 判断用它。**直接数 documents 表而不是读
+        `knowledge_bases.document_count`**：后者是缓存字段，可能因为
+        历史 bug 或手工操作而滞后；"能不能删"这种判断必须基于事实。
+        """
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(Document)
+            .where(
+                Document.knowledge_base_id == kb_id,
+                Document.deleted_at.is_(None),
+            )
+        )
+        return int(result.scalar_one())
 
     async def increment_document_count(self, *, kb_id: uuid.UUID, delta: int) -> None:
         """原子调整文档计数。
@@ -462,6 +603,146 @@ class DocumentRepository:
             .returning(Document.id)
         )
         return result.scalar_one_or_none() is not None
+
+    async def list_by_kb_filtered(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        kb_id: uuid.UUID | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        access_filter: Any = None,
+        status: str | None = None,
+        include_total: bool = False,
+    ) -> tuple[list[Document], int | None]:
+        """按知识库列出文档，支持 ACL 过滤与 offset 分页。
+
+        ## 为什么这个方法和 `list_by_kb` 并存
+
+        `list_by_kb` 是 keyset 分页（`after_id`），给内部脚本与
+        worker 用；本方法对接对外的 `Page[T]` 契约（limit/offset）。
+
+        两者不能合并成一个：keyset 需要稳定的全序游标，
+        offset 需要 `OFFSET n`。混在一起会让参数组合爆炸
+        （`after_id` 与 `offset` 谁优先？），而不合并只是多一个方法。
+
+        ## `access_filter` 必须在 WHERE 里
+
+        见 `list_active` 的说明。文档列表是最容易踩"查出来再过滤"
+        的地方——文档比知识库多得多，浪费与泄漏都更严重。
+
+        ## `include_total`
+
+        默认不算 `COUNT(*)`。前端无限滚动只需 `has_more`
+        （用"本页是否满"判断），管理端才需要"共 N 条"。
+        """
+        conditions = [
+            Document.tenant_id == tenant_id,
+            Document.deleted_at.is_(None),
+        ]
+        if kb_id is not None:
+            conditions.append(Document.knowledge_base_id == kb_id)
+        if status is not None:
+            conditions.append(Document.status == status)
+        if access_filter is not None:
+            conditions.append(access_filter)
+
+        stmt = (
+            select(Document)
+            .where(*conditions)
+            # 排序与知识库列表一致：最近更新的在前。
+            # 上传后立刻能看到自己刚传的文件，符合直觉。
+            .order_by(Document.updated_at.desc(), Document.id.desc())
+            .limit(limit)
+        )
+        if offset > 0:
+            stmt = stmt.offset(offset)
+
+        rows = list((await self._session.execute(stmt)).scalars())
+
+        total: int | None = None
+        if include_total:
+            count_stmt = select(func.count()).select_from(Document).where(*conditions)
+            total = int((await self._session.execute(count_stmt)).scalar_one())
+
+        return rows, total
+
+    async def get_visible(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        doc_id: uuid.UUID,
+        access_filter: Any = None,
+    ) -> Document | None:
+        """取单个文档，且要求满足 ACL。
+
+        与 `get()` 的区别同 `KnowledgeBaseRepository.list_visible`：
+        `get()` 只做租户隔离，本方法额外要求"这个用户能读"。
+        详情接口必须用本方法——否则会出现"列表里看不到但直接
+        访问 URL 能看到"的越权。
+        """
+        conditions = [
+            Document.id == doc_id,
+            Document.tenant_id == tenant_id,
+            Document.deleted_at.is_(None),
+        ]
+        if access_filter is not None:
+            conditions.append(access_filter)
+        result = await self._session.execute(
+            select(Document).where(*conditions).limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_current_version(self, *, doc_id: uuid.UUID) -> DocumentVersion | None:
+        """取文档的当前生效版本（无版本时返回 None）。"""
+        result = await self._session.execute(
+            select(DocumentVersion)
+            .where(
+                DocumentVersion.document_id == doc_id,
+                DocumentVersion.is_current.is_(True),
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def reset_for_retry(
+        self, *, tenant_id: uuid.UUID, doc_id: uuid.UUID
+    ) -> Document | None:
+        """把失败文档重置为 PENDING，返回更新后的行。
+
+        ## 为什么要清 `error_code` / `error_message`
+
+        不清的话，重试成功后界面上仍显示上次的失败原因——
+        用户会以为"重试也失败了"。失败信息属于"当前状态"的一部分，
+        状态变了它就该消失。
+
+        ## 为什么 `retry_count` 不加在这里
+
+        重试次数由 worker 侧在任务重跑时累加（那是"执行"语义），
+        这里只是"重新排队"。混在一起会让"用户点了 3 次重试"
+        和"worker 自动重试了 3 次"变成同一个计数，无法区分。
+
+        用乐观锁（`version`）：并发点两次重试时，只有第一次会成功
+        把状态从 FAILED 改走，第二次拿到 0 行 -> 调用方据此返回 409
+        而不是排两个相同的任务。
+        """
+        result = await self._session.execute(
+            update(Document)
+            .where(
+                Document.id == doc_id,
+                Document.tenant_id == tenant_id,
+                Document.status == DocumentStatus.FAILED.value,
+                Document.deleted_at.is_(None),
+            )
+            .values(
+                status=DocumentStatus.PENDING.value,
+                error_code=None,
+                error_message=None,
+                version=Document.version + 1,
+            )
+            .returning(Document)
+        )
+        return result.scalar_one_or_none()
 
     async def count_by_status(self, *, tenant_id: uuid.UUID) -> dict[str, int]:
         """按状态统计文档数（管理端看板用）。"""

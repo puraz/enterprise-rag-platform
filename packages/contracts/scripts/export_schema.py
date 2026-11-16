@@ -22,14 +22,28 @@ from rag_contracts.api.auth import (
     DevLoginRequest,
     HealthResponse,
     LoginResponse,
+    RefreshRequest,
+    RefreshResponse,
 )
 from rag_contracts.api.chat import (
     ChatDonePayload,
     ChatRequest,
+    ChatRetrievalPayload,
     ConversationItem,
+    FeedbackRequest,
     MessageItem,
 )
 from rag_contracts.api.citations import AnswerWithCitations, Citation
+from rag_contracts.api.knowledge import (
+    CreateDocumentRequest,
+    CreateDocumentResponse,
+    CreateKnowledgeBaseRequest,
+    DocumentDetail,
+    DocumentItem,
+    DocumentVersionItem,
+    KnowledgeBaseItem,
+    UpdateKnowledgeBaseRequest,
+)
 from rag_contracts.api.pagination import PageMeta, PageRequest
 from rag_contracts.api.success import CreatedResource, TaskAccepted
 from rag_contracts.api.uploads import (
@@ -86,6 +100,8 @@ EXPORTED_MODELS: tuple[type[BaseModel], ...] = (
     # 认证契约
     DevLoginRequest,
     LoginResponse,
+    RefreshRequest,
+    RefreshResponse,
     CurrentUserResponse,
     HealthResponse,
     PageMeta,
@@ -111,6 +127,22 @@ EXPORTED_MODELS: tuple[type[BaseModel], ...] = (
     ConversationItem,
     MessageItem,
     ChatDonePayload,
+    # 反馈请求体（B3）：前端直接复用 rating/reason 的类型
+    FeedbackRequest,
+    # SSE retrieval 事件（C1）：前端要按类型读 sources_found，
+    # 而不是 `payload["sources_found"] as number`
+    ChatRetrievalPayload,
+    # 知识库与文档契约（B4）：前端上传页与列表页的唯一形状来源。
+    # 不导出的话前端会自己拼 DocumentItem，`current_version_no` /
+    # `size_bytes` 这类字段名漂移只会在联调时暴露。
+    CreateKnowledgeBaseRequest,
+    UpdateKnowledgeBaseRequest,
+    KnowledgeBaseItem,
+    CreateDocumentRequest,
+    CreateDocumentResponse,
+    DocumentItem,
+    DocumentDetail,
+    DocumentVersionItem,
 )
 
 # 需要导出的枚举。导出成 TS 字符串联合类型，而不是 TS enum

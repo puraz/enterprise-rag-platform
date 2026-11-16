@@ -255,6 +255,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_v1.include_router(build_me_router())
     api_v1.include_router(uploads_router)
     api_v1.include_router(admin_audit_router)
+    # 知识库与文档（B4）：KB 的 CRUD + blob 登记为文档并触发解析
+    from rag_api.api.v1.documents import router as documents_router
+    from rag_api.api.v1.knowledge_bases import router as knowledge_bases_router
+
+    api_v1.include_router(knowledge_bases_router)
+    api_v1.include_router(documents_router)
     # 问答与会话（A16）：SSE 流式 chat + 会话 CRUD + 反馈
     from rag_api.api.v1.chat import router as chat_router
 

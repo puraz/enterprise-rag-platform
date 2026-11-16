@@ -430,14 +430,29 @@ def test_routing_is_overridable() -> None:
 
 
 async def test_gateway_cost_uses_actual_model() -> None:
-    """网关成本基于响应里的实际模型。"""
+    """网关成本基于响应里的实际模型。
+
+    ## 为什么必须传 `priced_at`
+
+    初版不传，直接用 `datetime.now(UTC)` 判峰谷。DeepSeek 峰时价是谷时的
+    **2 倍**（0.30 vs 0.15 / M token），于是这个测试的结果取决于
+    "跑测试的时候是不是峰时段"——UTC 01:00-04:00 与 06:00-10:00 会红，
+    其余时间绿。实测在 09:2x（峰时）跑全量时它红了。
+
+    时间相关的断言必须固定时间。`off_peak_time()` / `peak_time()`
+    就是为这个准备的辅助函数。
+    """
+    from rag_core.settings.llm import off_peak_time
+
     fake = _FakeChatModel(
         message=_ai_message(model="deepseek-flash", input_tokens=1_000_000, output_tokens=0)
     )
     gateway = ModelGateway(providers={"deepseek": _provider(fake)}, settings=_settings())
 
     _response, cost = await gateway.complete(
-        ModelTaskType.QUERY_REWRITE, [LLMMessage(role=LLMRole.USER, content="hi")]
+        ModelTaskType.QUERY_REWRITE,
+        [LLMMessage(role=LLMRole.USER, content="hi")],
+        priced_at=off_peak_time(),
     )
 
     assert cost.model == "deepseek-flash"
