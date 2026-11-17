@@ -59,7 +59,15 @@ TENANT_ERRORS: ResponseSpec = {
     **AUTH_ERRORS,
     403: _error(403, "无权限（AUTHZ.*）或租户不匹配"),
     404: _error(404, "资源不存在（越权访问也返回此码，不泄漏资源存在性）"),
-    429: _error(429, "请求过于频繁（COMMON.RATE_LIMITED），响应头含 Retry-After"),
+    429: {
+        **_error(429, "请求过于频繁（COMMON.RATE_LIMITED）"),
+        "headers": {
+            "Retry-After": {
+                "description": "建议的重试等待秒数",
+                "schema": {"type": "integer", "minimum": 1},
+            }
+        },
+    },
 }
 
 WRITE_ERRORS: ResponseSpec = {

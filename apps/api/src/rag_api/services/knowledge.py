@@ -34,7 +34,6 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,7 +43,6 @@ from rag_api.permissions.acl import (
 )
 from rag_contracts.api.knowledge import (
     CreateKnowledgeBaseRequest,
-    KnowledgeBaseItem,
     UpdateKnowledgeBaseRequest,
 )
 from rag_contracts.enums import AuditAction, AuditTargetType
@@ -54,15 +52,6 @@ from rag_db.models.knowledge import KnowledgeBase
 from rag_db.repositories import KnowledgeBaseRepository
 
 log = get_logger(__name__)
-
-
-@dataclass(frozen=True, slots=True)
-class KnowledgeBasePage:
-    """一页知识库。"""
-
-    items: list[KnowledgeBase]
-    total: int | None
-    """`include_total=false` 时为 None（不在大表上跑 COUNT）。"""
 
 
 class KnowledgeBaseService:
@@ -141,7 +130,7 @@ class KnowledgeBaseService:
         limit: int,
         offset: int,
         include_total: bool,
-    ) -> KnowledgeBasePage:
+    ) -> tuple[list[KnowledgeBase], int | None]:
         """列出当前用户可见的知识库。
 
         ## 可见性过滤为什么必须进 SQL
@@ -161,7 +150,7 @@ class KnowledgeBaseService:
             access_filter=knowledge_base_visibility_filter(ctx),
             include_total=include_total,
         )
-        return KnowledgeBasePage(items=rows, total=total)
+        return list(rows), total
 
     async def get(self, *, ctx: PermissionContext, kb_id: uuid.UUID) -> KnowledgeBase:
         """取单个知识库（不可见即 404）。
@@ -171,6 +160,10 @@ class KnowledgeBaseService:
         403 等于告诉攻击者"这个 ID 存在，只是你没权限"——可以用它
         枚举出别的租户有哪些知识库 ID。404 不泄漏存在性。
         """
+        return await self._require(ctx=ctx, kb_id=kb_id)
+
+    async def _require(self, *, ctx: PermissionContext, kb_id: uuid.UUID) -> KnowledgeBase:
+        """取可见的 ORM 对象（供内部复用）。"""
         kb = await self._repo.list_visible(
             tenant_id=ctx.tenant_id,
             kb_id=kb_id,
@@ -190,12 +183,10 @@ class KnowledgeBaseService:
         """更新知识库元数据。"""
         # 先做可见性 + 存在性检查：不存在或不可见统一 404，
         # 不给"存在但不可改"这种可区分信号。
-        await self.get(ctx=ctx, kb_id=kb_id)
+        await self._require(ctx=ctx, kb_id=kb_id)
 
         if payload.name is not None:
-            conflicting = await self._repo.get_by_name(
-                tenant_id=ctx.tenant_id, name=payload.name
-            )
+            conflicting = await self._repo.get_by_name(tenant_id=ctx.tenant_id, name=payload.name)
             # 改成自己已用的名字不算冲突
             if conflicting is not None and conflicting.id != kb_id:
                 raise ConflictError(
@@ -232,9 +223,7 @@ class KnowledgeBaseService:
                     if value is not None
                 ),
                 "new_confidentiality": (
-                    payload.confidentiality.value
-                    if payload.confidentiality is not None
-                    else None
+                    payload.confidentiality.value if payload.confidentiality is not None else None
                 ),
             },
         )
@@ -242,7 +231,7 @@ class KnowledgeBaseService:
 
     async def archive(self, *, ctx: PermissionContext, kb_id: uuid.UUID) -> None:
         """归档知识库（软删）。"""
-        kb = await self.get(ctx=ctx, kb_id=kb_id)
+        kb = await self._require(ctx=ctx, kb_id=kb_id)
 
         # 文档数从 documents 表实时数，不读 `knowledge_bases.document_count`
         # （缓存字段可能滞后，而"能不能删"必须基于事实）。
@@ -292,28 +281,4 @@ class KnowledgeBaseService:
         )
 
 
-def to_item(kb: KnowledgeBase) -> KnowledgeBaseItem:
-    """ORM → 契约。
-
-    显式逐字段构造而不是 `from_attributes` 自动映射：
-    后者在字段名不同时（`default_chunking_strategy` → `chunking_strategy`）
-    会静默用默认值，表现为"前端拿到的 chunk_size 永远是 0"。
-    显式写出来，漏字段 mypy 会报。
-    """
-    return KnowledgeBaseItem(
-        id=kb.id,
-        name=kb.name,
-        description=kb.description,
-        status=kb.status,
-        visibility=kb.visibility,
-        confidentiality=kb.confidentiality,
-        document_count=kb.document_count,
-        chunking_strategy=kb.default_chunking_strategy,
-        chunk_size=kb.default_chunk_size,
-        chunk_overlap=kb.default_chunk_overlap,
-        created_at=kb.created_at,
-        updated_at=kb.updated_at,
-    )
-
-
-__all__ = ["KnowledgeBasePage", "KnowledgeBaseService", "to_item"]
+__all__ = ["KnowledgeBaseService"]

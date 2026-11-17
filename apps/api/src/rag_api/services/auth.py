@@ -37,9 +37,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag_api.identity.provider import ExternalIdentity
-from rag_contracts.enums import MembershipStatus, UserStatus
+from rag_contracts.enums import MembershipStatus, TenantRole, UserStatus
 from rag_core.errors import AuthenticationError, PermissionDeniedError
 from rag_core.logging import get_logger
+from rag_db.models.membership import TenantMembership
 from rag_db.models.user import User
 from rag_db.repositories import (
     MembershipRepository,
@@ -104,6 +105,72 @@ class AuthService:
             email=user.email,
             display_name=user.display_name,
             created=created,
+        )
+
+    async def current_user(
+        self, *, user_id: uuid.UUID, tenant_id: uuid.UUID
+    ) -> tuple[User, TenantMembership | None]:
+        """取当前用户与租户成员关系（`/me`）。
+
+        展示用的邮箱、角色必须从库里查：token 里是签发时的快照，
+        用户可能改名、角色可能被调整。查库也顺带验证了
+        "token 有效但用户已被禁用"。
+        """
+        user = await self._users.get_active_by_id(user_id)
+        if user is None:
+            # token 有效但用户已禁用/删除：必须拒绝，否则被禁用的用户还能操作
+            raise AuthenticationError("账号不可用，请重新登录")
+
+        membership = await self._memberships.get_active(tenant_id=tenant_id, user_id=user_id)
+        return user, membership
+
+    async def bootstrap_tenant(self, identity: ExternalIdentity) -> AuthenticatedUser:
+        """开发引导：确保用户存在，并自动建 `dev-<subject>` 租户。
+
+        **仅用于本地开发**。生产环境里开通租户必须由管理员操作——
+        自动建租户会让任何人登录即拥有租户，配额完全失控。
+        """
+        link = await self._users.find_by_identity(issuer=identity.issuer, subject=identity.subject)
+        if link is not None:
+            user = await self._users.get_by_id(link.user_id)
+            if user is None:
+                raise AuthenticationError("账号数据异常，请联系管理员")
+            is_new = False
+        else:
+            user = await self._users.create_user(
+                email=identity.email or f"{identity.subject}@{identity.issuer}",
+                display_name=identity.display_name or identity.subject,
+            )
+            await self._users.create_link(
+                user_id=user.id,
+                issuer=identity.issuer,
+                subject=identity.subject,
+                email=identity.email,
+            )
+            is_new = True
+
+        memberships = await self._memberships.list_for_user(user.id)
+        active = [m for m in memberships if m.status == MembershipStatus.ACTIVE.value]
+        if active:
+            tenant_id = active[0].tenant_id
+        else:
+            slug = f"dev-{identity.subject}"[:64]
+            tenant = await self._tenants.get_by_slug(slug)
+            if tenant is None:
+                tenant = await self._tenants.create(slug=slug, name=f"Dev — {identity.subject}")
+            await self._memberships.create(
+                tenant_id=tenant.id,
+                user_id=user.id,
+                role=TenantRole.OWNER.value,
+            )
+            tenant_id = tenant.id
+
+        return AuthenticatedUser(
+            user_id=user.id,
+            tenant_id=tenant_id,
+            email=user.email,
+            display_name=user.display_name,
+            created=is_new,
         )
 
     async def _create_user_with_link(self, identity: ExternalIdentity) -> tuple[User, bool]:
@@ -178,3 +245,6 @@ class AuthService:
                 return tenant.id
 
         raise PermissionDeniedError("所属租户已停用，请联系管理员")
+
+
+__all__ = ["AuthService", "AuthenticatedUser"]

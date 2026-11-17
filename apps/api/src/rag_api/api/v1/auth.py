@@ -23,6 +23,11 @@ token 里只有 user_id 与 tenant_id。展示用的邮箱、角色必须从库�
 
 这也顺带验证了"token 有效但用户已被禁用"：查库时发现
 `status != active` 就拒绝。
+
+## 业务逻辑的位置
+
+用户映射、开发引导建租户、`/me` 的查询与映射都在 `AuthService`；
+本模块只做 HTTP 语义与 token 装配（Redis / TokenService 的接线）。
 """
 
 from __future__ import annotations
@@ -32,27 +37,26 @@ import uuid
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rag_api.deps import Principal, get_current_principal, get_db
+from rag_api.deps import get_current_principal, get_db
+from rag_api.deps.auth import Principal
 from rag_api.identity.factory import build_identity_provider
 from rag_api.identity.provider import ExternalIdentity, IdentityProviderError
 from rag_api.identity.tokens import TokenService
 from rag_api.openapi import AUTHENTICATED_ENDPOINT, PUBLIC_ENDPOINT
-from rag_contracts.api.auth import (
+from rag_api.schemas.auth import (
     CurrentUserResponse,
     DevLoginRequest,
     LoginResponse,
     RefreshRequest,
     RefreshResponse,
+    to_current_user_response,
+    to_login_response,
+    to_refresh_response,
 )
-from rag_contracts.enums import TenantRole
+from rag_api.services.auth import AuthService
 from rag_core.db import Database
 from rag_core.errors import AuthenticationError
 from rag_core.logging import get_logger
-from rag_db.repositories import (
-    MembershipRepository,
-    TenantRepository,
-    UserRepository,
-)
 
 log = get_logger(__name__)
 
@@ -85,19 +89,17 @@ def build_auth_router(*, dev_enabled: bool) -> APIRouter:
 
         # rotate 内部做：校验 → 标记旧 token 已用 → 签发新 token。
         # 检测到复用时抛 RefreshTokenReusedError（已作废整族）。
-        user_id, tenant_id, new_refresh, _family = await RefreshTokenStore(
-            redis.client
-        ).rotate(refresh_token=payload.refresh_token)
-
-        access_token, expires_at = token_service.issue(
-            user_id=user_id, tenant_id=tenant_id
+        user_id, tenant_id, new_refresh, _family = await RefreshTokenStore(redis.client).rotate(
+            refresh_token=payload.refresh_token
         )
+
+        access_token, expires_at = token_service.issue(user_id=user_id, tenant_id=tenant_id)
         log.info(
             "token_refreshed",
             user_id=str(user_id),
             tenant_id=str(tenant_id),
         )
-        return RefreshResponse(
+        return to_refresh_response(
             access_token=access_token,
             refresh_token=new_refresh,
             expires_at=expires_at,
@@ -125,23 +127,10 @@ def build_me_router() -> APIRouter:
         principal: Principal = Depends(get_current_principal),
         session: AsyncSession = Depends(get_db),
     ) -> CurrentUserResponse:
-        user = await UserRepository(session).get_active_by_id(principal.user_id)
-        if user is None:
-            # token 有效但用户已禁用/删除：必须拒绝，否则被禁用的用户还能操作
-            raise AuthenticationError("账号不可用，请重新登录")
-
-        membership = await MembershipRepository(session).get_active(
-            tenant_id=principal.tenant_id, user_id=principal.user_id
+        user, membership = await AuthService(session).current_user(
+            user_id=principal.user_id, tenant_id=principal.tenant_id
         )
-        return CurrentUserResponse(
-            user_id=user.id,
-            tenant_id=principal.tenant_id,
-            email=user.email,
-            display_name=user.display_name,
-            status=str(user.status),
-            platform_role=str(user.platform_role),
-            tenant_role=str(membership.role) if membership is not None else None,
-        )
+        return to_current_user_response(user, tenant_id=principal.tenant_id, membership=membership)
 
     return router
 
@@ -189,8 +178,6 @@ def _register_dev_routes(router: APIRouter) -> None:
         token_service: TokenService = request.app.state.token_service
         database: Database = request.app.state.database
 
-        from rag_api.services.auth import AuthService
-
         # 首登需要建用户 / 读成员关系，此时尚无租户上下文；
         # 用管理连接（BYPASSRLS）——开通用户与租户本质上是跨租户的管理动作
         async with database.transaction_bypass_rls() as session:
@@ -210,15 +197,11 @@ def _register_dev_routes(router: APIRouter) -> None:
             tenant_id=str(resolved.tenant_id),
             is_new_user=resolved.created,
         )
-        return LoginResponse(
+        return to_login_response(
+            resolved,
             access_token=token,
             refresh_token=refresh,
             expires_at=expires_at,
-            user_id=resolved.user_id,
-            tenant_id=resolved.tenant_id,
-            email=resolved.email,
-            display_name=resolved.display_name,
-            is_new_user=resolved.created,
         )
 
     @router.post(
@@ -243,66 +226,25 @@ def _register_dev_routes(router: APIRouter) -> None:
 
         # 建租户/成员是跨租户管理动作，用管理连接
         async with database.transaction_bypass_rls() as session:
-            users = UserRepository(session)
-            link = await users.find_by_identity(issuer=identity.issuer, subject=identity.subject)
-            if link is not None:
-                user = await users.get_by_id(link.user_id)
-                if user is None:
-                    raise AuthenticationError("账号数据异常，请联系管理员")
-                is_new = False
-            else:
-                user = await users.create_user(
-                    email=identity.email or f"{identity.subject}@{identity.issuer}",
-                    display_name=identity.display_name or identity.subject,
-                )
-                await users.create_link(
-                    user_id=user.id,
-                    issuer=identity.issuer,
-                    subject=identity.subject,
-                    email=identity.email,
-                )
-                is_new = True
+            resolved = await AuthService(session).bootstrap_tenant(identity)
 
-            memberships = await MembershipRepository(session).list_for_user(user.id)
-            active = [m for m in memberships if m.status == "active"]
-            if active:
-                tenant_id = active[0].tenant_id
-            else:
-                slug = f"dev-{identity.subject}"[:64]
-                tenants = TenantRepository(session)
-                tenant = await tenants.get_by_slug(slug)
-                if tenant is None:
-                    tenant = await tenants.create(slug=slug, name=f"Dev — {identity.subject}")
-                await MembershipRepository(session).create(
-                    tenant_id=tenant.id,
-                    user_id=user.id,
-                    role=TenantRole.OWNER.value,
-                )
-                tenant_id = tenant.id
-
-            user_id = user.id
-            email = user.email
-            display_name = user.display_name
-
-        token, expires_at = token_service.issue(user_id=user_id, tenant_id=tenant_id)
+        token, expires_at = token_service.issue(
+            user_id=resolved.user_id, tenant_id=resolved.tenant_id
+        )
         log.info(
             "dev_bootstrap_succeeded",
-            user_id=str(user_id),
-            tenant_id=str(tenant_id),
-            is_new_user=is_new,
+            user_id=str(resolved.user_id),
+            tenant_id=str(resolved.tenant_id),
+            is_new_user=resolved.created,
         )
         refresh = await _issue_refresh_token(
-            request, user_id=user_id, tenant_id=tenant_id
+            request, user_id=resolved.user_id, tenant_id=resolved.tenant_id
         )
-        return LoginResponse(
+        return to_login_response(
+            resolved,
             access_token=token,
             refresh_token=refresh,
             expires_at=expires_at,
-            user_id=user_id,
-            tenant_id=tenant_id,
-            email=email,
-            display_name=display_name,
-            is_new_user=is_new,
         )
 
 
@@ -321,3 +263,6 @@ def issue_token_for(
 ) -> tuple[str, int]:
     """签发 token 的薄封装，便于测试与其它路由复用。"""
     return token_service.issue(user_id=user_id, tenant_id=tenant_id)
+
+
+__all__ = ["build_auth_router", "build_me_router", "issue_token_for"]

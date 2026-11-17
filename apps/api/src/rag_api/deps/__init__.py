@@ -20,6 +20,7 @@
 | `auth.py` | 身份解析、平台角色校验 | 无（只读 token） |
 | `database.py` | 会话（租户上下文 / 普通 / 跨租户） | 无（由 Database 管） |
 | `pagination.py` | 分页参数解析 | 无 |
+| `ratelimit.py` | 接口限流依赖（问答双层限流） | 无（读 app.state.redis） |
 
 **业务代码统一 `from rag_api.deps import get_db`**，
 不要 import 内部模块——这样以后调整文件划分不影响调用方。
@@ -35,10 +36,12 @@ from rag_api.deps.app import (
 from rag_api.deps.auth import Principal, get_current_principal, require_platform_role
 from rag_api.deps.database import get_admin_db, get_db, get_session
 from rag_api.deps.pagination import PageQuery, page_query
+from rag_api.deps.ratelimit import enforce_chat_ratelimit
 
 __all__ = [
     "PageQuery",
     "Principal",
+    "enforce_chat_ratelimit",
     "get_admin_db",
     "get_current_principal",
     "get_database",

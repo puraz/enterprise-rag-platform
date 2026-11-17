@@ -38,14 +38,23 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag_api.permissions.acl import PermissionContext
-from rag_contracts.enums import AuditAction, AuditOutcome, AuditTargetType
+from rag_contracts.enums import (
+    AuditAction,
+    AuditOutcome,
+    AuditTargetType,
+    PlatformRole,
+    TenantRole,
+)
+from rag_core.errors import PermissionDeniedError, ValidationFailedError
 from rag_core.logging import get_logger
-from rag_db.repositories.audit import AuditRepository
+from rag_db.models.audit import AuditLog
+from rag_db.repositories import AuditRepository, UserRepository
 
 log = get_logger(__name__)
 
@@ -146,6 +155,153 @@ class AuditService:
             reason=reason,
             target_id=str(target_id) if target_id else None,
         )
+
+
+# 能查全部租户审计的平台角色
+_GLOBAL_AUDIT_ROLES = frozenset({PlatformRole.SUPER_ADMIN, PlatformRole.AUDITOR})
+# 能查本租户审计的租户角色
+_TENANT_AUDIT_ROLES: tuple[TenantRole, ...] = (TenantRole.OWNER, TenantRole.ADMIN)
+
+
+class AuditQueryService:
+    """审计查询（管理面）。
+
+    职责：权限判定、过滤参数校验、查询留痕、ORM → 契约映射。
+    路由只负责把查询参数传进来并返回结果。
+
+    ## 为什么审计查询本身也要审计
+
+    查审计日志是**敏感操作**：它能暴露"谁在什么时候看了什么文档"。
+    如果查审计不被记录，内部人员可以悄悄窥探他人行为。
+    记录在**同一事务**里：事务回滚说明这次查询也没成功，审计不该留下。
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self._repo = AuditRepository(session)
+        self._users = UserRepository(session)
+
+    async def query(
+        self,
+        *,
+        ctx: PermissionContext,
+        limit: int,
+        action: str | None = None,
+        target_type: str | None = None,
+        target_id: uuid.UUID | None = None,
+        only_denied: bool = False,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> list[AuditLog]:
+        """查询当前用户有权看到的审计日志（按时间倒序）。"""
+        platform_role = await self._require_query_permission(ctx)
+
+        records = list(
+            await self._repo.list_recent(
+                tenant_id=ctx.tenant_id,
+                limit=limit,
+                action=_parse_action(action),
+                target_type=_parse_target_type(target_type),
+                target_id=target_id,
+                only_denied=only_denied,
+            )
+        )
+
+        # ---- 查询本身留痕 ----
+        await AuditService(self._session).record(
+            ctx=ctx,
+            action=AuditAction.ADMIN_AUDIT_QUERY,
+            details={
+                "filters_action": action or "",
+                "filters_target_type": target_type or "",
+                "only_denied": only_denied,
+                "result_count": len(records),
+                "platform_role": platform_role.value,
+            },
+        )
+
+        # 时间范围过滤（审计记录量不大时够用；数据量大时应下推到 SQL）
+        if since is not None or until is not None:
+            records = [
+                record
+                for record in records
+                if (since is None or record.created_at >= since)
+                and (until is None or record.created_at < until)
+            ]
+
+        items = list(records)
+
+        log.info(
+            "audit_query_executed",
+            platform_role=platform_role.value,
+            tenant_roles=sorted(role.value for role in ctx.roles),
+            result_count=len(items),
+            queried_by=str(ctx.user_id),
+        )
+
+        return items
+
+    async def _require_query_permission(self, ctx: PermissionContext) -> PlatformRole:
+        """校验查询权限，返回平台角色（用于审计留痕）。"""
+        user = await self._users.get_active_by_id(ctx.user_id)
+        if user is None:
+            raise PermissionDeniedError("账号不可用")
+
+        try:
+            platform_role = PlatformRole(str(user.platform_role))
+        except ValueError:
+            platform_role = PlatformRole.NONE
+
+        can_query_global = platform_role in _GLOBAL_AUDIT_ROLES
+        can_query_tenant = ctx.has_any_role(*_TENANT_AUDIT_ROLES)
+
+        if not (can_query_global or can_query_tenant):
+            raise PermissionDeniedError("需要审计员或租户管理员权限才能查看审计日志")
+        return platform_role
+
+
+def _parse_action(value: str | None) -> AuditAction | None:
+    """解析 action 过滤参数。
+
+    未知值返回 422 而不是静默忽略：静默忽略会让用户以为过滤生效了，
+    实际拿到全量数据——在审计场景下这是危险的（可能误判"没有越权记录"）。
+    """
+    if not value:
+        return None
+    try:
+        return AuditAction(value)
+    except ValueError as exc:
+        from rag_contracts.errors import FieldError
+
+        raise ValidationFailedError(
+            fields=[
+                FieldError(
+                    location=["query", "action"],
+                    message=f"未知的审计动作: {value}",
+                    type="value_error",
+                )
+            ]
+        ) from exc
+
+
+def _parse_target_type(value: str | None) -> AuditTargetType | None:
+    """解析 target_type 过滤参数（未知值 422）。"""
+    if not value:
+        return None
+    try:
+        return AuditTargetType(value)
+    except ValueError as exc:
+        from rag_contracts.errors import FieldError
+
+        raise ValidationFailedError(
+            fields=[
+                FieldError(
+                    location=["query", "target_type"],
+                    message=f"未知的目标类型: {value}",
+                    type="value_error",
+                )
+            ]
+        ) from exc
 
 
 def _safe_details(details: dict[str, Any] | None) -> dict[str, Any]:

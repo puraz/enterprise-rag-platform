@@ -28,7 +28,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Request, Response
 
 from rag_api.openapi import PUBLIC_ENDPOINT
-from rag_contracts.api.auth import HealthResponse
+from rag_api.schemas.health import HealthResponse, to_response
 from rag_core.logging import get_logger
 
 log = get_logger(__name__)
@@ -45,7 +45,7 @@ router = APIRouter(prefix="/health", tags=["health"])
 )
 async def liveness(request: Request) -> HealthResponse:
     settings = request.app.state.settings
-    return HealthResponse(
+    return to_response(
         status="ok",
         version=request.app.state.app_version,
         environment=str(settings.env),
@@ -93,7 +93,7 @@ async def readiness(request: Request, response: Response) -> HealthResponse:
         response.status_code = 503
         log.warning("readiness_failed", checks=checks)
 
-    return HealthResponse(
+    return to_response(
         status="ok" if healthy else "degraded",
         version=request.app.state.app_version,
         environment=str(settings.env),

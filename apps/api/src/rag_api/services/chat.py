@@ -82,8 +82,14 @@ from rag_adapters.retrieval.selfcheck import (
     should_refuse,
 )
 from rag_adapters.retrieval.state import RetrievalConfig, RetrievedChunk
+from rag_api.permissions.acl import PermissionContext
 from rag_contracts.api.citations import Citation
-from rag_contracts.enums.audit import ModelTaskType
+from rag_contracts.enums.audit import (
+    AuditAction,
+    AuditOutcome,
+    AuditTargetType,
+    ModelTaskType,
+)
 from rag_contracts.enums.conversations import (
     MessageRole,
     MessageStatus,
@@ -93,6 +99,7 @@ from rag_core.errors import AppError, ConflictError, NotFoundError
 from rag_core.logging import get_logger
 from rag_db.models.conversation import Conversation, Message
 from rag_db.repositories import (
+    AuditRepository,
     ConversationRepository,
     MessageRepository,
 )
@@ -196,30 +203,62 @@ class ChatService:
             raise NotFoundError("会话不存在")
         return conversation
 
-    async def list_messages(
+    # ------------------------------------------------------------ 问答主流程
+    async def record_audit(
         self,
         *,
-        tenant_id: uuid.UUID,
-        user_id: uuid.UUID,
-        conversation_id: uuid.UUID,
-        limit: int = 50,
-        offset: int = 0,
-        include_total: bool = False,
-    ) -> tuple[list[Message], int | None]:
-        # 先校验归属：会话不属于该用户时返回 404
-        await self.get_or_create_conversation(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            conversation_id=conversation_id,
-        )
-        rows, total = await self._messages.page(
-            tenant_id=tenant_id,
-            conversation_id=conversation_id,
-            limit=limit,
-            offset=offset,
-            include_total=include_total,
-        )
-        return list(rows), total
+        ctx: PermissionContext,
+        query: str,
+        conversation_id: uuid.UUID | None,
+        knowledge_base_ids: list[uuid.UUID],
+        final_event: ChatEvent | None,
+    ) -> None:
+        """写问答审计记录。
+
+        放在流的 `finally` 里调用：无论流正常结束、出错、还是客户端断连，
+        都要留下"这次问答发生过"的痕迹。
+
+        **审计失败不能影响响应**：审计是旁路记录，它的失败不该让
+        用户看到一个已经完成的回答变成错误。所以整体 try/except。
+        """
+        try:
+            details: dict[str, object] = {
+                # **不记录问题原文**：日志/审计保留期长，且原文可能含 PII。
+                # 只记长度便于判断"是不是异常长的输入"。
+                "query_length": len(query),
+                "conversation_id": str(conversation_id) if conversation_id else None,
+                "knowledge_base_count": len(knowledge_base_ids),
+            }
+
+            outcome = AuditOutcome.SUCCESS
+            error_code = None
+            if final_event is not None:
+                if final_event.event == "error":
+                    outcome = AuditOutcome.FAILED
+                    error_code = str(final_event.data.get("code_name", ""))
+                else:
+                    details["refused"] = bool(final_event.data.get("refused"))
+                    details["citation_count"] = len(final_event.data.get("citations") or [])
+                    details["input_tokens"] = int(final_event.data.get("input_tokens") or 0)
+                    details["output_tokens"] = int(final_event.data.get("output_tokens") or 0)
+                    details["message_id"] = final_event.data.get("message_id")
+
+            await AuditRepository(self._session).record(
+                tenant_id=ctx.tenant_id,
+                action=AuditAction.CHAT_COMPLETION,
+                outcome=outcome,
+                actor_user_id=ctx.user_id,
+                target_type=AuditTargetType.CONVERSATION,
+                target_id=conversation_id,
+                details=details,
+                error_code=error_code,
+            )
+        except Exception as exc:
+            log.error(
+                "chat_audit_failed",
+                error_type=type(exc).__name__,
+                note="审计写入失败（不影响已完成的问答）",
+            )
 
     # ------------------------------------------------------------ 问答主流程
 

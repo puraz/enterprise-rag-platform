@@ -1,4 +1,4 @@
-"""上传路由：分片上传的四个端点。
+"""上传路由：分片上传的五个端点。
 
 ## 端点设计
 
@@ -34,6 +34,11 @@ data = await request.body()
 - 如果将来加"合并后异步建文档"（A8），应返回 202 + task_id。
 
 当前实现是同步合并，返回 200。
+
+## 职责边界
+
+存储编排在 `UploadService`，响应契约的映射也在该模块（`to_*_response`）。
+本模块只承担 HTTP 语义：读原始请求体、Content-Length 上限、归属校验。
 """
 
 from __future__ import annotations
@@ -44,28 +49,33 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag_adapters.storages.base import PartInfo, StorageBackend
-from rag_api.deps import Principal, get_current_principal, get_db, get_storage
+from rag_api.deps import get_db, get_storage
 from rag_api.openapi import (
     DELETE_ENDPOINT,
     TENANT_ENDPOINT,
     TENANT_WRITE_ENDPOINT,
 )
-from rag_api.permissions import PermissionContext, ensure_own_resource, get_permission_context
-from rag_api.services.upload import UploadService
-from rag_api.services.upload_security import inspect_file
-from rag_contracts.api.uploads import (
+from rag_api.permissions import (
+    PermissionContext,
+    ensure_own_resource,
+    get_permission_context,
+)
+from rag_api.schemas.uploads import (
     CompleteUploadRequest,
     CompleteUploadResponse,
     InitiateUploadRequest,
     InitiateUploadResponse,
     UploadPartResponse,
     UploadSessionStatusResponse,
+    to_complete_response,
+    to_initiate_response,
+    to_part_response,
+    to_status_response,
 )
+from rag_api.services.upload import UploadService
+from rag_api.services.upload_security import inspect_file
 from rag_core.errors import BadRequestError, PayloadTooLargeError
-from rag_core.logging import get_logger
 from rag_core.settings import get_settings
-
-log = get_logger(__name__)
 
 router = APIRouter(prefix="/uploads", tags=["uploads"])
 
@@ -92,7 +102,6 @@ def _service(session: AsyncSession, storage: StorageBackend) -> UploadService:
 )
 async def initiate_upload(
     payload: InitiateUploadRequest,
-    principal: Principal = Depends(get_current_principal),
     ctx: PermissionContext = Depends(get_permission_context),
     session: AsyncSession = Depends(get_db),
     storage: StorageBackend = Depends(get_storage),
@@ -105,25 +114,16 @@ async def initiate_upload(
     # 魔数校验留到 complete：那时才有完整文件可读。
     safe_name = inspect_file(filename=payload.filename, head=None)
 
-    service = _service(session, storage)
-    result = await service.initiate(
-        tenant_id=principal.tenant_id,
-        user_id=principal.user_id,
+    result = await _service(session, storage).initiate(
+        tenant_id=ctx.tenant_id,
+        user_id=ctx.user_id,
         filename=safe_name.safe_filename,
         total_size=payload.total_size,
         content_type=payload.content_type,
         content_hash=payload.content_hash,
         knowledge_base_id=payload.knowledge_base_id,
     )
-
-    return InitiateUploadResponse(
-        deduplicated=result.deduplicated,
-        upload_id=result.upload_id,  # 会话主键，不是存储层 upload_id
-        blob_id=result.blob_id,
-        part_size=result.part_size,
-        total_parts=result.total_parts,
-        uploaded_parts=result.uploaded_parts or [],
-    )
+    return to_initiate_response(result)
 
 
 @router.put(
@@ -141,24 +141,13 @@ async def upload_part(
     upload_id: uuid.UUID,
     part_number: int,
     request: Request,
-    principal: Principal = Depends(get_current_principal),
     ctx: PermissionContext = Depends(get_permission_context),
     session: AsyncSession = Depends(get_db),
     storage: StorageBackend = Depends(get_storage),
 ) -> UploadPartResponse:
     # 先看 Content-Length 再读体：超长请求直接拒绝，不浪费内存
-    settings = get_settings()
-    max_bytes = int(settings.storage.part_size * _PART_OVERHEAD_FACTOR)
-    declared = request.headers.get("content-length")
-    if declared is not None:
-        try:
-            if int(declared) > max_bytes:
-                raise PayloadTooLargeError(
-                    f"分片超过上限 {max_bytes} 字节",
-                    details={"max_bytes": max_bytes, "declared": int(declared)},
-                )
-        except ValueError as exc:
-            raise BadRequestError("Content-Length 非法") from exc
+    max_bytes = _max_part_bytes()
+    _check_declared_length(request, max_bytes)
 
     data = await request.body()
     if not data:
@@ -166,26 +155,20 @@ async def upload_part(
     if len(data) > max_bytes:
         raise PayloadTooLargeError(f"分片超过上限 {max_bytes} 字节", details={"actual": len(data)})
 
-    # upload_id 是存储层的 upload_id（hex 字符串），不是数据库的 session id。
-    # 这里通过 service 反查 session —— 需要 tenant 隔离，不能直接用 upload_id 查库。
     service = _service(session, storage)
-
-    # **归属校验**：同租户内任何成员都能猜到别人的会话 ID，
-    # 没有这一步就能往别人的上传里塞分片（污染对方文件）。
-    owner_id = await service.get_session_owner(
-        tenant_id=principal.tenant_id, session_id=upload_id
+    await _require_owner(
+        service,
+        upload_id=upload_id,
+        ctx=ctx,
     )
-    ensure_own_resource(resource_user_id=owner_id, ctx=ctx)
 
     part: PartInfo = await service.upload_part(
-        tenant_id=principal.tenant_id,
+        tenant_id=ctx.tenant_id,
         session_id=upload_id,
         part_number=part_number,
         data=data,
     )
-    return UploadPartResponse(
-        part_number=part.part_number, etag=part.etag, size_bytes=part.size_bytes
-    )
+    return to_part_response(part)
 
 
 @router.get(
@@ -200,31 +183,24 @@ async def upload_part(
 )
 async def get_upload_status(
     upload_id: uuid.UUID,
-    principal: Principal = Depends(get_current_principal),
     ctx: PermissionContext = Depends(get_permission_context),
     session: AsyncSession = Depends(get_db),
     storage: StorageBackend = Depends(get_storage),
 ) -> UploadSessionStatusResponse:
     service = _service(session, storage)
     # 归属校验：会话列表含文件名与分片进度，属他人隐私
-    owner_id = await service.get_session_owner(
-        tenant_id=principal.tenant_id, session_id=upload_id
-    )
-    ensure_own_resource(resource_user_id=owner_id, ctx=ctx)
+    await _require_owner(service, upload_id=upload_id, ctx=ctx)
 
     status, total_parts, part_size, uploaded, missing = await service.session_status(
-        tenant_id=principal.tenant_id, session_id=upload_id
+        tenant_id=ctx.tenant_id, session_id=upload_id
     )
-    return UploadSessionStatusResponse(
-        upload_id=str(upload_id),
+    return to_status_response(
+        upload_id=upload_id,
         status=status,
         total_parts=total_parts,
         part_size=part_size,
-        uploaded_parts=[
-            UploadPartResponse(part_number=p.part_number, etag=p.etag, size_bytes=p.size_bytes)
-            for p in uploaded
-        ],
-        missing_parts=missing,
+        uploaded=uploaded,
+        missing=missing,
     )
 
 
@@ -243,7 +219,6 @@ async def get_upload_status(
 async def complete_upload(
     upload_id: uuid.UUID,
     payload: CompleteUploadRequest,
-    principal: Principal = Depends(get_current_principal),
     ctx: PermissionContext = Depends(get_permission_context),
     session: AsyncSession = Depends(get_db),
     storage: StorageBackend = Depends(get_storage),
@@ -251,14 +226,11 @@ async def complete_upload(
     service = _service(session, storage)
 
     # 归属校验：合并会消耗对方已上传的分片并重置会话状态
-    owner_id = await service.get_session_owner(
-        tenant_id=principal.tenant_id, session_id=upload_id
-    )
-    ensure_own_resource(resource_user_id=owner_id, ctx=ctx)
+    await _require_owner(service, upload_id=upload_id, ctx=ctx)
 
     # 合并前用存储层的实际分片列表（不信任客户端传的）
     _status, _total, _size, uploaded, missing = await service.session_status(
-        tenant_id=principal.tenant_id, session_id=upload_id
+        tenant_id=ctx.tenant_id, session_id=upload_id
     )
     if missing:
         raise BadRequestError(
@@ -267,17 +239,12 @@ async def complete_upload(
         )
 
     blob = await service.complete(
-        tenant_id=principal.tenant_id,
+        tenant_id=ctx.tenant_id,
         session_id=upload_id,
         parts=uploaded,
         declared_hash=payload.content_hash,
     )
-    return CompleteUploadResponse(
-        blob_id=blob.id,
-        size_bytes=blob.size_bytes,
-        content_hash=blob.content_hash,
-        content_type=blob.content_type,
-    )
+    return to_complete_response(blob)
 
 
 @router.delete(
@@ -292,7 +259,6 @@ async def complete_upload(
 )
 async def abort_upload(
     upload_id: uuid.UUID,
-    principal: Principal = Depends(get_current_principal),
     ctx: PermissionContext = Depends(get_permission_context),
     session: AsyncSession = Depends(get_db),
     storage: StorageBackend = Depends(get_storage),
@@ -300,9 +266,45 @@ async def abort_upload(
     service = _service(session, storage)
     # 归属校验：**中止是破坏性操作**——让别人能中止你的上传，
     # 等同于可以随时打断你的工作（且已传分片被清理，必须从头再来）
-    owner_id = await service.get_session_owner(
-        tenant_id=principal.tenant_id, session_id=upload_id
-    )
+    await _require_owner(service, upload_id=upload_id, ctx=ctx)
+
+    await service.abort(tenant_id=ctx.tenant_id, session_id=upload_id)
+
+
+# ---------------------------------------------------------------- 内部辅助
+
+
+def _max_part_bytes() -> int:
+    """分片请求体的硬上限（见模块 docstring）。"""
+    return int(get_settings().storage.part_size * _PART_OVERHEAD_FACTOR)
+
+
+def _check_declared_length(request: Request, max_bytes: int) -> None:
+    """在读取请求体之前先检查 Content-Length。"""
+    declared = request.headers.get("content-length")
+    if declared is None:
+        return
+    try:
+        length = int(declared)
+    except ValueError as exc:
+        raise BadRequestError("Content-Length 非法") from exc
+    if length > max_bytes:
+        raise PayloadTooLargeError(
+            f"分片超过上限 {max_bytes} 字节",
+            details={"max_bytes": max_bytes, "declared": length},
+        )
+
+
+async def _require_owner(
+    service: UploadService, *, upload_id: uuid.UUID, ctx: PermissionContext
+) -> None:
+    """校验上传会话属于当前用户（管理员除外）。
+
+    **归属校验必须在业务操作之前**：同租户内任何成员都能猜到别人的会话 ID，
+    没有这一步就能往别人的上传里塞分片、合并、甚至中止（已传分片被清理）。
+    """
+    owner_id = await service.get_session_owner(tenant_id=ctx.tenant_id, session_id=upload_id)
     ensure_own_resource(resource_user_id=owner_id, ctx=ctx)
 
-    await service.abort(tenant_id=principal.tenant_id, session_id=upload_id)
+
+__all__ = ["router"]

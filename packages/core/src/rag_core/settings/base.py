@@ -24,6 +24,7 @@ from rag_core.settings.database import DatabaseSettings
 from rag_core.settings.embedding import EmbeddingSettings
 from rag_core.settings.identity import IdentitySettings, OIDCSettings
 from rag_core.settings.llm import LLMSettings
+from rag_core.settings.ratelimit import RateLimitSettings
 from rag_core.settings.redis import RedisSettings
 from rag_core.settings.storage import StorageSettings
 from rag_core.settings.worker import WorkerSettings
@@ -89,6 +90,7 @@ class Settings(BaseSettings):
 
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
+    ratelimit: RateLimitSettings = Field(default_factory=RateLimitSettings)
     identity: IdentitySettings = Field(default_factory=IdentitySettings)
     oidc: OIDCSettings = Field(default_factory=OIDCSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)

@@ -41,6 +41,11 @@ Nginx 默认 `proxy_buffering on`，会把 SSE 攒成一批发出——
 ### 3. 不能设 `Content-Length`
 
 SSE 是无限流，长度未知。由 chunked transfer 编码处理。
+
+## 业务逻辑的位置
+
+问答编排在 `ChatService`，会话读取与轻量写在 `ConversationService`，
+本模块只承担 HTTP 语义（SSE 帧格式、状态码、响应头）。
 """
 
 from __future__ import annotations
@@ -53,7 +58,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rag_api.deps import Principal, get_current_principal, get_db
+from rag_api.deps import enforce_chat_ratelimit, get_db
 from rag_api.deps.pagination import PageQuery, page_query
 from rag_api.openapi import (
     AUTHENTICATED_ENDPOINT,
@@ -62,90 +67,23 @@ from rag_api.openapi import (
     TENANT_WRITE_ENDPOINT,
 )
 from rag_api.permissions import PermissionContext, get_permission_context
-from rag_api.services.chat import ChatEvent, ChatService
-from rag_contracts.api.chat import (
+from rag_api.schemas.common import Page
+from rag_api.schemas.conversations import (
     ChatRequest,
     ConversationItem,
     FeedbackRequest,
     MessageItem,
+    to_conversation_page,
+    to_message_page,
 )
-from rag_contracts.api.pagination import Page, PageMeta
-from rag_contracts.enums.conversations import FeedbackRating, FeedbackReason
+from rag_api.services.chat import ChatEvent, ChatService
+from rag_api.services.conversations import ConversationService
 from rag_core.logging import get_logger
 from rag_core.settings import get_settings
-from rag_db.models.conversation import Conversation, Message
-from rag_db.repositories import ConversationRepository, MessageRepository
 
 log = get_logger(__name__)
 
 router = APIRouter(tags=["chat"])
-
-
-async def enforce_chat_ratelimit(
-    request: Request,
-    principal: Principal = Depends(get_current_principal),
-) -> None:
-    """问答的双层限流（租户级 + 用户级）。
-
-    ## 为什么两层都要
-
-    - 只限租户：一个用户能把整个租户的额度吃光（其它同事全被限）；
-    - 只限用户：大量小号注册能把全平台打爆。
-
-    ## 为什么限额比普通接口低
-
-    一次问答要调 3~4 次 LLM（改写 + 判答 + 生成），成本是普通接口的
-    几十倍。用同一个限额会让"刷查询"变相成为"刷模型配额"。
-
-    ## Redis 故障时放行而不是拒绝
-
-    限流的目的是保护后端，不是拒绝用户。Redis 挂了的时候：
-    - 拒绝所有请求 → 全站不可用（比被刷更糟）；
-    - 放行 → 后端可能被打，但至少服务着。
-    选后者，并记 warning（可观测到"限流失效了"）。
-    """
-    from rag_core.ratelimit import RateLimiter, RateLimitPolicy, tenant_key, user_key
-
-    redis = request.app.state.redis
-    metrics = getattr(request.app.state, "metrics", None)
-    limiter = RateLimiter(redis.client)
-
-    tenant_policy = RateLimitPolicy("chat_tenant", rate=20.0, burst=40)
-    user_policy = RateLimitPolicy("chat_user", rate=2.0, burst=5)
-
-    try:
-        tenant_result = await limiter.check(
-            policy=tenant_policy, key=tenant_key(principal.tenant_id)
-        )
-        user_result = await limiter.check(
-            policy=user_policy,
-            key=user_key(principal.tenant_id, principal.user_id),
-        )
-    except Exception as exc:
-        log.warning(
-            "ratelimit_unavailable",
-            error_type=type(exc).__name__,
-            note="Redis 不可用，本次请求放行（限流是保护而非拒绝）",
-        )
-        return
-
-    blocked = None
-    if not tenant_result.allowed:
-        blocked = tenant_result
-    elif not user_result.allowed:
-        blocked = user_result
-
-    if blocked is not None:
-        if metrics is not None:
-            from rag_core.metrics import record_ratelimit_denied
-
-            record_ratelimit_denied(metrics, policy=blocked.limit_name)
-        from rag_core.errors import RateLimitedError
-
-        raise RateLimitedError(
-            f"请求过于频繁，请 {blocked.retry_after_s:.1f} 秒后重试",
-            details={"retry_after_s": round(blocked.retry_after_s, 1)},
-        )
 
 
 def _build_service(request: Request, session: AsyncSession) -> ChatService:
@@ -191,6 +129,9 @@ def _serialize(event: ChatEvent) -> str:
     "/chat",
     summary="流式问答（SSE）",
     response_class=StreamingResponse,
+    # **限流必须在进入 SSE 之前**：流一旦开始就无法再返回 429。
+    # 双层（租户 + 用户）配额见 `rag_api.deps.ratelimit`。
+    dependencies=[Depends(enforce_chat_ratelimit)],
     # SSE 不能声明 JSON 响应模型，但**必须声明错误 responses**：
     # 校验失败（422）、鉴权失败（401）、会话冲突（409）都发生在
     # 流开始之前，走普通 JSON 响应。
@@ -199,7 +140,6 @@ def _serialize(event: ChatEvent) -> str:
 async def chat(
     payload: ChatRequest,
     request: Request,
-    principal: Principal = Depends(get_current_principal),
     # **权限上下文必须注入**：检索返回的是文档正文，不过滤 ACL
     # 等于用户能通过提问把无权文档的内容问出来（AGENTS.md 4.8）。
     ctx: PermissionContext = Depends(get_permission_context),
@@ -216,8 +156,8 @@ async def chat(
         final_event: ChatEvent | None = None
         try:
             async for event in service.chat_stream(
-                tenant_id=principal.tenant_id,
-                user_id=principal.user_id,
+                tenant_id=ctx.tenant_id,
+                user_id=ctx.user_id,
                 query=payload.query,
                 conversation_id=payload.conversation_id,
                 knowledge_base_ids=payload.knowledge_base_ids or None,
@@ -253,10 +193,11 @@ async def chat(
             #
             # 细节脱敏：`details` 里只放 ID 与计数，**不放问题原文**
             # （问题里可能有个人信息，而审计日志保留期很长）。
-            await _audit_chat(
-                session=session,
-                principal=principal,
-                payload=payload,
+            await service.record_audit(
+                ctx=ctx,
+                query=payload.query,
+                conversation_id=payload.conversation_id,
+                knowledge_base_ids=payload.knowledge_base_ids,
                 final_event=final_event,
             )
 
@@ -281,28 +222,18 @@ async def chat(
     responses=TENANT_ENDPOINT,
 )
 async def list_conversations(
-    principal: Principal = Depends(get_current_principal),
+    ctx: PermissionContext = Depends(get_permission_context),
     session: AsyncSession = Depends(get_db),
     page: PageQuery = Depends(page_query),
 ) -> Page[ConversationItem]:
-    repo = ConversationRepository(session)
-    rows, total = await repo.list_for_user(
-        tenant_id=principal.tenant_id,
-        user_id=principal.user_id,
+    rows, total = await ConversationService(session).list_for_user(
+        tenant_id=ctx.tenant_id,
+        user_id=ctx.user_id,
         limit=page.limit,
         offset=page.offset,
         include_total=page.include_total,
     )
-    items = [_to_conversation_item(row) for row in rows]
-    return Page(
-        items=items,
-        meta=PageMeta(
-            limit=page.limit,
-            offset=page.offset,
-            total=total,
-            has_more=len(items) == page.limit,
-        ),
-    )
+    return to_conversation_page(rows, total=total, limit=page.limit, offset=page.offset)
 
 
 @router.get(
@@ -313,30 +244,19 @@ async def list_conversations(
 )
 async def list_messages(
     conversation_id: uuid.UUID,
-    request: Request,
-    principal: Principal = Depends(get_current_principal),
+    ctx: PermissionContext = Depends(get_permission_context),
     session: AsyncSession = Depends(get_db),
     page: PageQuery = Depends(page_query),
 ) -> Page[MessageItem]:
-    service = _build_service(request, session)
-    rows, total = await service.list_messages(
-        tenant_id=principal.tenant_id,
-        user_id=principal.user_id,
+    rows, total = await ConversationService(session).list_messages(
+        tenant_id=ctx.tenant_id,
+        user_id=ctx.user_id,
         conversation_id=conversation_id,
         limit=page.limit,
         offset=page.offset,
         include_total=page.include_total,
     )
-    items = [_to_message_item(row) for row in rows]
-    return Page(
-        items=items,
-        meta=PageMeta(
-            limit=page.limit,
-            offset=page.offset,
-            total=total,
-            has_more=len(items) == page.limit,
-        ),
-    )
+    return to_message_page(rows, total=total, limit=page.limit, offset=page.offset)
 
 
 @router.delete(
@@ -347,7 +267,7 @@ async def list_messages(
 )
 async def delete_conversation(
     conversation_id: uuid.UUID,
-    principal: Principal = Depends(get_current_principal),
+    ctx: PermissionContext = Depends(get_permission_context),
     session: AsyncSession = Depends(get_db),
 ) -> None:
     """软删除。
@@ -358,17 +278,11 @@ async def delete_conversation(
 
     跨用户/跨租户访问返回 404（不泄漏存在性）。
     """
-    from rag_core.errors import NotFoundError
-
-    repo = ConversationRepository(session)
-    conversation = await repo.get(
-        tenant_id=principal.tenant_id,
+    await ConversationService(session).delete(
+        tenant_id=ctx.tenant_id,
+        user_id=ctx.user_id,
         conversation_id=conversation_id,
-        user_id=principal.user_id,
     )
-    if conversation is None:
-        raise NotFoundError("会话不存在")
-    await repo.soft_delete(conversation_id=conversation_id)
 
 
 @router.post(
@@ -380,7 +294,7 @@ async def delete_conversation(
 async def submit_feedback(
     message_id: uuid.UUID,
     payload: FeedbackRequest,
-    principal: Principal = Depends(get_current_principal),
+    ctx: PermissionContext = Depends(get_permission_context),
     session: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
     """记录用户反馈。
@@ -398,141 +312,14 @@ async def submit_feedback(
 
     允许覆盖（用户改主意）：同一条消息再次提交会更新而不是报错。
     """
-    from rag_core.errors import NotFoundError
-
-    repo = MessageRepository(session)
-    message = await repo.get(tenant_id=principal.tenant_id, message_id=message_id)
-    if message is None:
-        raise NotFoundError("消息不存在")
-
-    # 只允许对**助手消息**反馈：给用户自己的提问点赞没有意义
-    from rag_contracts.enums.conversations import MessageRole
-
-    if message.role != MessageRole.ASSISTANT:
-        from rag_core.errors import ValidationFailedError
-
-        raise ValidationFailedError("只能对助手回答提交反馈")
-
-    # 点踩才需要原因（点赞不需要解释）
-    if payload.rating == FeedbackRating.DISLIKE and payload.reason is None:
-        from rag_core.errors import ValidationFailedError
-
-        raise ValidationFailedError("点踩时请选择原因")
-
-    await repo.set_feedback(
-        tenant_id=principal.tenant_id,
+    await ConversationService(session).submit_feedback(
+        tenant_id=ctx.tenant_id,
         message_id=message_id,
         rating=payload.rating,
         reason=payload.reason,
         comment=payload.comment,
     )
     return {"ok": True}
-
-
-async def _audit_chat(
-    *,
-    session: AsyncSession,
-    principal: Principal,
-    payload: ChatRequest,
-    final_event: ChatEvent | None,
-) -> None:
-    """写问答审计记录。
-
-    放在 `finally` 里：无论流正常结束、出错、还是客户端断连，
-    都要留下"这次问答发生过"的痕迹。
-
-    **审计失败不能影响响应**：审计是旁路记录，它的失败不该让
-    用户看到一个已经完成的回答变成错误。所以整体 try/except。
-    """
-    from rag_contracts.enums import AuditAction, AuditOutcome, AuditTargetType
-    from rag_db.repositories import AuditRepository
-
-    try:
-        details: dict[str, object] = {
-            # **不记录问题原文**：日志/审计保留期长，且原文可能含 PII。
-            # 只记长度便于判断"是不是异常长的输入"。
-            "query_length": len(payload.query),
-            "conversation_id": str(payload.conversation_id) if payload.conversation_id else None,
-            "knowledge_base_count": len(payload.knowledge_base_ids),
-        }
-
-        outcome = AuditOutcome.SUCCESS
-        error_code = None
-        if final_event is not None:
-            if final_event.event == "error":
-                outcome = AuditOutcome.FAILED
-                error_code = str(final_event.data.get("code_name", ""))
-            else:
-                details["refused"] = bool(final_event.data.get("refused"))
-                details["citation_count"] = len(final_event.data.get("citations") or [])
-                details["input_tokens"] = int(final_event.data.get("input_tokens") or 0)
-                details["output_tokens"] = int(final_event.data.get("output_tokens") or 0)
-                details["message_id"] = final_event.data.get("message_id")
-
-        await AuditRepository(session).record(
-            tenant_id=principal.tenant_id,
-            action=AuditAction.CHAT_COMPLETION,
-            outcome=outcome,
-            actor_user_id=principal.user_id,
-            target_type=AuditTargetType.CONVERSATION,
-            target_id=payload.conversation_id,
-            details=details,
-            error_code=error_code,
-        )
-    except Exception as exc:
-        log.error(
-            "chat_audit_failed",
-            error_type=type(exc).__name__,
-            note="审计写入失败（不影响已完成的问答）",
-        )
-
-
-# ---------------------------------------------------------------- 序列化
-
-
-def _to_conversation_item(row: Conversation) -> ConversationItem:
-    return ConversationItem(
-        id=row.id,
-        title=row.title,
-        status=row.status,
-        knowledge_base_id=row.knowledge_base_id,
-        message_count=row.message_count,
-        last_message_at=row.last_message_at,
-        created_at=row.created_at,
-        updated_at=row.updated_at,
-        total_cost_usd=row.total_cost_usd,
-    )
-
-
-def _to_message_item(row: Message) -> MessageItem:
-    from rag_contracts.api.citations import Citation
-
-    citations: list[Citation] = []
-    for raw in row.citations or []:
-        try:
-            citations.append(Citation.model_validate(raw))
-        except Exception:
-            # 单条引用损坏不该让整条消息读不出来
-            log.warning("citation_parse_failed", message_id=str(row.id))
-
-    return MessageItem(
-        id=row.id,
-        conversation_id=row.conversation_id,
-        sequence=row.sequence,
-        role=row.role,
-        content=row.content,
-        status=row.status,
-        refused=row.refused,
-        refusal_reason=row.refusal_reason,
-        citations=citations,
-        created_at=row.created_at,
-        rating=FeedbackRating(row.rating) if row.rating else None,
-        feedback_reason=FeedbackReason(row.feedback_reason) if row.feedback_reason else None,
-        input_tokens=row.input_tokens,
-        output_tokens=row.output_tokens,
-        cost_usd=row.cost_usd,
-        latency_ms=row.latency_ms,
-    )
 
 
 __all__ = ["router"]

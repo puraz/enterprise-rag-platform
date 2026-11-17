@@ -34,13 +34,15 @@
 
 from __future__ import annotations
 
+import math
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from rag_contracts.errors import ErrorCode, ErrorResponse, Severity
-from rag_core.errors import AppError, from_pydantic
+from rag_core.errors import AppError, RateLimitedError, from_pydantic
 from rag_core.logging import get_logger
 
 log = get_logger(__name__)
@@ -60,14 +62,37 @@ def _request_id(request: Request) -> str:
     return str(value) if value else "unknown"
 
 
-def _json(response: ErrorResponse, status_code: int) -> JSONResponse:
+def _json(
+    response: ErrorResponse,
+    status_code: int,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
     """序列化统一错误响应。
 
     用 `model_dump(mode="json")` 而不是 `model_dump()`：
     后者会把 `ErrorCode` 枚举原样留下，`json.dumps` 才能处理
     （FastAPI 的 JSONResponse 用标准 json 库）。
     """
-    return JSONResponse(status_code=status_code, content=response.model_dump(mode="json"))
+    return JSONResponse(
+        status_code=status_code,
+        content=response.model_dump(mode="json"),
+        headers=headers,
+    )
+
+
+def _error_headers(exc: AppError) -> dict[str, str]:
+    """把错误详情里对客户端有指导意义的字段转成响应头。
+
+    目前只有 429：`Retry-After` 是 HTTP 标准头，SDK/网关会直接识别；
+    放在 body 里的 `retry_after_s` 只方便人看。
+    """
+    if not isinstance(exc, RateLimitedError):
+        return {}
+    retry_after = exc.details.get("retry_after_s")
+    if isinstance(retry_after, (int, float)):
+        # HTTP 规范要求整数秒；向上取整，避免返回 0 让客户端立刻重试
+        return {"Retry-After": str(max(1, math.ceil(retry_after)))}
+    return {}
 
 
 async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
@@ -90,7 +115,7 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
         error=str(exc),
     )
 
-    return _json(exc.to_response(request_id), exc.http_status)
+    return _json(exc.to_response(request_id), exc.http_status, headers=_error_headers(exc))
 
 
 async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
