@@ -109,6 +109,11 @@ x-app-env: &app-env
   RAG_RETRIEVAL__USE_SELF_CHECK: "false"
   RAG_RERANKER__PROVIDER: "none"
 
+  # Worker 指标端口（Prometheus 抓取 worker:9101/metrics）。
+  # API 与迁移不使用这个变量，但共用同一份环境，设了也无害。
+  RAG_WORKER__METRICS_PORT: "9101"
+  RAG_WORKER__METRICS_HOST: "0.0.0.0"
+
 services:
   # ------------------------------------------------------------------ 依赖
   postgres:
@@ -236,6 +241,11 @@ services:
     <<: *python-image
     command: ["python", "-m", "rag_worker"]
     environment: *app-env
+    # 指标端口只对容器网络开放（Prometheus 抓 worker:9101）。
+    # 不映射到宿主：多副本 `--scale worker=N` 时宿主端口会冲突，
+    # 且指标不应暴露到公网。排障用 `docker compose exec worker ...`。
+    expose:
+      - "9101"
     volumes:
       - hfcache:/home/rag/.cache/huggingface
       - appstorage:/app/.data/storage

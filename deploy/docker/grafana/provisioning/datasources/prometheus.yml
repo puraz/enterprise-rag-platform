@@ -4,6 +4,9 @@ datasources:
   - name: Prometheus
     type: prometheus
     access: proxy
+    # 显式 UID：dashboard 的模板变量引用它。
+    # 不写 UID 时 Grafana 会生成一个不可预测的值，dashboard 会找不到数据源。
+    uid: prometheus
     url: http://prometheus:9090
     isDefault: true
     editable: false

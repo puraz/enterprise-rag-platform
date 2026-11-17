@@ -121,6 +121,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: compose config
         run: docker compose config --quiet
+      - name: compose config（s3 profile）
+        run: docker compose -f compose.yaml -f deploy/docker/compose.s3.yml --profile s3 config --quiet
+      - name: compose config（observability profile）
+        run: docker compose --profile observability config --quiet
 
   regression:
     name: 离线回归（需已建库）

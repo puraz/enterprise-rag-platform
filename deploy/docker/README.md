@@ -165,10 +165,12 @@ services:
 make obs-up
 ```
 
-- Prometheus 抓取 `api:8000/health/metrics`（规则复用
-  `deploy/observability/prometheus/alerts.yml`）。
-- Grafana 自动加载 `deploy/observability/grafana/dashboard.json`。
-- Worker 没有 HTTP 指标端点，暂不抓取（见 observability README）。
+- Prometheus 同时抓取：
+  - `api:8000/health/metrics`
+  - `worker:9101/metrics`（worker 进程内的 metrics 守护线程）
+- 告警规则复用 `deploy/observability/prometheus/alerts.yml`。
+- Grafana 自动加载 `deploy/observability/grafana/dashboard.json`，
+  datasource UID 固定为 `prometheus`，dashboard 用 `${DS_PROMETHEUS}` 变量引用。
 
 ## 7. 没内置什么，为什么
 

@@ -55,15 +55,21 @@ docker run -d --name grafana -p 3000:3000 grafana/grafana:latest
 路由 label 用**路由模板**（`/api/v1/documents/{doc_id}`）而不是实际路径。
 404 归入 `__unmatched__`。
 
-### 为什么 worker 指标暂不抓取
+### Worker 指标如何暴露
 
-Worker 没有 HTTP 端点。两种方案各有代价：
+Worker 没有业务 HTTP 端点，但可以设置 `RAG_WORKER__METRICS_PORT=9101`
+在进程内启动一个只暴露 `/metrics` 的守护线程（`prometheus_client.start_http_server`）。
+Docker compose 默认开启，Prometheus 抓取 `worker:9101/metrics`。
 
+多副本场景三种方案：
+
+- **逐实例抓取**（每个副本一个 target，配合服务发现）——当前实现最直接；
 - **多进程模式**（`PROMETHEUS_MULTIPROC_DIR`）：需要 sidecar 暴露共享目录；
 - **Pushgateway**：适合批处理，但"进程消失后指标残留"会让
   `tasks_inflight` 之类的 Gauge 永久显示假值。
 
-留到 A15 压测时按实际部署形态决定。
+默认 `metrics_port=0`（关闭）：不需要监控 worker 的部署不额外开端口；
+指标端口只应对监控网络开放。
 
 ### 告警阈值的依据
 

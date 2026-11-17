@@ -711,7 +711,11 @@ class ChatService:
             # 路由层会通过 `attach_metrics` 注入。
             metrics = self._metrics
         if metrics is not None:
-            from rag_core.metrics import record_llm_call, record_retrieval
+            from rag_core.metrics import (
+                record_citation,
+                record_llm_call,
+                record_retrieval,
+            )
 
             record_retrieval(
                 metrics,
@@ -719,6 +723,13 @@ class ChatService:
                 duration_s=time.perf_counter() - started,
                 result_count=len(materials),
             )
+            # 引用质量：locate_failed 已包含在 citations_built 里，
+            # 不能对同一条既记 located 又记 failed（会双计）。
+            located_count = citation_stats.citations_built - citation_stats.locate_failed
+            for _ in range(located_count):
+                record_citation(metrics, located=True)
+            for _ in range(citation_stats.locate_failed):
+                record_citation(metrics, located=False)
             record_llm_call(
                 metrics,
                 task=ModelTaskType.CHAT.value,

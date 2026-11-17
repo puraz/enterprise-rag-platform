@@ -28,10 +28,15 @@ scrape_configs:
           service: api
 
   # Worker 没有 HTTP 端点。两种暴露方式：
-  # 1) 多进程模式 + 一个 sidecar 暴露 /metrics（本配置未展开）
-  # 2) Pushgateway（适合批处理型 worker，但要处理"进程消失后指标残留"）
-  #
-  # 这里先注释掉，等 A15 压测确定 worker 的指标暴露方式。
-  # - job_name: rag-worker
-  #   static_configs:
-  #     - targets: ["host.docker.internal:9101"]
+  # 1) `RAG_WORKER__METRICS_PORT=9101`：worker 进程内起一个只暴露 /metrics 的
+  #    守护线程（本仓库已实现，docker compose 默认开启）；
+  # 2) Pushgateway（适合批处理型 worker，但要处理“进程消失后指标残留”）。
+  # 多副本场景应使用服务发现逐个抓取，而不是下面的静态单 target。
+  - job_name: rag-worker
+    metrics_path: /metrics
+    # 需要 worker 进程设置 RAG_WORKER__METRICS_PORT=9101；
+    # 未设置时该 target 会 down，这是预期（指标端口默认关闭）。
+    static_configs:
+      - targets: ["host.docker.internal:9101"]
+        labels:
+          service: worker

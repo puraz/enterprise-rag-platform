@@ -21,3 +21,14 @@ scrape_configs:
       - targets: ["api:8000"]
         labels:
           service: api
+
+  - job_name: rag-worker
+    # Worker 没有业务 HTTP 服务，但通过 RAG_WORKER__METRICS_PORT=9101
+    # 启动了一个只暴露 /metrics 的守护线程。
+    # 多副本部署时应改成服务发现（每个副本一个 target），
+    # 静态列表在扩缩容后会与真实副本数脱节。
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["worker:9101"]
+        labels:
+          service: worker

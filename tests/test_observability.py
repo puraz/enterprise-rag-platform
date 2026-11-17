@@ -423,6 +423,37 @@ def test_record_helpers_update_multiple_metrics() -> None:
     assert 'rag_ratelimit_denied_total{policy="tenant_chat"}' in body
 
 
+def test_metric_names_do_not_leak_into_namespace() -> None:
+    """指标名不能被说明文字污染。
+
+    回归用例：`Counter(name, doc, labels, 说明字符串, registry=...)`
+    的第 4 个位置参数是 Prometheus 的 `namespace`，不是注释。
+    写错会把指标名变成 `strategy:..._rag_retrieval_total`，
+    Prometheus 查询/告警/dashboard 全部找不到——而且没有任何报错。
+    """
+    metrics = build_metrics()
+    metrics.retrieval_total.labels(strategy="hybrid").inc()
+    metrics.llm_tokens.labels(task="chat", model="m", kind="input").observe(10)
+    metrics.tasks_processed.labels(task_type="parse", outcome="succeeded").inc()
+    metrics.cache_operations.labels(namespace="perm", result="hit").inc()
+
+    body = render_metrics(metrics).decode("utf-8")
+    metric_names = {line.split()[2] for line in body.splitlines() if line.startswith("# TYPE ")}
+
+    for expected in (
+        "rag_retrieval_total",
+        "rag_llm_tokens",
+        "rag_tasks_processed_total",
+        "rag_cache_operations_total",
+    ):
+        assert expected in metric_names, f"缺少指标 {expected}；实际：{sorted(metric_names)}"
+
+    polluted = [
+        name for name in metric_names if name.startswith(("strategy:", "kind:", "outcome:"))
+    ]
+    assert polluted == [], f"指标名被位置参数污染：{polluted}"
+
+
 def test_metrics_registry_is_isolated_per_instance() -> None:
     """每个 Metrics 实例有独立 registry（测试可以拿干净的）。
 

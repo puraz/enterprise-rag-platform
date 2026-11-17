@@ -1,0 +1,2 @@
+# 保持目录存在：Grafana 会读取 provisioning/plugins 与 provisioning/alerting，
+# 目录缺失时会打 ERROR（不影响运行，但会污染日志）。

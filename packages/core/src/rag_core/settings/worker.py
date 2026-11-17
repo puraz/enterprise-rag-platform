@@ -69,6 +69,24 @@ class WorkerSettings(BaseModel):
     可能需要几分钟，设短了会把正常任务误判为卡死。
     """
 
+    metrics_port: int = Field(default=0, ge=0, le=65535)
+    """Worker 指标 HTTP 端口。0 = 不启动。
+
+    Worker 没有业务 HTTP 端点，但 Prometheus 需要主动抓取。
+    容器里由 compose 设为 9101；进程内用 `prometheus_client.start_http_server`
+    起一个守护线程，只暴露 `/metrics`。
+
+    **默认 0 关闭**：不是所有部署都需要抓 worker，且指标端口应只对
+    监控网络开放（生产用网络策略限制，不要暴露到公网）。
+    """
+
+    metrics_host: str = "127.0.0.1"
+    """指标服务监听地址。
+
+    默认只监听回环地址（最小暴露面）；Docker compose 显式设为 0.0.0.0，
+    让 Prometheus 能通过容器网络访问。生产不要把指标端口暴露到公网。
+    """
+
     max_concurrency: int = Field(default=2, ge=1, le=16)
     """同时处理的任务数。
 

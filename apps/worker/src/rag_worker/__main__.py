@@ -119,6 +119,9 @@ async def run(settings: Settings) -> int:
     storages = build_all_storages(settings)
     embedding_provider: Any = None
     tracer: Any = None
+    # `start_http_server` 返回 (httpd, thread)，没有全局 stop 函数；
+    # 必须在 finally 里显式 shutdown + server_close，否则退出时端口/线程残留。
+    metrics_httpd: Any = None
 
     try:
         # 启动期就探一次：连不上立刻以退出码 1 结束，
@@ -161,16 +164,37 @@ async def run(settings: Settings) -> int:
             tenant_session_factory=lambda tenant_id: database.transaction(tenant_id=tenant_id),
         )
 
-        # 指标：worker 没有 HTTP 端点，这里只构建并挂到引擎上。
-        # 生产上通过 Pushgateway 推送或由独立的 metrics 进程暴露
-        # （多进程模式下 PROMETHEUS_MULTIPROC_DIR 让各 worker 写入共享目录）。
+        # 指标：构建并挂到引擎上；可选启动 /metrics HTTP 端点供 Prometheus 抓取。
+        #
+        # Worker 没有业务 HTTP 服务，如果不主动暴露，Prometheus 只能抓到
+        # API 的指标，dashboard 的 Worker 面板会永远是空的。
+        # 多副本部署时每个实例各暴露一个端口，Prometheus 用服务发现逐个抓取；
+        # 也可以用 PROMETHEUS_MULTIPROC_DIR + sidecar，本步骤保留单进程方案。
         from rag_core.metrics import build_metrics
 
-        engine.attach_metrics(build_metrics())
+        metrics = build_metrics()
+        engine.attach_metrics(metrics)
+        metrics_server_started = False
+        if settings.worker.metrics_port:
+            from prometheus_client import start_http_server
+
+            metrics_httpd, _metrics_thread = start_http_server(
+                settings.worker.metrics_port,
+                addr=settings.worker.metrics_host,
+                registry=metrics.registry,
+            )
+            metrics_server_started = True
+            log.info(
+                "worker_metrics_server_started",
+                addr=settings.worker.metrics_host,
+                port=settings.worker.metrics_port,
+                path="/metrics",
+            )
         log.info(
             "worker_metrics_ready",
             multiproc=settings.env.is_production_like,
-            note="指标已接入；多副本场景需 PROMETHEUS_MULTIPROC_DIR",
+            exposed=metrics_server_started,
+            note="多副本场景建议 PROMETHEUS_MULTIPROC_DIR 或逐实例抓取",
         )
 
         # 追踪器：未配置凭证时用 LocalTracer（内存记录），
@@ -194,6 +218,11 @@ async def run(settings: Settings) -> int:
     finally:
         # 一定要关：连接池不释放会让 PG 侧连接数缓慢泄漏。
         # 用 suppress 是因为关闭失败不该覆盖上面的退出码。
+        if metrics_httpd is not None:
+            with contextlib.suppress(Exception):
+                metrics_httpd.shutdown()
+            with contextlib.suppress(Exception):
+                metrics_httpd.server_close()
         with contextlib.suppress(Exception):
             await database.close()
         # 释放 embedding 模型（占 GPU 显存/内存）。不释放会让进程

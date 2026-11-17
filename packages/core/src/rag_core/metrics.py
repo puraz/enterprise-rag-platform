@@ -175,9 +175,8 @@ class Metrics:
         # ---- 检索 ----
         self.retrieval_total = Counter(
             "rag_retrieval_total",
-            "检索次数",
+            "检索次数（strategy: vector / hybrid / with_rerank，低基数）",
             ["strategy"],
-            """strategy: vector / hybrid / with_rerank。低基数。""",
             registry=r,
         )
         self.retrieval_duration = Histogram(
@@ -215,9 +214,8 @@ class Metrics:
         )
         self.llm_tokens = Histogram(
             "rag_llm_tokens",
-            "LLM token 用量",
+            "LLM token 用量（kind: input / output / cached）",
             ["task", "model", "kind"],
-            """kind: input / output / cached。""",
             buckets=TOKEN_BUCKETS,
             registry=r,
         )
@@ -265,9 +263,8 @@ class Metrics:
         # ---- Worker ----
         self.tasks_processed = Counter(
             "rag_tasks_processed_total",
-            "Worker 处理的任务数",
+            "Worker 处理的任务数（outcome: succeeded / failed / dead）",
             ["task_type", "outcome"],
-            """outcome: succeeded / failed / dead。""",
             registry=r,
         )
         self.tasks_inflight = Gauge(
@@ -286,9 +283,8 @@ class Metrics:
         # ---- 缓存 ----
         self.cache_operations = Counter(
             "rag_cache_operations_total",
-            "缓存操作数",
+            "缓存操作数（result: hit / miss / error）",
             ["namespace", "result"],
-            """result: hit / miss / error。""",
             registry=r,
         )
         self.cache_hit_ratio = Gauge(
