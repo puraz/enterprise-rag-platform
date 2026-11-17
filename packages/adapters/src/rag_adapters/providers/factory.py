@@ -16,9 +16,12 @@
 
 ## Reranker 的现状
 
-A5 不实现真实 reranker（用户选择推到 A11）。工厂返回 `NoOpReranker`，
-保证代码路径完整——`docs/PROMPT.md` 的降级链里
-"Reranker 挂 → 只用 RRF"就是这个行为。
+`RAG_RERANKER__PROVIDER` 默认 `none`（直通），可选 `local_bge`
+（sentence-transformers CrossEncoder）。是否参与检索由
+`RAG_RETRIEVAL__USE_RERANK` 控制——**两个开关分开**：
+换模型与"开不开这个节点"是两件事。
+"Reranker 挂 → 只用 RRF"的降级由调用方（`ChatService`）实现，
+而不是在工厂里静默换成 NoOp（那会让评估"看起来开了但没跑"）。
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from rag_adapters.providers.bge import LocalBGEEmbedding
+from rag_adapters.providers.bge_reranker import LocalBGEReranker
 from rag_adapters.providers.embedding import (
     EmbeddingProvider,
     NoOpReranker,
@@ -91,21 +95,22 @@ def build_embedding_provider(settings: Settings) -> EmbeddingProvider:
 # ---------------------------------------------------------------- Reranker
 
 _RERANKER_BUILDERS: dict[str, Callable[[Settings], RerankerProvider]] = {
-    # A11 会加：
-    # "local_bge": lambda s: LocalBGEReranker(s.reranker),
-    # "cohere": lambda s: CohereReranker(s.reranker),
     "none": lambda settings: NoOpReranker(),
+    "local_bge": lambda settings: LocalBGEReranker(settings.reranker),
 }
 
 
 def build_reranker(settings: Settings) -> RerankerProvider:
     """按配置构造 Reranker。
 
-    A5 只有 `none`（直通）。A11 加真实实现时在这里注册即可，
-    调用方代码不变。
+    未知实现抛 `ConfigError`（与 LLM 工厂一致）：静默回退到 `NoOp`
+    会让"本想开重排却实际没跑"变成看不见的配置事故。
     """
-    name = getattr(settings, "reranker_provider", "none")
-    builder = _RERANKER_BUILDERS.get(name, _RERANKER_BUILDERS["none"])
+    name = settings.reranker.provider
+    builder = _RERANKER_BUILDERS.get(name)
+    if builder is None:
+        known = ", ".join(sorted(_RERANKER_BUILDERS))
+        raise ConfigError(f"未知的 Reranker 实现 {name!r}（可选：{known}）")
     return builder(settings)
 
 
@@ -115,3 +120,7 @@ def available_llm_providers() -> tuple[str, ...]:
 
 def available_embedding_providers() -> tuple[str, ...]:
     return tuple(sorted(_EMBEDDING_BUILDERS))
+
+
+def available_reranker_providers() -> tuple[str, ...]:
+    return tuple(sorted(_RERANKER_BUILDERS))

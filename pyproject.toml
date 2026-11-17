@@ -123,6 +123,8 @@ module = [
     "openpyxl.*",
     "pytesseract.*",
     "docx.*",
+    # jieba 0.42 没有 py.typed / stubs（纯 Python，运行时稳定）
+    "jieba.*",
     # Langfuse 是可选依赖（A14）：未安装时应该降级而不是让 mypy 报错
     "langfuse.*",
 ]

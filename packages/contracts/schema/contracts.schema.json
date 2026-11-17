@@ -2553,6 +2553,7 @@
         },
         "refused": {
           "default": false,
+          "description": "是否拒答：材料不足，或生成后自省判定答案缺乏材料支撑。流式场景下 `done` 是权威状态（已发出的 delta 应被覆盖）",
           "title": "Refused",
           "type": "boolean"
         },
@@ -2565,7 +2566,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "拒答原因；生后自省不通过时为 insufficient_evidence"
         },
         "citations": {
           "items": {
@@ -2600,7 +2602,7 @@
         },
         "degraded": {
           "default": false,
-          "description": "是否走了降级路径（供应商降级/rerank 挂）",
+          "description": "是否走了降级/告警路径：供应商降级、rerank 挂，或自省判定答案缺乏材料支撑但按 flag 策略保留了答案",
           "title": "Degraded",
           "type": "boolean"
         }

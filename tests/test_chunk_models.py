@@ -20,6 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from rag_adapters.retrieval.keyword import extract_keywords, tokenize_for_index
 from rag_contracts.enums.retrieval import ChunkType
 from rag_db.models.chunk import EMBEDDING_DIM, IndexVersion
 from rag_db.repositories import ChunkRepository, IndexVersionRepository
@@ -513,6 +514,84 @@ async def test_keyword_search_finds_matching_chunk(db_session: AsyncSession) -> 
     results = await repo.search_keyword(tenant_id=tenant_id, keywords=["reimbursement"], limit=10)
     assert len(results) == 1
     assert "reimbursement" in results[0][0].content
+
+
+async def test_keyword_search_chinese_with_presegmented_text(
+    db_session: AsyncSession,
+) -> None:
+    """中文关键词检索：`search_text` 预分词后能按词命中并按 ts_rank 排序。
+
+    这条测试是 ADR 0003 结论的修正：之前 `simple` 分词器不认中文，
+    关键词路零命中。现在写入侧用 jieba 预分词，查询侧用同一分词器，
+    `simple` 按空格切词即可。
+    """
+    tenant_id = await _make_tenant(db_session)
+    user_id = await _make_user(db_session)
+    kb_id = await _make_kb(db_session, tenant_id, user_id)
+    doc_id, version_id = await _make_doc_chain(db_session, tenant_id, kb_id, user_id)
+    repo = ChunkRepository(db_session)
+    iv_id = await _make_index_version(db_session, tenant_id=tenant_id, kb_id=kb_id)
+
+    contents = [
+        "一线城市出差住宿每晚最多可报销 600 元",
+        "二线城市出差住宿每晚最多可报销 400 元",
+        "出差申请需提前三个工作日提交",
+    ]
+    payloads = []
+    for index, content in enumerate(contents):
+        payload = _chunk_payload(index, content, None)
+        payload["search_text"] = tokenize_for_index(content)
+        payloads.append(payload)
+
+    await repo.bulk_create(
+        tenant_id=tenant_id,
+        knowledge_base_id=kb_id,
+        document_id=doc_id,
+        document_version_id=version_id,
+        chunks=payloads,
+        index_version_id=iv_id,
+    )
+
+    keywords = extract_keywords("二线城市住宿标准是多少")
+    results = await repo.search_keyword(
+        tenant_id=tenant_id, keywords=keywords, knowledge_base_ids=[kb_id], limit=10
+    )
+
+    assert results, "中文关键词检索必须能命中（不能再是零命中）"
+    assert "400" in results[0][0].content, (
+        f"同时命中二线/城市/住宿的 chunk 应排最前，实际：{[c.content for c, _ in results]}"
+    )
+
+
+async def test_keyword_search_chinese_needs_presegmentation(db_session: AsyncSession) -> None:
+    """**反面证明**：没有预分词的中文整句搜不到。
+
+    这条测试解释了为什么历史数据必须跑
+    `scripts/backfill_search_text.py`——不跑的话 FTS 回退到 content，
+    而 `simple` 把整句当一个 token。
+    """
+    tenant_id = await _make_tenant(db_session)
+    user_id = await _make_user(db_session)
+    kb_id = await _make_kb(db_session, tenant_id, user_id)
+    doc_id, version_id = await _make_doc_chain(db_session, tenant_id, kb_id, user_id)
+    repo = ChunkRepository(db_session)
+    iv_id = await _make_index_version(db_session, tenant_id=tenant_id, kb_id=kb_id)
+
+    await repo.bulk_create(
+        tenant_id=tenant_id,
+        knowledge_base_id=kb_id,
+        document_id=doc_id,
+        document_version_id=version_id,
+        chunks=[_chunk_payload(0, "一线城市出差住宿每晚最多可报销 600 元", _vector(1))],
+        index_version_id=iv_id,
+    )
+
+    results = await repo.search_keyword(tenant_id=tenant_id, keywords=["住宿"], limit=10)
+
+    assert results == [], (
+        "未预分词时 simple 分词器把整句当一个 token，`住宿` 不应命中——"
+        "如果这里命中了，说明 PG 行为变了，ADR 0009 的前提需要重审"
+    )
 
 
 # ==================================================== 父子块

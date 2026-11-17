@@ -126,6 +126,9 @@ class Metrics:
     # ---- 引用 ----
     citations_total: Counter = field(init=False)
 
+    # ---- 自省（生成后拦幻觉）----
+    self_check_total: Counter = field(init=False)
+
     # ---- 限流 ----
     ratelimit_denied: Counter = field(init=False)
 
@@ -238,6 +241,16 @@ class Metrics:
             "引用产出情况",
             # located: 定位成功 / failed；这个比值反映"引用是否靠谱"
             ["located"],
+            registry=r,
+        )
+
+        # ---- 自省 ----
+        self.self_check_total = Counter(
+            "rag_self_check_total",
+            "生成后自省结果",
+            # result: supported / unsupported / error。低基数。
+            # **不要加 query / message_id**：它们会让时间序列爆炸。
+            ["result"],
             registry=r,
         )
 
@@ -397,6 +410,15 @@ def record_task(
 
 def record_citation(metrics: Metrics, *, located: bool) -> None:
     metrics.citations_total.labels(located="located" if located else "failed").inc()
+
+
+def record_self_check(metrics: Metrics, *, result: str) -> None:
+    """记录一次生成后自省。result: supported / unsupported / error。
+
+    只看 `unsupported` 的绝对数不够：还要与总问答数做比值才能看出
+    "模型写答案时不守材料"的比例是否在上升。
+    """
+    metrics.self_check_total.labels(result=result).inc()
 
 
 def record_ratelimit_denied(metrics: Metrics, *, policy: str) -> None:

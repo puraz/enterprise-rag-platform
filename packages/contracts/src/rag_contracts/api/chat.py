@@ -168,12 +168,8 @@ class MessageItem(BaseModel):
     )
     created_at: datetime
     # 用户反馈（刷新页面后要能回显"已点赞"，否则用户会重复点）
-    rating: FeedbackRating | None = Field(
-        default=None, description="用户反馈：like / dislike"
-    )
-    feedback_reason: FeedbackReason | None = Field(
-        default=None, description="点踩原因"
-    )
+    rating: FeedbackRating | None = Field(default=None, description="用户反馈：like / dislike")
+    feedback_reason: FeedbackReason | None = Field(default=None, description="点踩原因")
 
     # 用量（仅有助手消息）
     input_tokens: int = Field(default=0, ge=0)
@@ -256,14 +252,28 @@ class ChatDonePayload(BaseModel):
 
     message_id: uuid.UUID
     conversation_id: uuid.UUID
-    refused: bool = False
-    refusal_reason: RefusalReason | None = None
+    refused: bool = Field(
+        default=False,
+        description=(
+            "是否拒答：材料不足，或生成后自省判定答案缺乏材料支撑。"
+            "流式场景下 `done` 是权威状态（已发出的 delta 应被覆盖）"
+        ),
+    )
+    refusal_reason: RefusalReason | None = Field(
+        default=None, description="拒答原因；生后自省不通过时为 insufficient_evidence"
+    )
     citations: list[Citation] = Field(default_factory=list)
     input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
     cost_usd: float = Field(default=0.0, ge=0)
     latency_ms: int = Field(default=0, ge=0)
-    degraded: bool = Field(default=False, description="是否走了降级路径（供应商降级/rerank 挂）")
+    degraded: bool = Field(
+        default=False,
+        description=(
+            "是否走了降级/告警路径：供应商降级、rerank 挂，"
+            "或自省判定答案缺乏材料支撑但按 flag 策略保留了答案"
+        ),
+    )
 
 
 __all__ = [

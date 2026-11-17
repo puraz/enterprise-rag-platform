@@ -180,9 +180,7 @@ class KnowledgeBaseRepository:
         ]
         if access_filter is not None:
             conditions.append(access_filter)
-        result = await self._session.execute(
-            select(KnowledgeBase).where(*conditions).limit(1)
-        )
+        result = await self._session.execute(select(KnowledgeBase).where(*conditions).limit(1))
         return result.scalar_one_or_none()
 
     async def update_metadata(
@@ -413,6 +411,29 @@ class DocumentRepository:
             stmt = stmt.where(Document.deleted_at.is_(None))
         result = await self._session.execute(stmt.limit(1))
         return result.scalar_one_or_none()
+
+    async def get_titles(
+        self, *, tenant_id: uuid.UUID, document_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, str]:
+        """批量取文档标题（引用展示用）。
+
+        **必须批量**：检索结果最多 `final_limit`（默认 5）条，
+        逐条查标题是不起眼的 N+1——单次看不慢，压测时是连接池
+        被占满的常见原因。
+
+        未命中的 ID 不出现在返回 dict 里，调用方自己回退到"未知文档"。
+        """
+        unique_ids = list(dict.fromkeys(document_ids))
+        if not unique_ids:
+            return {}
+
+        result = await self._session.execute(
+            select(Document.id, Document.title).where(
+                Document.tenant_id == tenant_id,
+                Document.id.in_(unique_ids),
+            )
+        )
+        return {row[0]: str(row[1]) for row in result}
 
     async def list_by_kb(
         self,
@@ -688,9 +709,7 @@ class DocumentRepository:
         ]
         if access_filter is not None:
             conditions.append(access_filter)
-        result = await self._session.execute(
-            select(Document).where(*conditions).limit(1)
-        )
+        result = await self._session.execute(select(Document).where(*conditions).limit(1))
         return result.scalar_one_or_none()
 
     async def get_current_version(self, *, doc_id: uuid.UUID) -> DocumentVersion | None:
@@ -705,9 +724,7 @@ class DocumentRepository:
         )
         return result.scalar_one_or_none()
 
-    async def reset_for_retry(
-        self, *, tenant_id: uuid.UUID, doc_id: uuid.UUID
-    ) -> Document | None:
+    async def reset_for_retry(self, *, tenant_id: uuid.UUID, doc_id: uuid.UUID) -> Document | None:
         """把失败文档重置为 PENDING，返回更新后的行。
 
         ## 为什么要清 `error_code` / `error_message`

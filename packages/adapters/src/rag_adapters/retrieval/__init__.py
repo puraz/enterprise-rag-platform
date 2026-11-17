@@ -17,6 +17,7 @@
 | 模块 | 内容 |
 |---|---|
 | `fusion.py` | RRF 融合（只用排名，免疫分数量纲差异） |
+| `keyword.py` | 中文关键词提取（面向召回，关键词路的输入） |
 | `state.py` | 图状态与配置（每个节点一个开关） |
 | `graph.py` | 检索图节点 + 提示词构造 |
 """
@@ -34,8 +35,14 @@ from rag_adapters.retrieval.graph import (
     RetrievalGraph,
     SelfChecker,
     VectorSearcher,
+    build_answerability_prompt,
     build_generation_prompt,
     build_self_check_prompt,
+)
+from rag_adapters.retrieval.keyword import (
+    extract_keywords,
+    extract_keywords_async,
+    tokenize_for_index,
 )
 from rag_adapters.retrieval.state import (
     RetrievalConfig,
@@ -55,8 +62,12 @@ __all__ = [
     "RetrievedChunk",
     "SelfChecker",
     "VectorSearcher",
+    "build_answerability_prompt",
     "build_generation_prompt",
     "build_self_check_prompt",
+    "extract_keywords",
+    "extract_keywords_async",
     "fuse_two",
     "reciprocal_rank_fusion",
+    "tokenize_for_index",
 ]

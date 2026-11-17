@@ -2,6 +2,11 @@
 
 > 日期：2026-11-15　环境：bge-m3 (CUDA) + DeepSeek + pgvector
 > 复现：`uv run python tests/eval/run_eval.py --label <标签> [--keyword]`
+>
+> **后续（2026-11-17）**：本文的"中文分词不可用"与"reranker 未实现"
+> 已在 ADR 0009 解决（jieba 预分词 + 内置 FTS、`LocalBGEReranker`），
+> 生产链路也已接入 `RetrievalGraph`。本文保留为"当时的数据与结论"，
+> 不再作为现状说明。
 
 ## 1. 评估基线（30 条查询，3 份制度文档，37 chunk）
 

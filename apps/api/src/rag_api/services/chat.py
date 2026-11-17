@@ -63,21 +63,29 @@ import asyncio
 import json
 import time
 import uuid
-from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from sqlalchemy import text
 
 from rag_adapters.providers.embedding import EmbeddingProvider, EmbeddingTask
 from rag_adapters.providers.llm import LLMMessage, LLMProvider, LLMRole
-from rag_adapters.retrieval.citations_builder import Material, assemble_citations
+from rag_adapters.retrieval.citations_builder import (
+    AssemblyStats,
+    Material,
+    assemble_citations,
+)
 from rag_adapters.retrieval.graph import (
+    RetrievalGraph,
     build_answerability_prompt,
     build_generation_prompt,
+    build_self_check_prompt,
 )
+from rag_adapters.retrieval.keyword import extract_keywords_async
 from rag_adapters.retrieval.selfcheck import (
     REFUSAL_MESSAGE,
+    SelfCheckResult,
     parse_self_check_output,
     should_refuse,
 )
@@ -101,6 +109,7 @@ from rag_db.models.conversation import Conversation, Message
 from rag_db.repositories import (
     AuditRepository,
     ConversationRepository,
+    DocumentRepository,
     MessageRepository,
 )
 from rag_db.repositories.audit import ModelCallRepository
@@ -157,14 +166,17 @@ class ChatService:
         embedder: EmbeddingProvider,
         settings: Any,
         retrieval_config: RetrievalConfig | None = None,
+        reranker: Any = None,
         metrics: Any = None,
     ) -> None:
         self._session = session
         self._llm = llm
         self._embedder = embedder
+        self._reranker = reranker
         self._settings = settings
         self._conversations = ConversationRepository(session)
         self._messages = MessageRepository(session)
+        self._documents = DocumentRepository(session)
         self._chunks = ChunkRepository(session)
         self._index_versions = IndexVersionRepository(session)
         self._model_calls = ModelCallRepository(session)
@@ -238,6 +250,8 @@ class ChatService:
                     error_code = str(final_event.data.get("code_name", ""))
                 else:
                     details["refused"] = bool(final_event.data.get("refused"))
+                    details["refusal_reason"] = final_event.data.get("refusal_reason")
+                    details["degraded"] = bool(final_event.data.get("degraded"))
                     details["citation_count"] = len(final_event.data.get("citations") or [])
                     details["input_tokens"] = int(final_event.data.get("input_tokens") or 0)
                     details["output_tokens"] = int(final_event.data.get("output_tokens") or 0)
@@ -473,8 +487,11 @@ class ChatService:
 
         # ---- 流式生成 ----
         prompt = build_generation_prompt(
+            # 检索用独立化问题（指代已消解），生成带上历史提供上下文。
+            # 历史不是证据：提示词里已明确约束（见 build_generation_prompt）。
             query=retrieval_state.rewritten_query or query,
             materials=_as_chunks(materials),
+            history=history,
         )
         messages = [LLMMessage(role=LLMRole.USER, content=prompt)]
 
@@ -525,6 +542,54 @@ class ChatService:
         answer = "".join(collected)
         gen_latency_ms = int((time.perf_counter() - gen_started) * 1000)
 
+        # ---- 生成后自省：答案里的事实是否都有材料依据 ----
+        #
+        # ## 为什么这是独立的一次调用
+        #
+        # `answerability`（上面，生成前）判断"材料能否回答" → 决定拒答；
+        # `support`（这里，生成后）判断"答案有没有编" → 拦幻觉。
+        # 两者语义不同，混用会让"模型碰巧拒答"被当成"有支撑"而通过
+        # （A11 实测，见 ADR 0003）。
+        #
+        # ## 流式带来的限制
+        #
+        # 答案已经逐 token 发给用户，无法"撤销"。所以默认动作是 `flag`：
+        # 保留答案，`done.degraded=true` + 指标/审计供观察；
+        # 配置为 `refuse` 时把库里的内容替换为拒答，并在 `done` 里
+        # 返回 `refused=true`（`done` 是权威状态，前端据此覆盖已渲染文本）。
+        support: SelfCheckResult | None = None
+        self_check_failed = False
+        if self._config.use_self_check and answer.strip():
+            support = await self._judge_support(
+                tenant_id=tenant_id,
+                query=retrieval_state.rewritten_query or query,
+                answer=answer,
+                materials=materials,
+            )
+            if support is None:
+                self._record_self_check_metric(result="error")
+            elif not support.can_answer and support.raw_output:
+                # raw_output 为空 = 解析失败（保守判 false）。解析失败不应
+                # 触发拒答：一次 JSON 格式抖动不该让用户拿不到任何答案。
+                self_check_failed = True
+                log.warning(
+                    "answer_not_supported_by_materials",
+                    message_id=str(assistant.id),
+                    reason=support.reason[:200],
+                )
+                self._record_self_check_metric(result="unsupported")
+            else:
+                self._record_self_check_metric(result="supported")
+
+        self_check_refused = self_check_failed and self._config.self_check_refuse
+        if self_check_refused:
+            log.warning(
+                "answer_replaced_by_refusal",
+                message_id=str(assistant.id),
+                note="self_check_action=refuse：生成后自省未通过",
+            )
+            answer = REFUSAL_MESSAGE
+
         # ---- 组装引用（生成结束后，按答案里的 [n] 标记）----
         #
         # ## 为什么必须等到生成结束
@@ -543,12 +608,18 @@ class ChatService:
         # - 片段级定位（`locate_in_chunk`）：quote 是答案那句话对应的原文，
         #   不是整块 chunk 的前 300 字；
         # - `visible_document_ids` 二次校验，防越权引用混进答案。
-        citations_result, citation_stats = assemble_citations(
-            answer=answer,
-            materials=materials,
-            visible_document_ids=visible_document_ids,
-        )
-        citations = citations_result.citations
+        if self_check_refused:
+            # 答案已被替换为拒答：它没有任何引用，不能保留原答案的引用
+            # （否则用户看到"拒答 + 3 条来源"，语义自相矛盾）。
+            citations: list[Citation] = []
+            citation_stats = AssemblyStats()
+        else:
+            citations_result, citation_stats = assemble_citations(
+                answer=answer,
+                materials=materials,
+                visible_document_ids=visible_document_ids,
+            )
+            citations = citations_result.citations
 
         # ---- 落库：消息 + 成本 ----
         usage = _extract_usage(usage_holder)
@@ -577,6 +648,16 @@ class ChatService:
             latency_ms=int((time.perf_counter() - started) * 1000),
             citations=[c.model_dump(mode="json") for c in citations],
         )
+        if self_check_refused:
+            # 自省判"没有材料支撑"：与"材料不足"共用 insufficient_evidence，
+            # 不新增枚举值（发布过的枚举不能改，前端会硬编码）。
+            await self._session.execute(
+                text("UPDATE messages SET refused = true, refusal_reason = :r WHERE id = :mid"),
+                {
+                    "r": RefusalReason.INSUFFICIENT_EVIDENCE.value,
+                    "mid": assistant.id,
+                },
+            )
         await self._conversations.add_cost(conversation_id=conversation_id, cost_usd=cost_usd)
 
         # 检索元信息（B4 链路可视化用）
@@ -589,6 +670,25 @@ class ChatService:
                         "candidate_count": len(retrieval_state.candidates),
                         "final_count": len(retrieval_state.final),
                         "rewritten_query": retrieval_state.rewritten_query,
+                        # 双路召回的真实贡献：融合后看不出"关键词路到底有没有命中"，
+                        # 必须单独记各路原始条数（ADR 0003 的教训）。
+                        "source_counts": retrieval_state.source_counts,
+                        "reranked": retrieval_state.reranked,
+                        "strategy": self._retrieval_strategy(),
+                        # 生成后自省：`supported=None` 且 enabled=true 表示调用失败
+                        # （不是"支持"）。管理端要能区分这两种情况。
+                        "self_check": {
+                            "enabled": self._config.use_self_check,
+                            # raw_output 为空 = 解析失败：记为 None（“没判断出来”），
+                            # 不能写成 false（那会被误读成“确认无支撑”）。
+                            "supported": (
+                                None
+                                if support is None or not support.raw_output
+                                else support.can_answer
+                            ),
+                            "failed": self_check_failed,
+                            "action": "refuse" if self_check_refused else "flag",
+                        },
                         # 引用质量指标：让管理端能看出"模型是不是经常
                         # 引用不存在的编号"（out_of_range）与"引用了但
                         # 定位不到原文"（locate_failed）。两者都不报错，
@@ -615,7 +715,7 @@ class ChatService:
 
             record_retrieval(
                 metrics,
-                strategy="chat",
+                strategy=self._retrieval_strategy(),
                 duration_s=time.perf_counter() - started,
                 result_count=len(materials),
             )
@@ -636,14 +736,18 @@ class ChatService:
             {
                 "message_id": str(assistant.id),
                 "conversation_id": str(conversation_id),
-                "refused": False,
-                "refusal_reason": None,
+                "refused": self_check_refused,
+                "refusal_reason": (
+                    RefusalReason.INSUFFICIENT_EVIDENCE.value if self_check_refused else None
+                ),
                 "citations": [c.model_dump(mode="json") for c in citations],
                 "input_tokens": usage[0],
                 "output_tokens": usage[1],
                 "cost_usd": round(cost_usd, 8),
                 "latency_ms": int((time.perf_counter() - started) * 1000),
-                "degraded": False,
+                # flag 模式：答案保留但标记"有材料不支撑的事实"，前端可展示警示；
+                # refuse 模式不是降级（是安全动作），因此为 false。
+                "degraded": self_check_failed and not self_check_refused,
             },
         )
 
@@ -659,7 +763,14 @@ class ChatService:
         conversation: Conversation,
         permission_ctx: Any = None,
     ) -> tuple[Any, list[Material], set[uuid.UUID]]:
-        """执行检索，把结果转成 `Material`（含页信息）。
+        """执行检索（向量 + 关键词 → RRF → 可选 rerank），回填成 `Material`。
+
+        ## 职责边界
+
+        这个方法的职责是**把检索图接到数据库与权限上**：
+        - 构造向量/关键词/改写/重排的闭包（它们需要 tenant、ACL、索引版本）；
+        - 跑 `RetrievalGraph`（融合与重排的算法在 adapters 里，可单测）；
+        - 按最终排名回填位置信息与文档标题（引用高亮需要）。
 
         ## 多轮的关键：先用历史做独立化改写
 
@@ -669,24 +780,13 @@ class ChatService:
 
         **只有多轮（history 非空）才改写**：首轮问题是完整的，
         改写反而可能引入偏差（且多花一次 LLM 调用）。
+
+        ## 返回的 `Material.relevance_score` 是**向量距离**
+
+        RRF 分与 rerank 分都是"越大越相关"，而引用契约是"余弦距离，
+        0 最相关"。这里用 `vector_distance_by_id` 单独留存向量距离，
+        关键词独有的 chunk 则为 None（"不知道距离"比"方向相反的分数"好）。
         """
-        # ---- 独立化改写（多轮必需）----
-        retrieval_query = query
-        if history and self._config.use_rewrite:
-            standalone = await self._standalone_query(
-                tenant_id=tenant_id, query=query, history=history
-            )
-            if standalone:
-                retrieval_query = standalone
-                log.info(
-                    "query_standalone_rewritten",
-                    original_length=len(query),
-                    standalone_length=len(standalone),
-                    history_turns=len(history) // 2,
-                )
-
-        query_vector = await self._embedder.embed_one(retrieval_query, task=EmbeddingTask.QUERY)
-
         # 检索范围：请求指定 > 会话绑定 > 租户内全部
         kb_ids = knowledge_base_ids or (
             [conversation.knowledge_base_id] if conversation.knowledge_base_id else None
@@ -697,62 +797,180 @@ class ChatService:
         # **这是安全边界，不是优化**。检索返回的是文档正文，不过滤等于
         # 用户能通过提问把无权文档的内容问出来。
         #
-        # ## 为什么用 `confidentiality_filter_for_chunks` 而不是
-        #    `document_access_filter`
+        # ## 为什么用 `confidentiality_filter_for_chunks`
         #
-        # 两者语义相同（未删除 + 密级 ≤ 上限 + 库可见），但**生成的 SQL 不同**：
+        # 它用 `Chunk.document_id.in_(SELECT documents.id WHERE ...)`，
+        # 是纯子查询，塞进 `select(Chunk).where(...)` 不会污染 FROM 子句。
+        # 而 `document_access_filter` 直接引用 `Document.xxx` 列，会生成
+        # `FROM chunks, documents` 的**笛卡尔积**（无 join 条件），
+        # SECRET 内容照样漏出来，且不报错。
         #
-        # - `document_access_filter` 直接引用 `Document.xxx` 列。把它塞进
-        #   `select(Chunk).where(...)` 时，SQLAlchemy 会把 `documents` 表加进
-        #   FROM 且**没有 join 条件** —— 变成 `FROM chunks, documents` 的
-        #   笛卡尔积。实测就是这样：过滤条件对着"所有文档"求值，
-        #   而不是"这条 chunk 所属的文档"，SECRET 内容照样漏出来。
-        #
-        # - `confidentiality_filter_for_chunks` 用
-        #   `Chunk.document_id.in_(SELECT documents.id WHERE ...)`，
-        #   是纯子查询，不会污染 FROM 子句。**chunk 级查询必须用它。**
-        #
-        # 这个差异不报错、不告警，只有"逐角色对比检索结果"的测试能发现
-        # （见 tests/test_acl_retrieval.py）。
+        # 向量路与关键词路**必须共用同一个 filter**：漏一路等于全漏，
+        # 而且 RRF 只看排名，越权项会被融合抬到更前面。
         access_filter: Any = None
         if permission_ctx is not None:
             from rag_api.permissions.acl import confidentiality_filter_for_chunks
 
             access_filter = confidentiality_filter_for_chunks(permission_ctx)
 
-        hits: list[tuple[Any, float]] = []
-        if kb_ids:
-            for kb_id in kb_ids:
-                version = await self._index_versions.get_active(knowledge_base_id=kb_id)
-                if version is None:
-                    continue
-                page = await self._chunks.search_vector(
+        # 开了重排但没有 provider：显式降级到融合顺序（写日志，不静默）。
+        config = self._config
+        if config.use_rerank and self._reranker is None:
+            log.warning(
+                "rerank_enabled_without_provider",
+                note="use_rerank=true 但未装配 reranker，本次退化为 RRF 顺序",
+            )
+            config = replace(config, use_rerank=False)
+
+        # **向量距离必须单独留存**：RRF 之后 `state.candidates[].score`
+        # 变成 RRF 分（越大越相关），rerank 之后又变成模型分。
+        # 而 `Citation.relevance_score` 的契约是"余弦距离，0 最相关"，
+        # 直接把图中的 score 写进去会让前端显示方向相反的分数。
+        vector_distance_by_id: dict[str, float] = {}
+
+        async def vector_search(query: str, *, limit: int) -> list[tuple[str, str, float]]:
+            """向量路：按知识库分别取 active 索引版本后检索。"""
+            started = time.perf_counter()
+            query_vector = await self._embedder.embed_one(query, task=EmbeddingTask.QUERY)
+
+            hits: list[tuple[Any, float]] = []
+            if kb_ids:
+                for kb_id in kb_ids:
+                    # **必须带 active 索引版本**：重建期间库里有两套向量，
+                    # 不带版本过滤会返回重复内容且距离不可比。
+                    version = await self._index_versions.get_active(knowledge_base_id=kb_id)
+                    if version is None:
+                        continue
+                    page = await self._chunks.search_vector(
+                        tenant_id=tenant_id,
+                        query_embedding=query_vector,
+                        knowledge_base_ids=[kb_id],
+                        limit=limit,
+                        max_distance=config.max_distance,
+                        index_version_ids=[version.id],
+                        access_filter=access_filter,
+                        candidate_multiplier=config.candidate_multiplier,
+                    )
+                    hits.extend(page)
+                hits.sort(key=lambda item: item[1])
+                hits = hits[:limit]
+            else:
+                # 未指定库：租户内全部（不带版本过滤，取全局最新）
+                hits = await self._chunks.search_vector(
                     tenant_id=tenant_id,
                     query_embedding=query_vector,
-                    knowledge_base_ids=[kb_id],
-                    limit=self._config.vector_limit,
-                    index_version_ids=[version.id],
+                    limit=limit,
+                    max_distance=config.max_distance,
                     access_filter=access_filter,
+                    candidate_multiplier=config.candidate_multiplier,
                 )
-                hits.extend(page)
-            hits.sort(key=lambda item: item[1])
-            hits = hits[: self._config.vector_limit]
-        else:
-            # 未指定库：租户内全部（也不带版本过滤，取全局最新）
-            hits = await self._chunks.search_vector(
+
+            for chunk, distance in hits:
+                vector_distance_by_id[str(chunk.id)] = distance
+
+            log.info(
+                "vector_search_completed",
+                limit=limit,
+                hits=len(hits),
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
+            )
+            return [(str(chunk.id), chunk.content, distance) for chunk, distance in hits]
+
+        async def keyword_search(query: str, *, limit: int) -> list[tuple[str, str, float]]:
+            """关键词路：jieba 提词后走 PostgreSQL 词项检索（ts_rank）。"""
+            keywords = await extract_keywords_async(query, max_keywords=config.max_keywords)
+            if not keywords:
+                return []
+            hits = await self._chunks.search_keyword(
                 tenant_id=tenant_id,
-                query_embedding=query_vector,
-                limit=self._config.vector_limit,
+                keywords=keywords,
+                knowledge_base_ids=kb_ids,
+                limit=limit,
                 access_filter=access_filter,
             )
+            return [(str(chunk.id), chunk.content, score) for chunk, score in hits]
 
-        materials: list[Material] = []
-        for chunk, distance in hits:
-            materials.append(
+        async def rewrite(query: str, *, history: list[tuple[str, str]]) -> str:
+            """首轮不改写：完整问题改写只会多一次 LLM 调用并可能引入偏差。"""
+            if not history:
+                return ""
+            return await self._standalone_query(tenant_id=tenant_id, query=query, history=history)
+
+        async def rerank(query: str, documents: Sequence[str]) -> list[float]:
+            """重排失败时退回融合顺序（降级链：Reranker 挂 → 只用 RRF）。
+
+            返回全 0 分而不是抛异常：图里是稳定排序，全 0 等于保留
+            入参顺序，即融合顺序。抛异常会让整个问答失败，
+            而"排序退化"比"没有答案"好得多。
+            """
+            if self._reranker is None:  # pragma: no cover - 构造时已保证
+                return [0.0] * len(documents)
+            try:
+                result = await self._reranker.rerank(query, list(documents))
+            except Exception as exc:
+                log.warning(
+                    "rerank_failed_fallback_to_fusion",
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:200],
+                )
+                return [0.0] * len(documents)
+            return list(result.scores)
+
+        graph = RetrievalGraph(
+            vector_searcher=vector_search,
+            # 关键词路总是提供实现，是否执行由 config.use_keyword 控制；
+            # 图会在构造时校验"开了开关必须有实现"。
+            keyword_searcher=keyword_search,
+            reranker=rerank if config.use_rerank else None,
+            rewriter=rewrite if config.use_rewrite else None,
+            # 生成后自省不属于检索图（图不负责生成）。图里保留这个开关
+            # 只用于构造期一致性校验；真正执行在 `chat_stream` 里，
+            # 所以这里把它置 false，避免"开了却没有 checker"的误报。
+            config=replace(config, use_self_check=False),
+        )
+        state = await graph.run(query, history=history)
+
+        # ---- 把检索结果回填成完整材料 ----
+        #
+        # 检索图只负责"选出哪些 chunk"（ID + 内容 + 分数）。引用需要
+        # 位置信息（页码/偏移/bbox）与文档标题，这些必须从库里回填。
+        final_ids: list[uuid.UUID] = []
+        for item in state.final:
+            try:
+                final_ids.append(uuid.UUID(item.chunk_id))
+            except ValueError:  # pragma: no cover - 检索器只返回数据库 ID
+                continue
+
+        chunks = await self._chunks.get_current_by_ids(
+            tenant_id=tenant_id,
+            chunk_ids=final_ids,
+            access_filter=access_filter,
+        )
+        chunk_by_id = {str(chunk.id): chunk for chunk in chunks}
+
+        # 标题批量查（逐条查是 N+1；`_document_title` 已删除）
+        titles = await self._documents.get_titles(
+            tenant_id=tenant_id,
+            document_ids=[chunk.document_id for chunk in chunks],
+        )
+
+        final_materials: list[Material] = []
+        for item in state.final:
+            chunk = chunk_by_id.get(item.chunk_id)
+            if chunk is None:
+                # 检索后被删除/换成旧版本：跳过而不是拼进 prompt。
+                # 这会让 materials 少于 final_limit，是正确行为。
+                log.info(
+                    "retrieved_chunk_missing_on_reload",
+                    chunk_id=item.chunk_id,
+                    note="检索后被删除或不再是当前版本",
+                )
+                continue
+            final_materials.append(
                 Material(
                     chunk_id=chunk.id,
                     document_id=chunk.document_id,
-                    document_title=await self._document_title(tenant_id, chunk.document_id),
+                    document_title=titles.get(chunk.document_id, "未知文档"),
                     chunk_index=chunk.chunk_index,
                     content=chunk.content,
                     char_start=chunk.char_start,
@@ -760,30 +978,13 @@ class ChatService:
                     page_no=chunk.page_no,
                     bbox=chunk.bbox,
                     section_path=tuple(chunk.section_path or ()),
-                    relevance_score=distance,
+                    # **只用向量距离**：RRF/rerank 的分数语义不同，
+                    # 写进 Citation 会让前端把"越大越相关"当成
+                    # "越大越不相关"（契约是余弦距离）。
+                    relevance_score=vector_distance_by_id.get(item.chunk_id),
                     pages=(),
                 )
             )
-
-        # 构造一个轻量 state 供上层取改写结果与耗时
-        from rag_adapters.retrieval.state import RetrievalState
-
-        state = RetrievalState(
-            query=query,
-            history=history,
-            # 只有真的改写成功才记，否则 None（表明"用的原问题"）
-            rewritten_query=retrieval_query if retrieval_query != query else None,
-        )
-        state.candidates = [
-            RetrievedChunk(
-                chunk_id=str(m.chunk_id),
-                content=m.content,
-                score=m.relevance_score or 0.0,
-            )
-            for m in materials
-        ]
-        state.final = state.candidates[: self._config.final_limit]
-        final_materials = materials[: self._config.final_limit]
 
         # 可见文档集：由**检索结果自身**推导。
         #
@@ -877,22 +1078,6 @@ class ChatService:
             return ""
         return rewritten
 
-    async def _document_title(self, tenant_id: uuid.UUID, document_id: uuid.UUID) -> str:
-        """取文档标题（引用展示用）。
-
-        每次检索都查一次标题会有 N+1：这里用单条查询批量拿
-        （见 `_build_citations` 的实际用法）。为了简单先逐条查，
-        但**限制在 final_limit（默认 5）以内**，影响可控。
-        """
-        from sqlalchemy import text
-
-        row = await self._session.execute(
-            text("SELECT title FROM documents WHERE id = :id AND tenant_id = :tid LIMIT 1"),
-            {"id": document_id, "tid": tenant_id},
-        )
-        value = row.scalar_one_or_none()
-        return str(value) if value is not None else "未知文档"
-
     async def _judge_answerability(
         self, *, tenant_id: uuid.UUID, query: str, materials: list[Material]
     ) -> Any:
@@ -926,6 +1111,70 @@ class ChatService:
             task_type=ModelTaskType.CHAT,
         )
         return parse_self_check_output(response.content)
+
+    async def _judge_support(
+        self, *, tenant_id: uuid.UUID, query: str, answer: str, materials: list[Material]
+    ) -> SelfCheckResult | None:
+        """生成后判断"答案中的事实是否都有材料依据"。
+
+        与 `_judge_answerability` 的区别（AGENTS.md 4.14）：
+        - answerability（生成前）→ 决定拒答；
+        - support（生成后）→ 拦幻觉，**不参与拒答决策**。
+
+        失败时返回 None 而不是"判为不支撑"：自省服务抖动不该
+        让所有答案都被标记为幻觉（那会让指标与告警全部失真）。
+        调用方区分"None"（没跑 / 失败）与"can_answer=False"（真的不支撑）。
+        """
+        prompt = build_self_check_prompt(
+            query=query,
+            answer=answer,
+            materials=[m.content for m in materials],
+        )
+        started = time.perf_counter()
+        try:
+            response = await self._llm.complete(
+                [LLMMessage(role=LLMRole.USER, content=prompt)],
+                temperature=0.0,
+                json_mode=True,
+                max_tokens=300,
+            )
+        except Exception as exc:
+            log.warning(
+                "support_check_failed",
+                error_type=type(exc).__name__,
+                note="自省调用失败，本次不标记答案",
+            )
+            return None
+
+        await self._record_cost(
+            tenant_id=tenant_id,
+            user_id=None,
+            conversation_id=None,
+            message_id=None,
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            task_type=ModelTaskType.EVALUATION,
+        )
+        return parse_self_check_output(response.content)
+
+    def _retrieval_strategy(self) -> str:
+        """指标/埋点里的策略名（低基数，可安全做 label）。"""
+        base = "hybrid" if self._config.use_keyword else "vector"
+        if self._config.use_rerank and self._reranker is not None:
+            return f"{base}+rerank"
+        return base
+
+    def _record_self_check_metric(self, *, result: str) -> None:
+        """记录自省结果（supported / unsupported / error）。"""
+        metrics = self._metrics
+        if metrics is None:
+            metrics = getattr(self._settings, "_metrics", None)
+        if metrics is None:
+            return
+        from rag_core.metrics import record_self_check
+
+        record_self_check(metrics, result=result)
 
     async def _mark_interrupted(
         self, *, assistant_id: uuid.UUID, content: str, started: float

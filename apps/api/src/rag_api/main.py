@@ -147,6 +147,7 @@ def _build_lifespan(settings: Settings) -> Any:
             # 只是多一个 httpx client。可接受，不值得为它加锁）
             app.state._llm_provider = None
             app.state._embedding_provider = None
+            app.state._reranker_provider = None
 
             log.info(
                 "model_providers_lazy",
@@ -154,8 +155,25 @@ def _build_lifespan(settings: Settings) -> Any:
                 llm_model=settings.llm.chat_model,
                 embedding_model=settings.embedding.model_name,
                 embedding_dim=settings.embedding.dimension,
+                reranker_provider=settings.reranker.provider,
+                reranker_model=settings.reranker.model_name,
+                retrieval_hybrid=settings.retrieval.use_keyword,
+                retrieval_rerank=settings.retrieval.use_rerank,
+                retrieval_self_check=settings.retrieval.use_self_check,
                 note="provider 在首次使用时构造；embedding 模型首次向量化时加载",
             )
+
+            # 配置矛盾要在启动时说出来：开了重排却没有 reranker，
+            # 请求层会让它退化为 RRF 顺序（不报 500），但启动日志必须能解释
+            # “为什么重排看起来没生效”。
+            if settings.retrieval.use_rerank and settings.reranker.provider == "none":
+                log.warning(
+                    "rerank_enabled_without_provider",
+                    impact="重排不会执行，检索使用 RRF 顺序",
+                    hint=(
+                        "设置 RAG_RERANKER__PROVIDER=local_bge，或关闭 RAG_RETRIEVAL__USE_RERANK"
+                    ),
+                )
 
             yield
         finally:
@@ -169,6 +187,13 @@ def _build_lifespan(settings: Settings) -> Any:
             if getattr(app.state, "_embedding_provider", None) is not None:
                 with contextlib.suppress(Exception):
                     await app.state._embedding_provider.aclose()
+            if getattr(app.state, "_reranker_provider", None) is not None:
+                # `NoOpReranker` 没有 aclose（没有资源需要释放），
+                # 这里用 getattr 判断而不是让 suppress 吞 AttributeError。
+                reranker_aclose = getattr(app.state._reranker_provider, "aclose", None)
+                if reranker_aclose is not None:
+                    with contextlib.suppress(Exception):
+                        await reranker_aclose()
             await redis.close()
             await database.close()
             log.info("shutdown_complete")
@@ -318,4 +343,24 @@ def get_embedding_provider(app: Any) -> Any:
 
     provider = build_embedding_provider(app.state.settings)
     app.state._embedding_provider = provider
+    return provider
+
+
+def get_reranker_provider(app: Any) -> Any:
+    """取（或首次构造）Reranker provider。
+
+    与 embedding 一样是**进程级单例**：`__init__` 只存配置，
+    CrossEncoder 在首次 `rerank` 时才加载（否则每个请求重读 280MB 权重）。
+
+    只有 `RAG_RETRIEVAL__USE_RERANK=true` 时路由层才会调用它——
+    避免"没开重排却加载了模型"。
+    """
+    existing = getattr(app.state, "_reranker_provider", None)
+    if existing is not None:
+        return existing
+
+    from rag_adapters.providers.factory import build_reranker
+
+    provider = build_reranker(app.state.settings)
+    app.state._reranker_provider = provider
     return provider

@@ -58,6 +58,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from rag_adapters.retrieval.state import RetrievalConfig
 from rag_api.deps import enforce_chat_ratelimit, get_db
 from rag_api.deps.pagination import PageQuery, page_query
 from rag_api.openapi import (
@@ -91,18 +92,51 @@ def _build_service(request: Request, session: AsyncSession) -> ChatService:
 
     **provider 必须是进程级单例**（挂在 app.state）：
     - LLM provider 内部有 httpx 连接池（每请求新建会泄漏 fd）；
-    - Embedding provider 持有 2GB 模型（每请求加载要 13 秒）。
+    - Embedding provider 持有 2GB 模型（每请求加载要 13 秒）；
+    - Reranker 也是本地模型（只在实际开启重排时才构造）。
+
+    检索配置在这里从 `Settings.retrieval` 映射成 `RetrievalConfig`：
+    `ChatService` 不直接依赖 `Settings`（它只需要运行时参数），
+    这样单测可以传任意配置而不必造一整份 Settings。
     """
     # **惰性构造**（见 main.get_llm_provider 的说明）：
     # 未配置 LLM 时这里会抛 ConfigError，由全局异常处理器转成
     # 503（而不是让整个 API 起不来）。
-    from rag_api.main import get_embedding_provider, get_llm_provider
+    from rag_api.main import (
+        get_embedding_provider,
+        get_llm_provider,
+        get_reranker_provider,
+    )
+
+    settings = get_settings()
+    retrieval = settings.retrieval
+    # 开了 use_rerank 但 provider=none 时，重排在融合顺序上做全 0 分排序，
+    # 纯属浪费。这里在装配期就把它关掉（配置错误要“显式降级”而不是静默跑空）。
+    use_rerank = retrieval.use_rerank and settings.reranker.provider != "none"
+
+    retrieval_config = RetrievalConfig(
+        use_keyword=retrieval.use_keyword,
+        use_rewrite=retrieval.use_rewrite,
+        use_rerank=use_rerank,
+        use_self_check=retrieval.use_self_check,
+        self_check_refuse=retrieval.self_check_refuse,
+        vector_limit=retrieval.vector_limit,
+        keyword_limit=retrieval.keyword_limit,
+        candidate_multiplier=retrieval.candidate_multiplier,
+        final_limit=retrieval.final_limit,
+        rerank_top_n=retrieval.rerank_top_n,
+        rrf_k=retrieval.rrf_k,
+        max_distance=retrieval.max_distance,
+        max_keywords=retrieval.max_keywords,
+    )
 
     return ChatService(
         session,
         llm=get_llm_provider(request.app),
         embedder=get_embedding_provider(request.app),
-        settings=get_settings(),
+        reranker=get_reranker_provider(request.app) if use_rerank else None,
+        settings=settings,
+        retrieval_config=retrieval_config,
         metrics=getattr(request.app.state, "metrics", None),
     )
 

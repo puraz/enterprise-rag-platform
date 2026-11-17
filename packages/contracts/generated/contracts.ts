@@ -928,14 +928,16 @@ export interface MessageItem {
 export interface ChatDonePayload {
   message_id: string;
   conversation_id: string;
+  /** 是否拒答：材料不足，或生成后自省判定答案缺乏材料支撑。流式场景下 `done` 是权威状态（已发出的 delta 应被覆盖） */
   refused?: boolean;
+  /** 拒答原因；生后自省不通过时为 insufficient_evidence */
   refusal_reason?: RefusalReason | null;
   citations?: Citation[];
   input_tokens?: number;
   output_tokens?: number;
   cost_usd?: number;
   latency_ms?: number;
-  /** 是否走了降级路径（供应商降级/rerank 挂） */
+  /** 是否走了降级/告警路径：供应商降级、rerank 挂，或自省判定答案缺乏材料支撑但按 flag 策略保留了答案 */
   degraded?: boolean;
 }
 

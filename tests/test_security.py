@@ -159,6 +159,17 @@ def test_trace_id_not_masked() -> None:
     assert redact_text(trace) == trace
 
 
+def test_hex_with_long_digit_run_not_masked() -> None:
+    r"""十六进制串里恰好有 16 位连续数字时，也不能当银行卡打码。
+
+    回归用例：`uuid4().hex` 生成 32 位十六进制，偶发出现 16 位以上
+    连续数字。旧规则 `(?<!\d)\d{16,19}(?!\d)` 会把中间一段打码，
+    导致 `request_id` 在日志里无法与响应头对应（实测全量测试偶发红）。
+    """
+    trace = "abcdefab1234567890123456abcdefab"
+    assert redact_text(trace) == trace
+
+
 def test_empty_and_none_safe() -> None:
     assert redact_text("") == ""
     assert redact_value(None) is None

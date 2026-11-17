@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Any
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     CheckConstraint,
+    Computed,
     DateTime,
     ForeignKey,
     Index,
@@ -54,7 +55,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from rag_contracts.enums.retrieval import ChunkType
@@ -127,6 +128,25 @@ class Chunk(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         Text,
         nullable=False,
         comment="chunk 文本内容",
+    )
+    search_text: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="",
+        server_default="",
+        comment=(
+            "jieba 预分词后的空格分隔词项（关键词检索用）。"
+            "必须与查询侧用同一分词器，否则中文 FTS 静默不命中"
+        ),
+    )
+    search_vector: Mapped[str | None] = mapped_column(
+        TSVECTOR,
+        Computed(
+            "to_tsvector('simple', coalesce(nullif(search_text, ''), content))",
+            persisted=True,
+        ),
+        nullable=True,
+        comment="search_text 的 tsvector（生成列，GIN 索引；空 search_text 回退到 content）",
     )
     # 送去 embedding 的实际文本。与 content 可能不同：
     # 结构化策略会在前面加章节路径前缀（"第三章 > 3.2 报销流程 > ..."），
@@ -245,6 +265,19 @@ class Chunk(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         Index("ix_chunks_parent", "parent_chunk_id"),
         # 内容去重
         Index("ix_chunks_content_hash", "tenant_id", "content_hash"),
+        # ---- 关键词检索（预分词 + 内置 FTS）----
+        #
+        # `search_text` 由 worker 用 jieba 预分词（空格分隔）；
+        # `search_vector` 是它的 tsvector 生成列。`simple` 分词器
+        # 按空格切词，于是无需 zhparser/pg_bigm 也能做中文词项检索。
+        #
+        # 空 search_text 回退到 content：直接 SQL 插入的测试/历史数据
+        # 仍能按英文词项检索，不会因为新列为空而“什么都搜不到”。
+        Index(
+            "ix_chunks_search_vector",
+            "search_vector",
+            postgresql_using="gin",
+        ),
         # 未向量化的 chunk（补偿任务扫描：embedding IS NULL）
         Index(
             "ix_chunks_pending_embedding",

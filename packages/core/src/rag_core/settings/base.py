@@ -26,6 +26,7 @@ from rag_core.settings.identity import IdentitySettings, OIDCSettings
 from rag_core.settings.llm import LLMSettings
 from rag_core.settings.ratelimit import RateLimitSettings
 from rag_core.settings.redis import RedisSettings
+from rag_core.settings.retrieval import RerankerSettings, RetrievalSettings
 from rag_core.settings.storage import StorageSettings
 from rag_core.settings.worker import WorkerSettings
 
@@ -97,6 +98,10 @@ class Settings(BaseSettings):
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     worker: WorkerSettings = Field(default_factory=WorkerSettings)
+    # 检索链路（召回/融合/重排/自省）与 reranker 模型分开配置：
+    # 前者是策略参数，后者是一次模型替换（不影响已入库向量）。
+    retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
+    reranker: RerankerSettings = Field(default_factory=RerankerSettings)
 
     @property
     def resolved_log_format(self) -> Literal["json", "console"]:

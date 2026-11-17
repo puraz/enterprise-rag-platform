@@ -314,6 +314,7 @@ async def _ingest_corpus(
     from rag_adapters.parsers.artifact import BlockRecord, PageRecord, dump_parsed, load_parsed
     from rag_adapters.parsers.factory import parse_document
     from rag_adapters.providers.factory import build_embedding_provider
+    from rag_adapters.retrieval.keyword import tokenize_for_index
     from rag_contracts.enums import DocumentFormat, DocumentStatus, DocumentVersionStatus
     from rag_db.repositories import BlobRepository, DocumentRepository
     from rag_db.repositories.chunk import ChunkRepository, IndexVersionRepository
@@ -446,6 +447,9 @@ async def _ingest_corpus(
                         {
                             "chunk_index": draft.chunk_index,
                             "content": draft.content,
+                            # 关键词路用预分词文本（与生产 worker 同一实现），
+                            # 否则 --keyword 评估仍会是零命中。
+                            "search_text": tokenize_for_index(draft.content),
                             "content_hash": draft.content_hash,
                             "chunk_type": draft.chunk_type,
                             "embedding_input": draft.embedding_input,
@@ -519,7 +523,7 @@ class GraphFlags:
 
 async def run_eval(*, label: str, k: int, flags: GraphFlags | None = None) -> Report:
     from rag_adapters.providers.embedding import EmbeddingTask
-    from rag_adapters.providers.factory import build_embedding_provider
+    from rag_adapters.providers.factory import build_embedding_provider, build_reranker
     from rag_core.db import Database
     from rag_core.settings import load_env_files
     from rag_db.repositories.chunk import ChunkRepository, IndexVersionRepository
@@ -528,6 +532,8 @@ async def run_eval(*, label: str, k: int, flags: GraphFlags | None = None) -> Re
     settings = get_settings()
     db = Database(settings)  # type: ignore[arg-type]
     provider = build_embedding_provider(settings)  # type: ignore[arg-type]
+    # 重排只在显式 `--rerank` 时构造（加载 cross-encoder 需要时间/内存）。
+    reranker = build_reranker(settings) if (flags and flags.rerank) else None
 
     cases = load_cases()
     results: list[CaseResult] = []
@@ -576,6 +582,23 @@ async def run_eval(*, label: str, k: int, flags: GraphFlags | None = None) -> Re
                     if fused:
                         retrieved = fused
 
+            # 重排：放在融合之后（重排要的是候选集，候选集由融合决定）。
+            # 评估里失败就保留原顺序——评估脚本不能因为模型不可用而中断，
+            # 但必须把"重排没生效"打印出来，否则指标会被误读。
+            if reranker is not None and retrieved:
+                try:
+                    scores = (
+                        await reranker.rerank(case.query, [content for content, _ in retrieved])
+                    ).scores
+                    if len(scores) == len(retrieved):
+                        pairs = list(zip(retrieved, scores, strict=True))
+                        pairs.sort(key=lambda pair: -pair[1])
+                        retrieved = [item for item, _score in pairs]
+                    else:
+                        print(f"  [warn] rerank 返回 {len(scores)} 个分数，跳过：{case.id}")
+                except Exception as exc:
+                    print(f"  [warn] rerank 失败，保留原顺序：{case.id} ({type(exc).__name__})")
+
             latency = (time.perf_counter() - case_started) * 1000
 
             # 第一个命中位置（1-based）
@@ -598,6 +621,10 @@ async def run_eval(*, label: str, k: int, flags: GraphFlags | None = None) -> Re
         return Report(label=label, k=k, results=results, elapsed_s=elapsed)
     finally:
         await provider.aclose()
+        if reranker is not None:
+            aclose = getattr(reranker, "aclose", None)
+            if aclose is not None:
+                await aclose()
         await db.close()
 
 
@@ -625,8 +652,9 @@ async def _run_hybrid(
     结论，用最简单的实现即可（如果简单实现都有增益，复杂实现只会更好）。
     """
     from rag_adapters.retrieval.fusion import fuse_two
+    from rag_adapters.retrieval.keyword import extract_keywords
 
-    keywords = _extract_keywords(query)
+    keywords = extract_keywords(query)
     if not keywords:
         return [(str(chunk.content), distance) for chunk, distance in vector_results]  # type: ignore[attr-defined]
 
@@ -648,69 +676,9 @@ async def _run_hybrid(
     ]
 
 
-# 中文疑问词与常见停用词。去掉它们再做关键词检索，
-# 否则 "什么"/"多少"/"怎么" 这些词会在所有文档里出现，污染 ts_rank。
-_QUESTION_WORDS = (
-    "多少",
-    "什么",
-    "怎么",
-    "怎样",
-    "如何",
-    "哪些",
-    "哪个",
-    "可以",
-    "能否",
-    "是否",
-    "需要",
-    "时候",
-    "多久",
-    "几天",
-    "吗",
-    "呢",
-    "的",
-    "了",
-    "有",
-)
-
-
-def _extract_keywords(query: str) -> list[str]:
-    """从中文查询里提取关键词。
-
-    **这不是好的分词器**——真正的中文分词需要 jieba / pg_bigm / zhparser。
-    A10 已记录待办：当前 `search_keyword` 用的 `simple` 分词器不认中文。
-
-    这里的近似做法：
-    1. 去掉疑问词与停用词（否则"什么""多少"在所有文档里都出现，
-       会让 ts_rank 全是噪声）；
-    2. 按标点切成短语；
-    3. 每个短语取 2~3 字滑窗（中文里 2 字词覆盖大部分实词）。
-
-    **限定关键词数量上限（8 个）**：关键词之间是 OR 关系，
-    词越多 OR 越宽、命中越多、排序越没意义，且 SQL 构造越慢。
-    实测 12+ 个关键词会把延迟从 6ms 推到 650ms 而毫无收益。
-    """
-    cleaned = query
-    for word in _QUESTION_WORDS:
-        cleaned = cleaned.replace(word, " ")
-    # 标点是天然短语边界
-    for punct in "，。？！、；：,.?!;:":
-        cleaned = cleaned.replace(punct, " ")
-
-    phrases = [p for p in cleaned.split() if len(p) >= 2]
-
-    pieces: list[str] = []
-    for phrase in phrases:
-        # 长短语整体也算一个关键词（命中时 ts_rank 权重更高）
-        if len(phrase) <= 6:
-            pieces.append(phrase)
-        for size in (3, 2):
-            for start in range(0, max(1, len(phrase) - size + 1)):
-                piece = phrase[start : start + size]
-                if len(piece) == size and piece not in pieces:
-                    pieces.append(piece)
-
-    # 去重并限制数量（少而精优于多而杂）
-    return list(dict.fromkeys(pieces))[:8]
+# 关键词提取已下沉到 `rag_adapters.retrieval.keyword.extract_keywords`：
+# 评估与生产必须用同一份实现，否则"评估里的混合检索"与"线上混合检索"
+# 是两套行为，指标不可迁移。
 
 
 def print_report(report: Report) -> None:

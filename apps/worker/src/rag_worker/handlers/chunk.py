@@ -66,12 +66,14 @@ chunker 产出用 `parent_index`（本批次下标）表达父子关系，
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import TYPE_CHECKING, Any
 
 from rag_adapters.chunkers.base import ChunkConfig, verify_chunks
 from rag_adapters.chunkers.factory import build_chunker
 from rag_adapters.parsers.artifact import ParsedArtifactError, load_parsed, read_all
+from rag_adapters.retrieval.keyword import tokenize_for_index
 from rag_contracts.enums import DocumentStatus, DocumentVersionStatus
 from rag_core.errors import NotFoundError
 from rag_core.logging import get_logger
@@ -227,10 +229,18 @@ class ChunkDocumentHandler:
             )
 
         # ---- 第一阶段：插入所有块（父块 parent 留空）----
+        #
+        # 关键词检索用预分词文本：必须在**写入时**算好（查询侧不重算），
+        # 否则每次检索都要对正文分词。jieba 是 CPU 密集操作，
+        # 放进线程池批量处理，避免阻塞 worker 的事件循环。
+        search_texts = await asyncio.to_thread(
+            lambda: [tokenize_for_index(draft.content) for draft in chunks]
+        )
         rows = [
             {
                 "chunk_index": draft.chunk_index,
                 "content": draft.content,
+                "search_text": search_text,
                 "content_hash": draft.content_hash,
                 "chunk_type": draft.chunk_type,
                 "embedding_input": draft.embedding_input,
@@ -245,7 +255,7 @@ class ChunkDocumentHandler:
                 "embedding": None,
                 "embedding_model": None,
             }
-            for draft in chunks
+            for draft, search_text in zip(chunks, search_texts, strict=True)
         ]
         await repo.bulk_create(
             tenant_id=version.tenant_id,

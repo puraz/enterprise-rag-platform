@@ -90,6 +90,23 @@ class RetrievalConfig:
     keyword_limit: int = 20
     """关键词检索召回条数。"""
 
+    candidate_multiplier: int = 4
+    """HNSW 候选倍数（第一段取 `limit × multiplier` 个候选）。
+
+    ACL 过滤只能在第二段做，第一段必须多取。过滤极严时 4 倍可能不够，
+    需要把条件下推到第一段（代价是失去 HNSW，见 ADR 0002）。
+    """
+
+    max_distance: float | None = None
+    """向量距离上限（余弦距离，0 最相关）。
+
+    **默认 None**：A11 实测有答案/无答案的距离区间重叠，阈值不能用于拒答
+    （见 ADR 0003）。保留它是为了特定场景（只要高置信命中）。
+    """
+
+    max_keywords: int = 8
+    """单次查询最多提取多少个关键词（OR 链越长，排序越没有意义）。"""
+
     final_limit: int = 5
     """最终送给 LLM 的材料条数。太多会稀释上下文且增加成本。"""
 
@@ -118,6 +135,17 @@ class RetrievalConfig:
 
     这是**唯一可靠的拒答机制**（距离阈值已验证不可行，见模块 docstring）。
     代价：一次额外的 LLM 调用。
+
+    注意：检索图本身不执行自省（它不负责生成），这个开关由调用方
+    （`ChatService`）读取；保留在图配置里是为了让"整条链路的开关"
+    只有一个来源，避免两套配置漂移。
+    """
+
+    self_check_refuse: bool = False
+    """自省未通过时是否把答案替换为拒答。
+
+    `False`（默认）：保留答案但标 `degraded=true`，先观察误报率；
+    `True`：替换为拒答文案（流已发出的 token 无法收回，`done` 是权威状态）。
     """
 
 
@@ -180,6 +208,16 @@ class RetrievalState:
 
     timings: dict[str, float] = field(default_factory=dict)
     """各节点耗时（毫秒）。B4 的链路可视化直接读它。"""
+
+    source_counts: dict[str, int] = field(default_factory=dict)
+    """各路召回的原始条数（vector / keyword），用于观测混合检索的真实贡献。
+
+    **不能用 `len(candidates)` 代替**：融合后一个条目可能来自两路，
+    也可能来自任一路，看不出"关键词路到底有没有命中"。
+    """
+
+    reranked: bool = False
+    """是否真的执行过重排（供 retrieval_meta 与告警判断）。"""
 
     def record_timing(self, node: str, started: float) -> None:
         self.timings[node] = (time.perf_counter() - started) * 1000

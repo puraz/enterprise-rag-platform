@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
@@ -48,6 +49,8 @@ from rag_adapters.providers.llm import (
     ProviderCapabilities,
     TokenUsage,
 )
+from rag_adapters.retrieval.keyword import tokenize_for_index
+from rag_adapters.retrieval.state import RetrievalConfig
 from rag_api.services.chat import ChatService
 from rag_contracts.enums import TenantRole
 
@@ -147,6 +150,49 @@ class _FakeSettings:
             return None
 
     llm = _LLM()
+
+
+class _FakeSelfCheckLLM(_FakeLLM):
+    """支持 `complete` 的 fake：第一次回答 answerability，第二次回答 support。
+
+    调用顺序是确定的：
+        1. `_judge_answerability`（生成前）→ `{"can_answer": ...}`
+        2. `_judge_support`（生成后）→ `{"supported": ...}`
+    用调用次数区分，避免在 fake 里猜提示词内容。
+    """
+
+    def __init__(
+        self,
+        answer_chunks: list[str],
+        *,
+        can_answer: bool = True,
+        supported: bool = False,
+    ) -> None:
+        super().__init__(answer_chunks)
+        self._can_answer = can_answer
+        self._supported = supported
+        self.complete_calls = 0
+
+    async def complete(
+        self,
+        messages: list[LLMMessage],
+        *,
+        model: str | None = None,
+        temperature: float = 0.7,
+        max_tokens: int | None = None,
+        json_mode: bool = False,
+        timeout_s: float | None = None,
+    ) -> LLMResponse:
+        self.complete_calls += 1
+        if self.complete_calls == 1:
+            payload = {"can_answer": self._can_answer, "reason": "fake"}
+        else:
+            payload = {"supported": self._supported, "reason": "fake"}
+        return LLMResponse(
+            content=json.dumps(payload),
+            model="fake-model",
+            usage=TokenUsage(input_tokens=5, output_tokens=2, cached_tokens=0),
+        )
 
 
 # ---------------------------------------------------------------- 数据准备
@@ -258,10 +304,10 @@ async def _seed(session: Any) -> dict[str, Any]:
         await session.execute(
             text(
                 "INSERT INTO chunks (id, tenant_id, knowledge_base_id, document_id, "
-                "document_version_id, chunk_index, content, chunk_level, is_current, "
+                "document_version_id, chunk_index, content, search_text, chunk_level, is_current, "
                 "char_start, char_end, content_hash, token_count, chunk_type, "
                 "chunk_metadata, created_at, updated_at) VALUES "
-                "(:i, :t, :k, :d, :v, 0, :c, 0, true, 0, :len, :h, 10, 'text', "
+                "(:i, :t, :k, :d, :v, 0, :c, :st, 0, true, 0, :len, :h, 10, 'text', "
                 "'{}'::jsonb, now(), now())"
             ),
             {
@@ -271,6 +317,7 @@ async def _seed(session: Any) -> dict[str, Any]:
                 "d": doc_id,
                 "v": version_id,
                 "c": content,
+                "st": tokenize_for_index(content),
                 "len": len(content),
                 "h": f"c{offset}".ljust(64, "0")[:64],
             },
@@ -312,14 +359,20 @@ def _permission_ctx(seed: dict[str, Any]) -> Any:
 
 
 async def _run_chat(
-    session: Any, seed: dict[str, Any], *, answer_chunks: list[str]
+    session: Any,
+    seed: dict[str, Any],
+    *,
+    answer_chunks: list[str],
+    llm: LLMProvider | None = None,
+    retrieval_config: RetrievalConfig | None = None,
 ) -> list[tuple[str, dict[str, Any]]]:
     """跑一次 chat_stream，收集 `(event, data)` 列表。"""
     service = ChatService(
         session,
-        llm=_FakeLLM(answer_chunks),
+        llm=llm or _FakeLLM(answer_chunks),
         embedder=_FakeEmbedder(),
         settings=_FakeSettings(),
+        retrieval_config=retrieval_config,
     )
     events: list[tuple[str, dict[str, Any]]] = []
     async for event in service.chat_stream(
@@ -453,9 +506,7 @@ async def test_citation_quote_is_located_fragment(db_session: Any) -> None:
     citation = done["citations"][0]
 
     # 定位成功时 quote 应包含答案那句话的核心片段
-    assert "600" in citation["quote"], (
-        f"quote 应包含答案引用的内容片段；实际 {citation['quote']!r}"
-    )
+    assert "600" in citation["quote"], f"quote 应包含答案引用的内容片段；实际 {citation['quote']!r}"
 
     # quote 必须是原文的子串（不能是模型改写后的句子）
     #
@@ -523,3 +574,110 @@ async def test_invisible_document_citation_is_dropped(db_session: Any) -> None:
     # 答案保留（不能因为引用被丢弃就改答案）
     assert "[2]" in result.answer
     assert stats.out_of_range == 0, "这不是越界，是可见性拒绝，不该计入 out_of_range"
+
+
+# ---------------------------------------------------------------- 混合检索与自省
+
+
+@pytest.mark.integration
+async def test_hybrid_retrieval_reaches_the_pipeline(db_session: Any) -> None:
+    """开启关键词路后，检索图、RRF、材料回填都能跑通。
+
+    之前的 `ChatService` 手写纯向量检索，`RetrievalGraph` 只在测试里用。
+    这条测试确认生产编排真的走了图。
+    """
+    async with db_session.begin_nested():
+        seed = await _seed(db_session)
+        events = await _run_chat(
+            db_session,
+            seed,
+            answer_chunks=["一线城市住宿每晚不超过 600 元 [1]。"],
+            retrieval_config=RetrievalConfig(use_keyword=True, use_rewrite=False),
+        )
+
+    retrieval = next(data for name, data in events if name == "retrieval")
+    assert retrieval["sources_found"] == 3
+    assert retrieval["refused"] is False
+
+    done = next(data for name, data in events if name == "done")
+    assert done["refused"] is False
+    assert len(done["citations"]) == 1
+
+
+@pytest.mark.integration
+async def test_self_check_flag_keeps_answer_but_marks_degraded(db_session: Any) -> None:
+    """生成后自省不通过 + `flag`：保留答案，但 `done.degraded=true`。
+
+    这是默认动作：先观察误报率，不因为一次判断就替用户丢掉答案。
+    """
+    async with db_session.begin_nested():
+        seed = await _seed(db_session)
+        llm = _FakeSelfCheckLLM(
+            ["一线城市住宿每晚不超过 600 元 [1]。"],
+            can_answer=True,
+            supported=False,
+        )
+        events = await _run_chat(
+            db_session,
+            seed,
+            answer_chunks=[],
+            llm=llm,
+            retrieval_config=RetrievalConfig(
+                use_keyword=False,
+                use_rewrite=False,
+                use_self_check=True,
+                self_check_refuse=False,
+            ),
+        )
+
+    done = next(data for name, data in events if name == "done")
+    assert done["refused"] is False, "flag 模式不能替用户丢答案"
+    assert done["degraded"] is True, "必须标记答案缺乏材料支撑"
+    assert len(done["citations"]) == 1
+    # 答案原样保留
+    deltas = "".join(data["text"] for name, data in events if name == "delta")
+    assert "600" in deltas
+
+
+@pytest.mark.integration
+async def test_self_check_refuse_replaces_answer_and_citations(db_session: Any) -> None:
+    """生成后自省不通过 + `refuse`：落库拒答、`done.refused=true`、无引用。
+
+    流式已经发出的 token 收不回来，所以 `done` 是权威状态：
+    前端必须用 done 覆盖已渲染的文本。
+    """
+    async with db_session.begin_nested():
+        seed = await _seed(db_session)
+        llm = _FakeSelfCheckLLM(
+            ["一线城市住宿每晚不超过 600 元 [1]。"],
+            can_answer=True,
+            supported=False,
+        )
+        events = await _run_chat(
+            db_session,
+            seed,
+            answer_chunks=[],
+            llm=llm,
+            retrieval_config=RetrievalConfig(
+                use_keyword=False,
+                use_rewrite=False,
+                use_self_check=True,
+                self_check_refuse=True,
+            ),
+        )
+
+        done = next(data for name, data in events if name == "done")
+        assert done["refused"] is True
+        assert done["refusal_reason"] == "insufficient_evidence"
+        assert done["citations"] == [], "拒答不能保留原答案的引用"
+        assert done["degraded"] is False, "拒答是安全动作，不是降级"
+
+        row = (
+            await db_session.execute(
+                text("SELECT content, refused, refusal_reason FROM messages WHERE id = :i"),
+                {"i": uuid.UUID(done["message_id"])},
+            )
+        ).one()
+        assert "根据现有资料无法回答" in str(row[0])
+        assert row[1] is True
+        assert row[2] == "insufficient_evidence"

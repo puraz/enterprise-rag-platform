@@ -38,6 +38,16 @@ from rag_db.models.chunk import Chunk, IndexVersion
 from rag_db.models.embedding import ChunkEmbedding
 
 
+def _quote_ts_token(token: str) -> str:
+    """把词项包成 tsquery 的『引号字面量』。
+
+    不包裹时，`E1024` 里的符号（`.`、`-`、`:`）会被当成 tsquery 操作符，
+    一个错误的关键词会让整条 SQL 报语法错误。包裹后所有字符都是词项本身，
+    内部单引号按 SQL 字面量规则双写。
+    """
+    return "'" + token.replace("'", "''") + "'"
+
+
 class ChunkRepository:
     """分块数据访问。"""
 
@@ -84,6 +94,10 @@ class ChunkRepository:
                 document_version_id=document_version_id,
                 chunk_index=item["chunk_index"],
                 content=item["content"],
+                # 关键词检索的预分词结果。调用方（worker）负责用
+                # `rag_adapters.retrieval.keyword.tokenize_for_index` 生成；
+                # 直接插入的测试/历史数据留空，FTS 表达式会回退到 content。
+                search_text=item.get("search_text") or "",
                 content_hash=item["content_hash"],
                 chunk_type=item.get("chunk_type", ChunkType.TEXT.value),
                 embedding_input=item.get("embedding_input"),
@@ -377,32 +391,51 @@ class ChunkRepository:
         limit: int = 10,
         access_filter: Any = None,
     ) -> list[tuple[Chunk, float]]:
-        """关键词检索（BM25 的简化替代：ts_rank 全文检索）。
+        """关键词检索（jieba 预分词 + PostgreSQL 内置 FTS + `ts_rank`）。
 
-        为什么先用 PG 全文检索而不是引入 OpenSearch：
-        `docs/PROMPT.md` 允许"PG 全文检索 + 中文分词"作为 SparseIndex 实现。
-        少一个中间件；中文分词精度不如专业 BM25，但起步够用。
-        `SparseIndex` 抽象层保证后续可换（A10）。
+        ## 为什么不直接用 `to_tsvector('simple', content)`
 
-        注意：默认的 `simple` 分词器不认识中文，会把整个句子当一个词。
-        A10 需要装 zhparser 或改用 pg_bigm / pg_trgm。
-        这里先用 `to_tsvector('simple', ...)` 让整条链路可跑通并写清限制。
+        `simple` 分词器**不认中文**：一整句中文是一个 token，
+        查询 `二线` 永远匹配不到「二线城市住宿标准」。ADR 0003 的评估
+        因此得到"关键词路零命中、混合检索零收益"的错误结论。
 
-        ## `access_filter` 与 `search_vector` 必须同时传
+        写入侧已经用 jieba 预分词（`chunks.search_text`），所以这里用
+        **同一表达式**（生成列 `search_vector`）建索引与查询：
 
-        双路检索（向量 + 关键词）做 RRF 融合。如果只给向量路加了 ACL
-        而关键词路没加，融合结果里会混进越权内容——而且因为 RRF 只看
-        排名，越权项可能被抬到前面。**漏一处等于全漏**。
+            to_tsvector('simple', coalesce(nullif(search_text, ''), content))
+
+        空 `search_text` 回退到 content：直接 SQL 插入的历史/测试数据
+        仍能按英文词项检索。中文历史数据需要跑
+        `scripts/backfill_search_text.py`。
+
+        ## 为什么用 `ts_rank` 而不是子串计数
+
+        `ts_rank` 计入词频与文档长度归一化；子串计数把"出现 5 次的
+        核心词"与"出现 1 次的偶然词"当成一样。没有真正的 IDF，
+        但已经远好于 ILIKE 的"包含即 1 分"。
+
+        ## `access_filter` 必须传
+
+        双路检索做 RRF 融合。只给向量路加 ACL 而关键词路没加，
+        越权内容会因"排名靠前"被融合抬到更前面——**漏一处等于全漏**
+        （`tests/test_acl_retrieval.py` 盯着这一点）。
         """
-        if not keywords:
+        cleaned = [keyword.strip() for keyword in keywords if keyword.strip()]
+        if not cleaned:
             return []
 
-        # 用 OR 连接关键词：任一命中即可，rank 排序
-        query_text = " | ".join(keyword.replace("'", "''") for keyword in keywords)
-        rank = func.ts_rank(
-            func.to_tsvector("simple", Chunk.content),
-            func.to_tsquery("simple", query_text),
-        ).label("rank")
+        # 上限保护：OR 链过长会让 SQL 解析与执行都变慢（ADR 0003）。
+        cleaned = cleaned[:32]
+        query_text = " | ".join(_quote_ts_token(keyword) for keyword in cleaned)
+
+        # 直接查生成列 `search_vector`（索引就建在它上面）。
+        #
+        # 不要在这里重写 `to_tsvector(...)` 表达式：即使 SQL 文本相同，
+        # planner 也不保证把表达式匹配回生成列，最坏情况是**全表扫描**
+        # 而不报错。生成列已包含"空 search_text 回退到 content"的逻辑。
+        search_vector = Chunk.search_vector
+        tsquery = func.to_tsquery("simple", query_text)
+        rank = func.ts_rank(search_vector, tsquery).label("rank")
 
         conditions = [
             Chunk.tenant_id == tenant_id,
@@ -410,20 +443,56 @@ class ChunkRepository:
             # 父块不参与检索（与 search_vector 保持一致——否则父块与子块
             # 同时出现，同一内容占两个结果位）
             Chunk.chunk_level == 0,
-            func.to_tsvector("simple", Chunk.content).op("@@")(
-                func.to_tsquery("simple", query_text)
-            ),
+            search_vector.op("@@")(tsquery),
         ]
         if knowledge_base_ids:
             conditions.append(Chunk.knowledge_base_id.in_(list(knowledge_base_ids)))
         if access_filter is not None:
             conditions.append(access_filter)
 
-        stmt = select(Chunk, rank).where(*conditions).order_by(rank.desc()).limit(limit)
+        stmt = (
+            select(Chunk, rank)
+            .where(*conditions)
+            # 同分时短 chunk 优先（信息密度高），最后用 id 保证稳定排序
+            # （不稳定排序会让评估结果不可复现）。
+            .order_by(rank.desc(), func.length(Chunk.content).asc(), Chunk.id)
+            .limit(limit)
+        )
 
         result = await self._session.execute(stmt)
-        # 关键词检索的 rank 越大越相关，统一转成"距离"语义（越小越好）取负
+        # 借用"距离语义"（越小越好）让调用方不必区分两路的方向：
+        # 取负后，向量路与关键词路都是"升序 = 更相关"。
         return [(row[0], -float(row[1])) for row in result]
+
+    async def get_current_by_ids(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        chunk_ids: Sequence[uuid.UUID],
+        access_filter: Any = None,
+    ) -> list[Chunk]:
+        """按 ID 取当前 chunk（用于把检索结果回填成完整材料）。
+
+        **必须带 tenant_id 与 is_current**：检索图只传 ID，回填时
+        再校验一次归属与时效，避免"检索后被删/被换成旧版本"导致
+        把过期内容拼进 prompt。`access_filter` 是第二道防线
+        （ID 来自已过滤的检索，但多传一次成本极低）。
+
+        返回顺序由调用方决定（按检索排名组装，不能按数据库返回顺序）。
+        """
+        if not chunk_ids:
+            return []
+
+        conditions = [
+            Chunk.id.in_(list(chunk_ids)),
+            Chunk.tenant_id == tenant_id,
+            Chunk.is_current.is_(True),
+        ]
+        if access_filter is not None:
+            conditions.append(access_filter)
+
+        result = await self._session.execute(select(Chunk).where(*conditions))
+        return list(result.scalars())
 
     async def count_by_version(self, *, document_version_id: uuid.UUID) -> int:
         result = await self._session.execute(
