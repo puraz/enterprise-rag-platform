@@ -67,18 +67,25 @@ make logs        # 跟踪日志
 | 入口 | 地址 |
 |---|---|
 | Web | http://localhost:8080 |
-| API 文档 | http://localhost:8000/docs |
-| 健康检查 | http://localhost:8000/health/ready |
-| MinIO 控制台 | http://localhost:9001 |
+| API 文档 | http://localhost:8010/docs |
+| 健康检查 | http://localhost:8010/health/ready |
 | Prometheus（profile） | http://localhost:9090 |
 | Grafana（profile） | http://localhost:3000 |
+
+默认对象存储是本地卷 `appstorage`（`/app/.data/storage`），不启动 MinIO。
+需要验证 S3 时：
+
+```bash
+docker compose -f compose.yaml -f deploy/docker/compose.s3.yml \
+               --profile s3 up -d --build
+# MinIO 控制台：http://localhost:9001
+```
 
 首次启动流程：
 
 ```
 postgres 初始化（建 rag_app + pgvector）
   → migrate 跑 alembic upgrade head
-  → minio-init 建 bucket
   → api / worker 启动
   → web 启动
 ```
@@ -167,6 +174,7 @@ make obs-up
 
 | 组件 | 状态 | 原因 |
 |---|---|---|
+| MinIO | 可选 `s3` profile | 默认本地存储避免镜像拉取成为启动阻塞；需要验证 S3 时显式开启 |
 | Keycloak | 未内置 | 仓库目前没有 realm 导入配置；本地用 dev 登录。接 OIDC 时按 `RAG_OIDC__*` 配置真实 IdP 即可 |
 | Langfuse | 未内置 | v3 依赖 ClickHouse 等一整套组件，单机 compose 会显著变重；先用 Prometheus + 结构化日志 |
 | Admin 前端 | 未内置 | 仓库当前只有 `apps/web`，没有 admin 应用，不虚构服务 |
@@ -180,7 +188,7 @@ make obs-up
 | migrate 一直失败 | `make logs` 看是否连错库；确认 `RAG_APP_PASSWORD` 与 postgres 初始化时一致。**首次启动后改密码不会自动同步到已初始化的数据卷**，需 `make down-v` 重建 |
 | api 启动即退出 | 检查 `RAG_DATABASE__*`；compose 已硬编码容器服务名，不要再注入宿主 `.env` 的整体内容 |
 | 问答 503 | 没配 `RAG_LLM__API_KEY`；其它接口不受影响（惰性构造） |
-| 上传失败 | 检查 `minio-init` 是否成功、bucket 是否存在；S3 必须 path-style |
-| 端口已被占用 | 宿主已有 PG(5432)/API(8000) 时，本栈用 5433/8000；停掉本地 API 或改 compose 端口映射 |
+| 上传失败 | 默认使用本地卷；若开了 `s3` profile，检查 `minio-init` 与 bucket；S3 必须 path-style |
+| 端口已被占用 | 宿主已有 PG(5432)/API(8000) 时，本栈用 5433/8010；停掉本地 API 或改 compose 端口映射 |
 | 第一次问答很慢 | 在下载/加载 bge-m3（约 2.2GB）；看 `make logs` 的 `embedding_model_loaded` |
 | OOM | api/worker 各加载一份 bge-m3，建议 ≥8GB 内存；也可先只起 api 做问答验证 |

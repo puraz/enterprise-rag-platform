@@ -1,0 +1,33 @@
+# 可选：把默认本地存储切换为 MinIO（S3 协议），用于验证 S3 适配层。
+#
+# 用法：
+#   docker compose -f compose.yaml -f deploy/docker/compose.s3.yml \
+#                  --profile s3 up -d --build
+#
+# 注意：minio/minio 镜像在部分国内加速器不在白名单里。如果拉取失败，
+# 可替换 `compose.yaml` 里的 image 为你可访问的 MinIO 镜像/私有仓库。
+#
+# 本地存储（默认）与 S3 的唯一区别就是下面这些环境变量；
+# 业务代码完全走 StorageBackend 抽象，不需要改代码。
+
+x-s3-env: &s3-env
+  RAG_STORAGE__BACKEND: "s3"
+  RAG_STORAGE__S3_BUCKET: "rag-documents"
+  RAG_STORAGE__S3_ENDPOINT_URL: "http://minio:9000"
+  RAG_STORAGE__S3_ACCESS_KEY: "${MINIO_ROOT_USER:-ragminio}"
+  RAG_STORAGE__S3_SECRET_KEY: "${MINIO_ROOT_PASSWORD:-ragminio123}"
+  RAG_STORAGE__S3_USE_SSL: "false"
+  RAG_STORAGE__S3_ADDRESSING_STYLE: "path"
+
+services:
+  api:
+    environment: *s3-env
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+
+  worker:
+    environment: *s3-env
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully

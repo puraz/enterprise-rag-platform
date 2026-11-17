@@ -26,7 +26,13 @@
 
 # syntax=docker/dockerfile:1
 
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
+FROM python:3.12-slim-bookworm AS builder
+
+# 为什么不用 ghcr.io/astral-sh/uv 镜像：
+# 部分网络环境无法直连 ghcr.io，而 Docker Hub 通常已有镜像加速。
+# 用 pip 固定版本安装 uv，依赖来源与项目其它依赖一致。
+ARG UV_VERSION=0.13.8
+RUN pip install --no-cache-dir "uv==${UV_VERSION}"
 
 # 需要 C 工具链的场景：个别依赖只有 sdist（如 jieba 的 setup.py）。
 RUN apt-get update \
@@ -52,7 +58,7 @@ RUN uv sync --all-packages --no-dev --frozen
 
 # ---------------------------------------------------------------------------
 
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS runtime
+FROM python:3.12-slim-bookworm AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -80,7 +86,10 @@ COPY --from=builder /app/pyproject.toml /app/uv.lock /app/
 COPY scripts ./scripts
 
 # HuggingFace 缓存目录：命名卷挂载点，必须先存在且属于运行用户。
-RUN mkdir -p /home/rag/.cache/huggingface \
+# 本地存储目录必须属于运行用户：
+# 命名卷首次挂载时会继承镜像内目录的所有者；不存在的话 Docker 会创建
+# 一个 root 拥有的空目录，worker 启动时 mkdir 直接 Permission denied。
+RUN mkdir -p /home/rag/.cache/huggingface /app/.data/storage \
     && chown -R rag:rag /home/rag /app
 
 USER rag
@@ -88,4 +97,4 @@ USER rag
 EXPOSE 8000
 
 # 默认启动 API；Worker 与迁移在 compose 里用 command 覆盖。
-CMD ["uvicorn", "rag_api.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*"]
+CMD ["uvicorn", "--factory", "rag_api.main:create_app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*"]

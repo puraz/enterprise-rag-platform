@@ -4,7 +4,7 @@ UV ?= uv
 
 .PHONY: help sync lint fmt typecheck test check config check-deps test-int test-all \
         migrate migrate-new migrate-down migrate-check gen-contracts gen-contracts-check verify-rls \
-        up down down-v ps logs docker-check docker-migrate docker-backfill obs-up obs-down
+        up down down-v ps logs docker-check docker-migrate docker-backfill obs-up obs-down s3-up
 
 # Compose v2（插件形态）。若本机只有 docker-compose 独立二进制，
 # 用法：make up COMPOSE="docker-compose"
@@ -76,9 +76,13 @@ docker-check:  ## 检查 docker daemon 与 compose 插件
 	@docker info >/dev/null 2>&1 || (echo "Docker daemon 未运行：sudo systemctl start docker"; exit 1)
 	@$(COMPOSE) version >/dev/null 2>&1 || (echo "缺少 compose 插件：见 deploy/docker/README.md"; exit 1)
 
-up: docker-check  ## 起完整开发栈（PG/Redis/MinIO/API/Worker/Web）
+up: docker-check  ## 起完整开发栈（PG/Redis/API/Worker/Web，默认本地存储）
 	$(COMPOSE) up -d --build
-	@echo "Web: http://localhost:8080  API: http://localhost:8000/docs"
+	@echo "Web: http://localhost:8080  API: http://localhost:8010/docs"
+
+s3-up: docker-check  ## 起完整栈 + MinIO（验证 S3 适配层，需能拉 minio 镜像）
+	$(COMPOSE) -f compose.yaml -f deploy/docker/compose.s3.yml --profile s3 up -d --build
+	@echo "Web: http://localhost:8080  MinIO: http://localhost:9001  API: http://localhost:8010/docs"
 
 down: docker-check  ## 停止栈（保留数据卷）
 	$(COMPOSE) down

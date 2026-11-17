@@ -23,12 +23,18 @@ APP_PASSWORD="${RAG_APP_PASSWORD:?RAG_APP_PASSWORD must be set}"
 
 echo "[init] creating role ${APP_ROLE} and enabling pgvector"
 
-if ! psql -tAc "SELECT 1 FROM pg_roles WHERE rolname = '${APP_ROLE}'" | grep -q 1; then
+if ! psql -tAc "SELECT 1 FROM pg_roles WHERE rolname = '${APP_ROLE}'" \
+        --username "$POSTGRES_USER" \
+        --dbname "$POSTGRES_DB" | grep -q 1; then
+    # 密码通过 psql 变量 + `:'app_password'` 按 SQL 字面量引用。
+    # 注意：psql 变量插值只在从 stdin/文件读取命令时生效，
+    # `psql -c "... :'var' ..."` 不会展开（实测会留下冒号导致语法错误）。
     psql -v ON_ERROR_STOP=1 \
         --username "$POSTGRES_USER" \
         --dbname "$POSTGRES_DB" \
-        -v app_password="$APP_PASSWORD" \
-        -c "CREATE ROLE ${APP_ROLE} LOGIN PASSWORD :'app_password' NOSUPERUSER NOBYPASSRLS;"
+        -v app_password="$APP_PASSWORD" <<SQL
+CREATE ROLE ${APP_ROLE} LOGIN PASSWORD :'app_password' NOSUPERUSER NOBYPASSRLS;
+SQL
 fi
 
 psql -v ON_ERROR_STOP=1 \

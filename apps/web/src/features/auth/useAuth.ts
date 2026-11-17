@@ -4,7 +4,7 @@
  * ## 为什么不存"user 对象"而存"是否有 token"
  *
  * token 存在 localStorage 里（`tokenStore`），user 信息每次从
- * `/api/v1/auth/me` 拉（TanStack Query 缓存）。
+ * `/api/v1/me` 拉（TanStack Query 缓存）。
  *
  * 存 user 对象到 Zustand 会让"角色变了"需要手动同步——
  * 而角色变更必须**立即生效**（A7 的要求），所以必须以服务端为准。
@@ -40,7 +40,7 @@ export function useCurrentUser() {
 
   return useQuery<CurrentUserResponse, ApiError>({
     queryKey: ["auth", "me"],
-    queryFn: () => apiFetch<CurrentUserResponse>("/api/v1/auth/me"),
+    queryFn: () => apiFetch<CurrentUserResponse>("/api/v1/me"),
     enabled: hasToken,
     // 用户信息变化不频繁，但权限变更要尽快生效（A7 要求）
     staleTime: 60_000,

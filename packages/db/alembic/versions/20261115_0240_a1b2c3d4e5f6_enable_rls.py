@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+import sqlalchemy as sa
 from alembic import op
 
 from rag_db.rls import (
@@ -45,21 +46,43 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+def _table_exists(table: str) -> bool:
+    """该表在当前迁移时点是否已存在。
+
+    **必须判断，不能直接遍历 `RLS_TABLES`**：那个元组是"当前所有租户表"，
+    包含了后续迁移才创建的表（chunk_embeddings / conversations / messages）。
+    在全新数据库上按修订顺序重放时，直接 ALTER 会报 relation does not exist，
+    而这个错误只在"从零建库"时出现（增量开发的库早就存在这些表了）。
+
+    后建表由各自的迁移负责 ENABLE RLS（如 `chunk_embeddings_rls`、
+    `conversations_messages`），这里跳过不会有安全缺口。
+    """
+    exists = op.get_bind().execute(
+        sa.text("SELECT to_regclass(:table_name)"), {"table_name": table}
+    ).scalar()
+    return exists is not None
+
+
 def upgrade() -> None:
     for table in RLS_TABLES:
+        if not _table_exists(table):
+            continue
         for statement in enable_rls_statements(table):
             op.execute(statement)
         for statement in create_tenant_isolation_policy_statements(table):
             op.execute(statement)
 
     # 审计日志单独处理（tenant_id 可为 NULL）
-    for statement in enable_rls_statements(AUDIT_TABLE):
-        op.execute(statement)
-    for statement in audit_policy_statements():
-        op.execute(statement)
+    if _table_exists(AUDIT_TABLE):
+        for statement in enable_rls_statements(AUDIT_TABLE):
+            op.execute(statement)
+        for statement in audit_policy_statements():
+            op.execute(statement)
 
 
 def downgrade() -> None:
     for table in (*RLS_TABLES, AUDIT_TABLE):
+        if not _table_exists(table):
+            continue
         op.execute(f"ALTER TABLE {table} NO FORCE ROW LEVEL SECURITY")
         op.execute(f"ALTER TABLE {table} DISABLE ROW LEVEL SECURITY")
