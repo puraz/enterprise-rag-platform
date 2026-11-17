@@ -3,7 +3,12 @@
 UV ?= uv
 
 .PHONY: help sync lint fmt typecheck test check config check-deps test-int test-all \
-        migrate migrate-new migrate-down migrate-check gen-contracts gen-contracts-check verify-rls
+        migrate migrate-new migrate-down migrate-check gen-contracts gen-contracts-check verify-rls \
+        up down down-v ps logs docker-check docker-migrate docker-backfill obs-up obs-down
+
+# Compose v2（插件形态）。若本机只有 docker-compose 独立二进制，
+# 用法：make up COMPOSE="docker-compose"
+COMPOSE ?= docker compose
 
 # 迁移统一在 packages/db 下执行（alembic.ini 在那里）
 ALEMBIC ?= $(UV) run alembic -c packages/db/alembic.ini
@@ -64,3 +69,37 @@ gen-contracts-check:  ## 检查生成产物是否与源头契约漂移
 	$(UV) run python packages/contracts/scripts/check_contracts_fresh.py
 
 check: lint typecheck gen-contracts-check test  ## 提交前全量自检（含契约漂移检查）
+
+# ---------------------------------------------------------------- Docker
+docker-check:  ## 检查 docker daemon 与 compose 插件
+	@command -v docker >/dev/null 2>&1 || (echo "未安装 docker"; exit 1)
+	@docker info >/dev/null 2>&1 || (echo "Docker daemon 未运行：sudo systemctl start docker"; exit 1)
+	@$(COMPOSE) version >/dev/null 2>&1 || (echo "缺少 compose 插件：见 deploy/docker/README.md"; exit 1)
+
+up: docker-check  ## 起完整开发栈（PG/Redis/MinIO/API/Worker/Web）
+	$(COMPOSE) up -d --build
+	@echo "Web: http://localhost:8080  API: http://localhost:8000/docs"
+
+down: docker-check  ## 停止栈（保留数据卷）
+	$(COMPOSE) down
+
+down-v: docker-check  ## 停止并删除数据卷（会清空数据库/文件/模型缓存）
+	$(COMPOSE) down -v
+
+ps: docker-check  ## 看容器状态
+	$(COMPOSE) ps
+
+logs: docker-check  ## 跟踪日志（Ctrl-C 退出）
+	$(COMPOSE) logs -f --tail=200
+
+docker-migrate: docker-check  ## 在容器内跑 alembic upgrade head
+	$(COMPOSE) run --rm migrate
+
+docker-backfill: docker-check  ## 容器内回填 chunks.search_text（升级后跑一次）
+	$(COMPOSE) exec api python /app/scripts/backfill_search_text.py
+
+obs-up: docker-check  ## 起 Prometheus + Grafana（profile）
+	$(COMPOSE) --profile observability up -d prometheus grafana
+
+obs-down: docker-check  ## 停可观测性组件（保留数据卷）
+	$(COMPOSE) --profile observability stop prometheus grafana

@@ -1,0 +1,23 @@
+# Prometheus（Docker 网络版）。
+#
+# 与 deploy/observability/prometheus/prometheus.yml 的唯一区别：
+# 抓取目标从 `host.docker.internal:8000` 改成 compose 服务名 `api:8000`。
+# 告警规则仍然复用同一份 alerts.yml（挂载进容器），避免两套阈值漂移。
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: rag-docker
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: rag-api
+    # 指标端点在 /health/metrics（不是 /metrics）。
+    metrics_path: /health/metrics
+    static_configs:
+      - targets: ["api:8000"]
+        labels:
+          service: api

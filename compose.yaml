@@ -1,0 +1,294 @@
+# 企业级 RAG 平台 · Docker Compose 开发/演示栈
+#
+# ## 默认起哪些服务
+#
+#   postgres  pgvector/pg17（5433 → 宿主，避免与本机 PG 5432 冲突）
+#   redis     Valkey 8（6380 → 宿主）
+#   minio     S3 兼容对象存储（9000 API / 9001 控制台）
+#   migrate   一次性迁移任务（完成后退出）
+#   api       FastAPI + SSE（8000）
+#   worker    解析/切分/向量化/索引任务
+#   web       Vite 构建产物 + Nginx 反代（8080）
+#
+# ## 为什么 DB/Redis 要映射到非默认端口
+#
+# 开发机通常已经有系统 PG(5432) / Redis(6379)。映射到 5433/6380 后，
+# 容器与宿主可以并存，`make test-int` 仍连宿主，不互相踩。
+#
+# ## 可观测性（可选）
+#
+#   docker compose --profile observability up -d
+#   → Prometheus :9090、Grafana :3000（自动导入 dashboard.json）
+#
+# ## GPU（可选）
+#
+#   docker compose -f compose.yaml -f deploy/docker/compose.gpu.yml up -d --build
+#
+# ## 环境变量
+#
+# compose 会自动读取仓库根的 `.env` 做**变量插值**（不是注入容器）。
+# 这里只引用 LLM key、JWT secret 等少量变量；数据库/Redis/存储的
+# host 全部在下面硬编码为容器服务名，避免宿主 `.env` 里的 127.0.0.1
+# 泄漏进容器导致“连到了宿主数据库”的事故。
+#
+# 生产不要把密码写在 compose 里：用 `docker compose --env-file` /
+# Docker secrets / 平台密钥管理覆盖下面带默认值的变量。
+
+name: enterprise-rag
+
+x-python-image: &python-image
+  image: enterprise-rag/python:local
+
+x-python-build: &python-build
+  context: .
+  dockerfile: deploy/docker/python.Dockerfile
+
+# API 与 Worker 共用的业务配置。
+x-app-env: &app-env
+  # ---- 运行环境 ----
+  RAG_ENV: "local"
+  RAG_DEBUG: "false"
+  RAG_LOG_FORMAT: "json"
+  RAG_STARTUP_DEPENDENCY_CHECK: "true"
+  # 本地演示用：/api/v1/auth/dev-bootstrap 自动建租户并登录。
+  # 生产必须设 false（Settings 的生产守卫也会拒绝 true）。
+  RAG_DEV_AUTH_ENABLED: "true"
+  RAG_IDENTITY__JWT_SECRET: "${RAG_IDENTITY__JWT_SECRET:-docker-local-dev-secret-change-me-32-chars}"
+
+  # ---- PostgreSQL（容器内服务名，不是 127.0.0.1）----
+  RAG_DATABASE__HOST: "postgres"
+  RAG_DATABASE__PORT: "5432"
+  RAG_DATABASE__NAME: "rag"
+  RAG_DATABASE__USER: "rag_app"
+  RAG_DATABASE__PASSWORD: "${RAG_APP_PASSWORD:-rag_local_dev_only}"
+  # 迁移与 worker 跨租户认领需要高权限角色。
+  # 开发环境 rag_admin 是超级用户；生产应拆成 migration / admin 两个角色。
+  RAG_DATABASE__MIGRATION_USER: "rag_admin"
+  RAG_DATABASE__MIGRATION_PASSWORD: "${POSTGRES_PASSWORD:-rag_local_dev_only}"
+  RAG_DATABASE__ADMIN_USER: "rag_admin"
+  RAG_DATABASE__ADMIN_PASSWORD: "${POSTGRES_PASSWORD:-rag_local_dev_only}"
+  RAG_DATABASE__POOL_SIZE: "5"
+  RAG_DATABASE__MAX_OVERFLOW: "5"
+
+  # ---- Redis / Valkey ----
+  RAG_REDIS__HOST: "redis"
+  RAG_REDIS__PORT: "6379"
+
+  # ---- 对象存储：走 MinIO（S3 协议）----
+  RAG_STORAGE__BACKEND: "s3"
+  RAG_STORAGE__S3_BUCKET: "rag-documents"
+  RAG_STORAGE__S3_ENDPOINT_URL: "http://minio:9000"
+  RAG_STORAGE__S3_ACCESS_KEY: "${MINIO_ROOT_USER:-ragminio}"
+  RAG_STORAGE__S3_SECRET_KEY: "${MINIO_ROOT_PASSWORD:-ragminio123}"
+  RAG_STORAGE__S3_USE_SSL: "false"
+  RAG_STORAGE__S3_ADDRESSING_STYLE: "path"
+
+  # ---- LLM：key 从宿主 .env 或 shell 读取；为空时问答接口返回 503 ----
+  RAG_LLM__PROVIDER: "${RAG_LLM__PROVIDER:-deepseek}"
+  RAG_LLM__API_KEY: "${RAG_LLM__API_KEY:-}"
+  RAG_LLM__BASE_URL: "${RAG_LLM__BASE_URL:-https://api.deepseek.com/v1}"
+  RAG_LLM__CHAT_MODEL: "${RAG_LLM__CHAT_MODEL:-deepseek-v4-pro}"
+  RAG_LLM__CHEAP_MODEL: "${RAG_LLM__CHEAP_MODEL:-deepseek-flash}"
+
+  # ---- Embedding：默认 CPU；GPU 用 compose.gpu.yml 覆盖 ----
+  RAG_EMBEDDING__PROVIDER: "local_bge"
+  RAG_EMBEDDING__MODEL_NAME: "BAAI/bge-m3"
+  RAG_EMBEDDING__DIMENSION: "1024"
+  RAG_EMBEDDING__DEVICE: "cpu"
+  RAG_EMBEDDING__CACHE_DIR: "/home/rag/.cache/huggingface"
+  RAG_EMBEDDING__HF_ENDPOINT: "https://hf-mirror.com"
+  HF_ENDPOINT: "https://hf-mirror.com"
+
+  # ---- 检索链路 ----
+  RAG_RETRIEVAL__USE_KEYWORD: "true"
+  RAG_RETRIEVAL__USE_REWRITE: "true"
+  # 打开重排需要同时把 RAG_RERANKER__PROVIDER 改成 local_bge，
+  # 并确保容器能下载/访问模型（见 README 的 GPU/OOM 说明）。
+  RAG_RETRIEVAL__USE_RERANK: "false"
+  RAG_RETRIEVAL__USE_SELF_CHECK: "false"
+  RAG_RERANKER__PROVIDER: "none"
+
+services:
+  # ------------------------------------------------------------------ 依赖
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: "rag_admin"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-rag_local_dev_only}"
+      POSTGRES_DB: "rag"
+      # 供初始化脚本创建受 RLS 约束的应用角色。
+      RAG_APP_ROLE: "rag_app"
+      RAG_APP_PASSWORD: "${RAG_APP_PASSWORD:-rag_local_dev_only}"
+    ports:
+      # 刻意避开宿主默认 5432（开发机通常已有系统 PG）。
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag_admin -d rag"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: valkey/valkey:8-alpine
+    command: ["valkey-server", "--appendonly", "yes"]
+    ports:
+      - "6380:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:-ragminio}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-ragminio123}"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:-ragminio}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-ragminio123}"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        until mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"; do
+          echo "waiting for minio...";
+          sleep 2;
+        done
+        mc mb --ignore-existing local/rag-documents
+        mc anonymous set none local/rag-documents
+        echo "minio bucket ready"
+    restart: "no"
+
+  # ------------------------------------------------------------------ 迁移
+  migrate:
+    <<: *python-image
+    build: *python-build
+    command: ["alembic", "-c", "/app/packages/db/alembic.ini", "upgrade", "head"]
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # ------------------------------------------------------------------ 应用
+  api:
+    <<: *python-image
+    build: *python-build
+    command:
+      - uvicorn
+      - rag_api.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --proxy-headers
+      - --forwarded-allow-ips=*
+    environment: *app-env
+    ports:
+      - "8000:8000"
+    volumes:
+      - hfcache:/home/rag/.cache/huggingface
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  worker:
+    <<: *python-image
+    command: ["python", "-m", "rag_worker"]
+    environment: *app-env
+    volumes:
+      - hfcache:/home/rag/.cache/huggingface
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    # worker 收到 SIGTERM 后等当前批次结束；给编排器留足优雅退出时间。
+    stop_grace_period: 60s
+    restart: unless-stopped
+
+  web:
+    image: enterprise-rag/web:local
+    build:
+      context: .
+      dockerfile: deploy/docker/web.Dockerfile
+    ports:
+      - "8080:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------ 可观测性（可选）
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    profiles: ["observability"]
+    volumes:
+      - ./deploy/docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/observability/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - promdata:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    profiles: ["observability"]
+    environment:
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./deploy/docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/observability/grafana:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  hfcache:
+  promdata:
+  grafanadata:

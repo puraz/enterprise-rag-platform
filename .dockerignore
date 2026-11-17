@@ -1,0 +1,50 @@
+# Docker 构建上下文排除项。
+#
+# 只保留构建镜像真正需要的东西：Python workspace 源码、uv 锁文件、
+# 前端源码与生成契约。测试/文档/本地数据/密钥一律不进上下文——
+# 既减小镜像，也避免把 .env 的秘密层打进镜像历史。
+
+# ---- VCS / IDE ----
+.git
+.gitignore
+.idea
+.vscode
+.zcode
+
+# ---- Python ----
+.venv
+__pycache__
+*.py[cod]
+*.egg-info
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.coverage
+coverage.xml
+htmlcov
+dist
+build
+
+# ---- Node ----
+node_modules
+.pnpm-store
+apps/web/dist
+apps/web/.vite
+*.tsbuildinfo
+
+# ---- 运行时产物 / 本地数据 ----
+.data
+storage
+*.log
+
+# ---- 测试与文档 ----
+tests
+docs
+
+# ---- 密钥：绝不进镜像 ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
