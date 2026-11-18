@@ -5346,6 +5346,313 @@
       ],
       "title": "AuditChainVerification",
       "type": "object"
+    },
+    "CreateIndexRebuildRequest": {
+      "additionalProperties": false,
+      "description": "发起索引重建。\n\n## 为什么版本号由服务端生成，客户端不能指定\n\n`version_tag` 在同一知识库内唯一（`uq_index_versions_kb_tag`）。\n让客户端指定会让\"两个运营同时发起\"撞唯一约束，报错信息是\n\"duplicate key\"，而根因是并发——很难从错误里看出来。\n\n服务端用 `v{序号}-{时间戳}` 生成，天然不重复且可读。\n\n## 为什么不需要传 embedding 模型\n\n模型来自当前进程配置（`settings.embedding`）。传参会让\n\"运营以为换了模型，实际配置没改\"这种情况变成静默的错版本——\n版本表里会记下一个与实际向量不符的 `embedding_model`。",
+      "properties": {
+        "reason": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "重建原因（进审计）。例如：换 embedding 模型 / 调 chunk 参数",
+          "title": "Reason"
+        }
+      },
+      "title": "CreateIndexRebuildRequest",
+      "type": "object"
+    },
+    "IndexRebuildResponse": {
+      "$defs": {
+        "IndexVersionStatus": {
+          "description": "索引版本状态（A10 零停机重建用）。\n\n双版本 + alias 切换的完整生命周期：\n\n    BUILDING → READY → ACTIVE → RETIRED\n                 │                 ▲\n                 └──(切换前可回滚)──┘\n\n重建期间双写两个版本，切换瞬间只改 alias 指向。",
+          "enum": [
+            "building",
+            "ready",
+            "active",
+            "retired",
+            "failed"
+          ],
+          "title": "IndexVersionStatus",
+          "type": "string"
+        }
+      },
+      "description": "重建已受理（202）。\n\n## 为什么同时返回 task_id 与 index_version_id\n\n两者跟踪的是不同东西：\n\n- `task_id`：这次回填的执行进度（0-100，失败原因）；\n- `index_version_id`：这个版本的状态（building → ready → active）。\n\n只给 task_id，前端在任务成功后就不知道\"该切哪个版本\"了；\n只给 version_id，前端无法显示进度百分比。所以都给。",
+      "properties": {
+        "task_id": {
+          "format": "uuid",
+          "title": "Task Id",
+          "type": "string"
+        },
+        "index_version_id": {
+          "format": "uuid",
+          "title": "Index Version Id",
+          "type": "string"
+        },
+        "version_tag": {
+          "title": "Version Tag",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/IndexVersionStatus",
+          "description": "新版本初始状态，正常为 building"
+        },
+        "poll_url": {
+          "description": "任务轮询地址（GET /api/v1/tasks/{task_id}）",
+          "title": "Poll Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "index_version_id",
+        "version_tag",
+        "status",
+        "poll_url"
+      ],
+      "title": "IndexRebuildResponse",
+      "type": "object"
+    },
+    "ActivateIndexVersionRequest": {
+      "additionalProperties": false,
+      "description": "切换 ACTIVE 索引版本（alias 切换）。\n\n## 为什么需要 `confirm_version_tag` 二次确认\n\n切换会让**所有检索立刻改用新向量**。如果新版本因为数据问题\n（比如某个文档在回填期间被删）导致召回变差，用户会立刻感受到，\n而定位问题需要时间。\n\nURL 里已经有 version_id，再加一个 tag 的确认看似冗余——但它防的是\n\"前端把两个版本的 ID 搞反\"这类失误（`.map` 里拿错字段很常见）。\n切换是不可逆感受的操作（虽然能回滚），值得一次输入确认。\n\n**必须与目标版本的 `version_tag` 完全一致**，否则 400。",
+      "properties": {
+        "confirm_version_tag": {
+          "description": "再次输入目标版本的 version_tag 以确认切换",
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Confirm Version Tag",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "切换原因（进审计）",
+          "title": "Reason"
+        }
+      },
+      "required": [
+        "confirm_version_tag"
+      ],
+      "title": "ActivateIndexVersionRequest",
+      "type": "object"
+    },
+    "RollbackIndexVersionRequest": {
+      "additionalProperties": false,
+      "description": "回滚到指定索引版本。\n\n回滚是**秒级**的：旧版本的向量行在切换时没有删除，只是把 ACTIVE\n指回去。这也是为什么\"回收旧版本\"必须延迟观察——立刻回收会让回滚\n失去可能。\n\n## 约束\n\n- 目标版本必须属于该知识库；\n- 目标版本必须是 `ready` 或 `active`（`building` 未完成、\n  `failed` 没数据，都不能作为回滚目标）；\n- 同样需要 `confirm_version_tag`（同上：防止 ID 拿错）。",
+      "properties": {
+        "confirm_version_tag": {
+          "description": "再次输入目标版本的 version_tag 以确认回滚",
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Confirm Version Tag",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "回滚原因（进审计）",
+          "title": "Reason"
+        }
+      },
+      "required": [
+        "confirm_version_tag"
+      ],
+      "title": "RollbackIndexVersionRequest",
+      "type": "object"
+    },
+    "TenantCostSummary": {
+      "description": "单个租户的成本聚合（跨租户汇总用）。",
+      "properties": {
+        "tenant_id": {
+          "format": "uuid",
+          "title": "Tenant Id",
+          "type": "string"
+        },
+        "tenant_slug": {
+          "title": "Tenant Slug",
+          "type": "string"
+        },
+        "tenant_name": {
+          "title": "Tenant Name",
+          "type": "string"
+        },
+        "call_count": {
+          "minimum": 0,
+          "title": "Call Count",
+          "type": "integer"
+        },
+        "input_tokens": {
+          "minimum": 0,
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "output_tokens": {
+          "minimum": 0,
+          "title": "Output Tokens",
+          "type": "integer"
+        },
+        "cached_tokens": {
+          "minimum": 0,
+          "title": "Cached Tokens",
+          "type": "integer"
+        },
+        "cost_usd": {
+          "minimum": 0,
+          "title": "Cost Usd",
+          "type": "number"
+        }
+      },
+      "required": [
+        "tenant_id",
+        "tenant_slug",
+        "tenant_name",
+        "call_count",
+        "input_tokens",
+        "output_tokens",
+        "cached_tokens",
+        "cost_usd"
+      ],
+      "title": "TenantCostSummary",
+      "type": "object"
+    },
+    "CrossTenantCostResponse": {
+      "$defs": {
+        "TenantCostSummary": {
+          "description": "单个租户的成本聚合（跨租户汇总用）。",
+          "properties": {
+            "tenant_id": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            },
+            "tenant_slug": {
+              "title": "Tenant Slug",
+              "type": "string"
+            },
+            "tenant_name": {
+              "title": "Tenant Name",
+              "type": "string"
+            },
+            "call_count": {
+              "minimum": 0,
+              "title": "Call Count",
+              "type": "integer"
+            },
+            "input_tokens": {
+              "minimum": 0,
+              "title": "Input Tokens",
+              "type": "integer"
+            },
+            "output_tokens": {
+              "minimum": 0,
+              "title": "Output Tokens",
+              "type": "integer"
+            },
+            "cached_tokens": {
+              "minimum": 0,
+              "title": "Cached Tokens",
+              "type": "integer"
+            },
+            "cost_usd": {
+              "minimum": 0,
+              "title": "Cost Usd",
+              "type": "number"
+            }
+          },
+          "required": [
+            "tenant_id",
+            "tenant_slug",
+            "tenant_name",
+            "call_count",
+            "input_tokens",
+            "output_tokens",
+            "cached_tokens",
+            "cost_usd"
+          ],
+          "title": "TenantCostSummary",
+          "type": "object"
+        }
+      },
+      "description": "全平台成本汇总（仅平台角色）。\n\n## 为什么这是一个独立接口而不是看板的 `all_tenants` 开关\n\n`docs/adr/0011` 明确记过：**不做成开关**。理由：\n\n看板的默认行为是\"看我当前租户\"，开关一旦存在，被误开（前端默认值\n写错、URL 复制）就会让租户管理员看到全平台数据——而且返回 200，\n没有任何异常信号。\n\n独立接口 + 独立能力（`ADMIN`，仅平台超管 / 租户管理员）+\n强制审计，让\"跨租户看数\"这件事在代码里显式可见。\n\n## 为什么只给租户维度合计，不给明细分页\n\n明细（每次调用的记录）已经在 `model_calls` 表里且有 `tenant_id`，\n真正的对账走 `scripts/audit_integrity.py`（直连 DB，不受 API 限制）。\n这里只给\"哪个租户花了多少\"——那是运营做容量规划需要的形状。",
+      "properties": {
+        "since": {
+          "description": "统计窗口起点",
+          "format": "date-time",
+          "title": "Since",
+          "type": "string"
+        },
+        "until": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "统计窗口终点，null 表示到现在",
+          "title": "Until"
+        },
+        "total_cost_usd": {
+          "description": "全平台合计",
+          "minimum": 0,
+          "title": "Total Cost Usd",
+          "type": "number"
+        },
+        "total_calls": {
+          "minimum": 0,
+          "title": "Total Calls",
+          "type": "integer"
+        },
+        "tenant_count": {
+          "description": "有调用记录的租户数",
+          "minimum": 0,
+          "title": "Tenant Count",
+          "type": "integer"
+        },
+        "items": {
+          "description": "按花费倒序的租户明细",
+          "items": {
+            "$ref": "#/$defs/TenantCostSummary"
+          },
+          "title": "Items",
+          "type": "array"
+        }
+      },
+      "required": [
+        "since",
+        "total_cost_usd",
+        "total_calls",
+        "tenant_count"
+      ],
+      "title": "CrossTenantCostResponse",
+      "type": "object"
     }
   }
 }

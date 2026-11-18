@@ -564,6 +564,59 @@ class ChunkRepository:
         )
         return int(result.scalar_one())
 
+    async def claim_batch_for_version(
+        self,
+        *,
+        index_version_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        knowledge_base_id: uuid.UUID,
+        batch_size: int,
+    ) -> list[Chunk]:
+        """取一批「在目标索引版本下还没有向量」的 chunk（回填用）。
+
+        ## 判据是旁表 EXISTS，不是计数器
+
+        `chunks.embedding IS NULL` 是 A10 之前的判据，旁表方案下不再适用
+        （`chunks.embedding` 是历史遗留列）。真正的「是否已回填」只有
+        `chunk_embeddings` 里有没有 `(chunk_id, index_version_id)` 这一行。
+
+        用事实而非计数器：计数器在崩溃/重派时会漂移，旁表行不会。
+        重跑时已回填的 chunk 天然不会被再次选中——这就是幂等。
+
+        ## `FOR UPDATE SKIP LOCKED`
+
+        两个 worker 抢同一版本时（可能因为锁续期失败 + 重派），
+        SKIP LOCKED 让后到者跳过已被锁定的行，而不是阻塞等待。
+        没有它，两个回填进程会串行排队，吞吐退化成一个。
+
+        ## 为什么只取叶子块
+
+        `chunk_level > 0` 是父块（small-to-big），不参与检索、不向量化。
+        把它们算进回填会让「预期数量」永远对不上（父块永远没有向量）。
+        """
+        embedded_exists = (
+            select(ChunkEmbedding.chunk_id)
+            .where(
+                ChunkEmbedding.chunk_id == Chunk.id,
+                ChunkEmbedding.index_version_id == index_version_id,
+            )
+            .exists()
+        )
+        result = await self._session.execute(
+            select(Chunk)
+            .where(
+                Chunk.tenant_id == tenant_id,
+                Chunk.knowledge_base_id == knowledge_base_id,
+                Chunk.is_current.is_(True),
+                Chunk.chunk_level == 0,
+                ~embedded_exists,
+            )
+            .order_by(Chunk.document_id, Chunk.chunk_index)
+            .limit(batch_size)
+            .with_for_update(skip_locked=True)
+        )
+        return list(result.scalars())
+
     async def expanded_context(
         self, *, chunk_ids: Sequence[uuid.UUID], include_parent: bool = True
     ) -> list[Chunk]:
@@ -666,6 +719,25 @@ class IndexVersionRepository:
             .values(status="ready", chunk_count=chunk_count)
         )
 
+    async def count_version_chunks(self, *, index_version_id: uuid.UUID) -> int:
+        """某索引版本下已写入的向量数（只看参与检索的叶子块）。
+
+        **这是「回填完成度」的唯一权威来源**（旁表事实，不是计数器）。
+        `IndexRebuilder.activate` 的切换前校验与 worker handler 的
+        ready 标记都用它。
+        """
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(ChunkEmbedding)
+            .join(Chunk, Chunk.id == ChunkEmbedding.chunk_id)
+            .where(
+                ChunkEmbedding.index_version_id == index_version_id,
+                Chunk.is_current.is_(True),
+                Chunk.chunk_level == 0,
+            )
+        )
+        return int(result.scalar_one())
+
     async def list_for_kb(
         self, *, knowledge_base_id: uuid.UUID, limit: int = 50
     ) -> list[IndexVersion]:
@@ -701,3 +773,48 @@ class IndexVersionRepository:
             .limit(1)
         )
         return result.scalar_one_or_none()
+
+    async def find_building(self, *, knowledge_base_id: uuid.UUID) -> IndexVersion | None:
+        """取该知识库当前正在构建的版本（若有）。
+
+        ## 为什么重建前必须检查
+
+        并行重建会争抢 GPU/API 配额，而且两个版本都在回填时
+        无法判断"该切哪一个"，最终可能切到一个只回填了一半的版本。
+
+        同一个库同一时刻只允许一个 building 版本（这里不靠数据库约束，
+        因为 `status` 是字符串且 building 与 failed 的共存是合法的——
+        失败的版本要留着供排障）。用"发起前检查 + 409"控制，
+        比加部分唯一索引更灵活（运营可能需要保留多个历史失败版本）。
+        """
+        result = await self._session.execute(
+            select(IndexVersion)
+            .where(
+                IndexVersion.knowledge_base_id == knowledge_base_id,
+                IndexVersion.status == "building",
+            )
+            .order_by(IndexVersion.created_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def count_chunks_by_version_tag(self, *, knowledge_base_id: uuid.UUID) -> int:
+        """该知识库已有多少个版本（用于生成不重复的 version_tag）。"""
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(IndexVersion)
+            .where(IndexVersion.knowledge_base_id == knowledge_base_id)
+        )
+        return int(result.scalar_one())
+
+    async def mark_failed(self, *, version_id: uuid.UUID, error_message: str) -> None:
+        """把版本标记为 failed（回填失败时）。
+
+        保留记录供排障：`error_message` 是"为什么这次重建没成"的唯一线索。
+        不删版本——它可能有部分已回填的向量，删了要重新算。
+        """
+        await self._session.execute(
+            update(IndexVersion)
+            .where(IndexVersion.id == version_id)
+            .values(status="failed", error_message=error_message[:2000])
+        )

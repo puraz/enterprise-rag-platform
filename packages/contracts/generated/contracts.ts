@@ -1569,3 +1569,115 @@ export interface AuditChainVerification {
   /** 断链原因的可读说明（不含记录内容） */
   reason?: string | null;
 }
+
+/**
+ * 发起索引重建。
+ * ## 为什么版本号由服务端生成，客户端不能指定
+ * `version_tag` 在同一知识库内唯一（`uq_index_versions_kb_tag`）。
+ * 让客户端指定会让"两个运营同时发起"撞唯一约束，报错信息是
+ * "duplicate key"，而根因是并发——很难从错误里看出来。
+ * 服务端用 `v{序号}-{时间戳}` 生成，天然不重复且可读。
+ * ## 为什么不需要传 embedding 模型
+ * 模型来自当前进程配置（`settings.embedding`）。传参会让
+ * "运营以为换了模型，实际配置没改"这种情况变成静默的错版本——
+ * 版本表里会记下一个与实际向量不符的 `embedding_model`。
+ */
+export interface CreateIndexRebuildRequest {
+  /** 重建原因（进审计）。例如：换 embedding 模型 / 调 chunk 参数 */
+  reason?: string | null;
+}
+
+/**
+ * 重建已受理（202）。
+ * ## 为什么同时返回 task_id 与 index_version_id
+ * 两者跟踪的是不同东西：
+ * - `task_id`：这次回填的执行进度（0-100，失败原因）；
+ * - `index_version_id`：这个版本的状态（building → ready → active）。
+ * 只给 task_id，前端在任务成功后就不知道"该切哪个版本"了；
+ * 只给 version_id，前端无法显示进度百分比。所以都给。
+ */
+export interface IndexRebuildResponse {
+  task_id: string;
+  index_version_id: string;
+  version_tag: string;
+  /** 新版本初始状态，正常为 building */
+  status: IndexVersionStatus;
+  /** 任务轮询地址（GET /api/v1/tasks/{task_id}） */
+  poll_url: string;
+}
+
+/**
+ * 切换 ACTIVE 索引版本（alias 切换）。
+ * ## 为什么需要 `confirm_version_tag` 二次确认
+ * 切换会让**所有检索立刻改用新向量**。如果新版本因为数据问题
+ * （比如某个文档在回填期间被删）导致召回变差，用户会立刻感受到，
+ * 而定位问题需要时间。
+ * URL 里已经有 version_id，再加一个 tag 的确认看似冗余——但它防的是
+ * "前端把两个版本的 ID 搞反"这类失误（`.map` 里拿错字段很常见）。
+ * 切换是不可逆感受的操作（虽然能回滚），值得一次输入确认。
+ * **必须与目标版本的 `version_tag` 完全一致**，否则 400。
+ */
+export interface ActivateIndexVersionRequest {
+  /** 再次输入目标版本的 version_tag 以确认切换 */
+  confirm_version_tag: string;
+  /** 切换原因（进审计） */
+  reason?: string | null;
+}
+
+/**
+ * 回滚到指定索引版本。
+ * 回滚是**秒级**的：旧版本的向量行在切换时没有删除，只是把 ACTIVE
+ * 指回去。这也是为什么"回收旧版本"必须延迟观察——立刻回收会让回滚
+ * 失去可能。
+ * ## 约束
+ * - 目标版本必须属于该知识库；
+ * - 目标版本必须是 `ready` 或 `active`（`building` 未完成、
+ * `failed` 没数据，都不能作为回滚目标）；
+ * - 同样需要 `confirm_version_tag`（同上：防止 ID 拿错）。
+ */
+export interface RollbackIndexVersionRequest {
+  /** 再次输入目标版本的 version_tag 以确认回滚 */
+  confirm_version_tag: string;
+  /** 回滚原因（进审计） */
+  reason?: string | null;
+}
+
+/** 单个租户的成本聚合（跨租户汇总用）。 */
+export interface TenantCostSummary {
+  tenant_id: string;
+  tenant_slug: string;
+  tenant_name: string;
+  call_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  cached_tokens: number;
+  cost_usd: number;
+}
+
+/**
+ * 全平台成本汇总（仅平台角色）。
+ * ## 为什么这是一个独立接口而不是看板的 `all_tenants` 开关
+ * `docs/adr/0011` 明确记过：**不做成开关**。理由：
+ * 看板的默认行为是"看我当前租户"，开关一旦存在，被误开（前端默认值
+ * 写错、URL 复制）就会让租户管理员看到全平台数据——而且返回 200，
+ * 没有任何异常信号。
+ * 独立接口 + 独立能力（`ADMIN`，仅平台超管 / 租户管理员）+
+ * 强制审计，让"跨租户看数"这件事在代码里显式可见。
+ * ## 为什么只给租户维度合计，不给明细分页
+ * 明细（每次调用的记录）已经在 `model_calls` 表里且有 `tenant_id`，
+ * 真正的对账走 `scripts/audit_integrity.py`（直连 DB，不受 API 限制）。
+ * 这里只给"哪个租户花了多少"——那是运营做容量规划需要的形状。
+ */
+export interface CrossTenantCostResponse {
+  /** 统计窗口起点 */
+  since: string;
+  /** 统计窗口终点，null 表示到现在 */
+  until?: string | null;
+  /** 全平台合计 */
+  total_cost_usd: number;
+  total_calls: number;
+  /** 有调用记录的租户数 */
+  tenant_count: number;
+  /** 按花费倒序的租户明细 */
+  items?: TenantCostSummary[];
+}

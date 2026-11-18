@@ -22,9 +22,12 @@ from rag_contracts.api.admin import (
     AdminDocumentVersionItem,
     AdminTaskItem,
     AuditChainVerification,
+    CrossTenantCostResponse,
     DashboardCounters,
     DashboardResponse,
+    IndexRebuildResponse,
     IndexVersionItem,
+    TenantCostSummary,
 )
 from rag_contracts.api.usage import UsageBucket
 from rag_contracts.enums import IndexVersionStatus, ModelTaskType, TaskStatus, TaskType
@@ -210,12 +213,81 @@ def to_chain_verification(
     )
 
 
+def to_index_rebuild_response(
+    *, task_id: uuid.UUID, index_version_id: uuid.UUID, version_tag: str
+) -> IndexRebuildResponse:
+    """重建受理结果 → 202 响应实体。
+
+    `poll_url` 指向用户面的任务查询端点（`GET /api/v1/tasks/{id}`）——
+    管理面与用户面共享同一个任务查询接口：任务的形状与权限语义
+    （按租户隔离）完全一致，多一个管理面专用的查询接口只会产生两份漂移。
+    """
+    return IndexRebuildResponse(
+        task_id=task_id,
+        index_version_id=index_version_id,
+        version_tag=version_tag,
+        status=IndexVersionStatus.BUILDING,
+        poll_url=f"/api/v1/tasks/{task_id}",
+    )
+
+
+def to_cross_tenant_cost(
+    *,
+    since: datetime,
+    until: datetime | None,
+    rows: Sequence[dict[str, Any]],
+    tenant_names: dict[uuid.UUID, tuple[str, str]],
+) -> CrossTenantCostResponse:
+    """按租户的成本聚合 → 响应实体。
+
+    Args:
+        rows: `ModelCallRepository.cost_by_tenant()` 的结果。
+        tenant_names: `{tenant_id: (slug, name)}`。**缺失的租户**说明
+            该租户已被删除但成本记录保留——此时用占位名标出来，
+            而不是静默显示空字符串（运营会以为是数据 bug）。
+    """
+    items: list[TenantCostSummary] = []
+    total_cost = 0.0
+    total_calls = 0
+
+    for row in rows:
+        tenant_id = row["tenant_id"]
+        slug, name = tenant_names.get(tenant_id, ("(deleted)", "(已删除租户)"))
+        cost = float(row["cost_usd"])
+        calls = int(row["call_count"])
+        items.append(
+            TenantCostSummary(
+                tenant_id=tenant_id,
+                tenant_slug=slug,
+                tenant_name=name,
+                call_count=calls,
+                input_tokens=int(row["input_tokens"]),
+                output_tokens=int(row["output_tokens"]),
+                cached_tokens=int(row["cached_tokens"]),
+                cost_usd=cost,
+            )
+        )
+        total_cost += cost
+        total_calls += calls
+
+    return CrossTenantCostResponse(
+        since=since,
+        until=until,
+        total_cost_usd=round(total_cost, 8),
+        total_calls=total_calls,
+        tenant_count=len(items),
+        items=items,
+    )
+
+
 __all__ = [
     "to_admin_chunk",
     "to_admin_document",
     "to_admin_task",
     "to_admin_version",
     "to_chain_verification",
+    "to_cross_tenant_cost",
     "to_dashboard_response",
+    "to_index_rebuild_response",
     "to_index_version",
 ]

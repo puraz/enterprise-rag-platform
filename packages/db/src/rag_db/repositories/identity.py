@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -76,6 +77,25 @@ class TenantRepository:
         if after_id is not None:
             stmt = stmt.where(Tenant.id > after_id)
         result = await self._session.execute(stmt)
+        return list(result.scalars())
+
+    async def get_many(self, *, tenant_ids: Sequence[uuid.UUID]) -> list[Tenant]:
+        """批量取租户（跨租户成本汇总时填名称用）。
+
+        ## 为什么必须批量而不是循环单查
+
+        成本汇总会返回最多 200 个租户。循环调 `get_by_id` 就是 200 次
+        数据库往返——"看一个看板"不该有 N+1 查询（AGENTS.md 明令禁止）。
+
+        ## 为什么不 JOIN 进成本聚合
+
+        `model_calls` 与 `tenants` 是不同聚合，JOIN 会多一层依赖；
+        而且租户被删后 `model_calls.tenant_id` 仍保留（成本记录不删），
+        JOIN 会丢行。分开查能把"已删除但仍产生过成本的租户"显式带出来。
+        """
+        if not tenant_ids:
+            return []
+        result = await self._session.execute(select(Tenant).where(Tenant.id.in_(list(tenant_ids))))
         return list(result.scalars())
 
 

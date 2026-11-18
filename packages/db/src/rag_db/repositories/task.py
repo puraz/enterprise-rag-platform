@@ -455,6 +455,39 @@ class TaskRepository:
         )
         return result.scalar_one_or_none() is not None
 
+    async def touch_lock(self, *, task_id: uuid.UUID, worker_id: str) -> bool:
+        """刷新认领时间（长任务的续锁）。
+
+        ## 为什么必须有这个方法
+
+        `reclaim_stale` 的判据是 `locked_at < now() - lock_timeout`。
+        引擎只在认领时写一次 `locked_at`。索引重建这类任务要跑几十分钟，
+        远超 `lock_timeout`（默认 600 秒），于是会在跑到一半时被
+        另一个 worker 抢走重跑——两个进程同时调 embedding API（花双倍钱）、
+        同时写旁表（互相阻塞）。
+
+        所以长任务 handler 每处理完一批就调一次本方法。
+
+        ## 为什么带 `worker_id` 条件
+
+        任务可能已被回收并派给别的 worker。此时本进程续锁必须失败，
+        不能把 `locked_at` 改成"一个已经不属于我"的任务的锁——
+        那会让原 worker 误以为还持有锁而继续跑。
+
+        返回 False 时调用方应**主动停止**（说明锁已被抢走）。
+        """
+        result = await self._session.execute(
+            update(Task)
+            .where(
+                Task.id == task_id,
+                Task.locked_by == worker_id,
+                Task.status == TaskStatus.RUNNING.value,
+            )
+            .values(locked_at=func.now())
+            .returning(Task.id)
+        )
+        return result.scalar_one_or_none() is not None
+
     async def cancel(self, *, tenant_id: uuid.UUID, task_id: uuid.UUID) -> bool:
         """取消任务。已结束的任务不能取消。"""
         result = await self._session.execute(

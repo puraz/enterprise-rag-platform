@@ -17,14 +17,20 @@ from typing import Any
 from pydantic import BaseModel
 
 from rag_contracts.api.admin import (
+    ActivateIndexVersionRequest,
     AdminChunkItem,
     AdminDocumentItem,
     AdminDocumentVersionItem,
     AdminTaskItem,
     AuditChainVerification,
+    CreateIndexRebuildRequest,
+    CrossTenantCostResponse,
     DashboardCounters,
     DashboardResponse,
+    IndexRebuildResponse,
     IndexVersionItem,
+    RollbackIndexVersionRequest,
+    TenantCostSummary,
 )
 from rag_contracts.api.audit import AuditLogItem, AuditQueryResponse
 from rag_contracts.api.auth import (
@@ -193,6 +199,14 @@ EXPORTED_MODELS: tuple[type[BaseModel], ...] = (
     AdminChunkItem,
     IndexVersionItem,
     AuditChainVerification,
+    # 索引重建 / 切换 / 回滚（C3）
+    CreateIndexRebuildRequest,
+    IndexRebuildResponse,
+    ActivateIndexVersionRequest,
+    RollbackIndexVersionRequest,
+    # 跨租户成本汇总（C2 / C4）
+    TenantCostSummary,
+    CrossTenantCostResponse,
 )
 
 # 需要导出的枚举。导出成 TS 字符串联合类型，而不是 TS enum

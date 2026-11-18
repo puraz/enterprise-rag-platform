@@ -79,6 +79,7 @@ from rag_core.errors import NotFoundError
 from rag_core.logging import get_logger
 from rag_db.models.document import Document, DocumentVersion
 from rag_db.repositories import ChunkRepository, DocumentRepository
+from rag_worker.engine import require_session
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -95,6 +96,10 @@ class ChunkDocumentHandler:
         {"document_id": "...", "document_version_id": "..."}
     """
 
+    # 单文档处理：引擎会包在一个事务里（失败整体回滚）。
+    # 长任务（索引重建）才需要 owns_transaction = True。
+    owns_transaction = False
+
     def __init__(self, *, storages: dict[str, StorageBackend]) -> None:
         if not storages:
             raise ValueError("至少需要一个存储后端")
@@ -104,10 +109,14 @@ class ChunkDocumentHandler:
     async def __call__(
         self,
         *,
-        session: AsyncSession,
+        session: AsyncSession | None,
         task: Any,
         progress: Any,
+        session_factory: Any = None,
     ) -> None:
+        # 本 handler 不自管事务（owns_transaction = False），引擎保证传 session。
+        # `session_factory` 只为满足 TaskHandler 协议签名，这里不使用。
+        session = require_session(session)
         payload = dict(task.payload or {})
         document_id = _require_uuid(payload, "document_id")
         version_id = _require_uuid(payload, "document_version_id")

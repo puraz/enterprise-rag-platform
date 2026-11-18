@@ -35,16 +35,18 @@ from rag_api.deps import get_database
 from rag_api.openapi import ADMIN_ENDPOINT
 from rag_api.permissions import AdminCapability, AdminContext, get_admin_context
 from rag_api.permissions.admin import require_admin_capability, scoped_admin_session
-from rag_api.schemas.admin import to_dashboard_response
-from rag_contracts.api.admin import DashboardResponse
+from rag_api.schemas.admin import to_cross_tenant_cost, to_dashboard_response
+from rag_contracts.api.admin import CrossTenantCostResponse, DashboardResponse
+from rag_contracts.enums import AuditAction, AuditOutcome, AuditTargetType
 from rag_core.db import Database
-from rag_core.errors import ValidationFailedError
+from rag_core.errors import PermissionDeniedError, ValidationFailedError
 from rag_db.repositories import (
     AuditRepository,
     DocumentRepository,
     KnowledgeBaseRepository,
     ModelCallRepository,
     TaskRepository,
+    TenantRepository,
 )
 
 router = APIRouter(prefix="/dashboard", tags=["admin"])
@@ -130,6 +132,72 @@ async def get_dashboard(
             "total_cost_usd": float(totals["cost_usd"]),
         },
         breakdown=breakdown,
+    )
+
+
+@router.get(
+    "/cross-tenant-cost",
+    response_model=CrossTenantCostResponse,
+    summary="全平台成本汇总（跨租户）",
+    description=(
+        "按租户聚合模型调用成本，**跨全部租户**。\n\n"
+        "**这是管理面唯一跨租户的读接口**，需要 `admin` 能力"
+        "（平台超管 / 租户管理员），且每次调用强制写审计。\n\n"
+        "为什么不做成看板的 `all_tenants=true` 开关：开关一旦存在，"
+        "被误开（前端默认值写错、URL 被复制）就会让不该看的人看到全平台数据，"
+        "而接口返回 200 完全看不出来。独立接口让这件事在代码里显式可见。\n\n"
+        "**注意租户管理员调用会返回 403**：`admin` 能力虽然包含在租户角色里，"
+        "但跨租户视图要求 `scope_tenant_id is None`（只有平台角色满足）。\n\n"
+        "明细对账不走本接口（`model_calls` 有全量记录），"
+        "走 `scripts/audit_integrity.py`（直连 DB）。"
+    ),
+    dependencies=[Depends(require_admin_capability(AdminCapability.ADMIN))],
+    responses=ADMIN_ENDPOINT,
+)
+async def get_cross_tenant_cost(
+    ctx: AdminContext = Depends(get_admin_context),
+    database: Database = Depends(get_database),
+    days: int = Query(default=30, ge=1, le=366, description="统计最近多少天"),
+    limit: int = Query(default=200, ge=1, le=500, description="最多返回多少个租户（按花费倒序）"),
+) -> CrossTenantCostResponse:
+    # ---- 跨租户视图必须锁定"平台角色" ----
+    #
+    # `AdminCapability.ADMIN` 租户管理员也有（他能管自己租户的配置），
+    # 但"全平台成本"不属于任何租户。所以这里额外要求 scope_tenant_id
+    # 为 None——只有平台角色满足（见 AdminContext 的说明）。
+    if ctx.scope_tenant_id is not None:
+        raise PermissionDeniedError("跨租户成本汇总仅平台角色可用")
+
+    since = datetime.now(UTC) - timedelta(days=days)
+
+    # **必须用 BYPASSRLS 会话**：`model_calls` 在 RLS 表里，
+    # 任何带租户上下文的会话都只能看到单租户，跨租户聚合会静默返回不完整数据。
+    # 这是本模块唯一走特权路径的地方，因此审计是强制的。
+    async with database.transaction_bypass_rls() as session:
+        rows = await ModelCallRepository(session).cost_by_tenant(since=since, limit=limit)
+        tenant_ids = [row["tenant_id"] for row in rows]
+        tenants = await TenantRepository(session).get_many(tenant_ids=tenant_ids)
+
+        await AuditRepository(session).record(
+            tenant_id=None,  # 全局事件：不进任何租户的哈希链
+            action=AuditAction.ADMIN_CONFIG_CHANGE,
+            outcome=AuditOutcome.SUCCESS,
+            actor_user_id=ctx.user_id,
+            actor_platform_role=ctx.platform_role.value,
+            target_type=AuditTargetType.TENANT,
+            details={
+                "operation": "cross_tenant_cost_view",
+                "window_days": days,
+                "tenant_count": len(rows),
+                "platform_role": ctx.platform_role.value,
+            },
+        )
+
+    return to_cross_tenant_cost(
+        since=since,
+        until=None,
+        rows=rows,
+        tenant_names={t.id: (t.slug, t.name) for t in tenants},
     )
 
 

@@ -33,6 +33,7 @@ from rag_core.logging import get_logger
 from rag_worker.handlers.chunk import ChunkDocumentHandler
 from rag_worker.handlers.embed import EmbedDocumentHandler
 from rag_worker.handlers.parse import ParseDocumentHandler
+from rag_worker.handlers.rebuild import RebuildIndexHandler
 
 if TYPE_CHECKING:
     from rag_adapters.providers.embedding import EmbeddingProvider
@@ -64,6 +65,10 @@ def build_handlers(
         TaskType.EMBED_DOCUMENT.value: EmbedDocumentHandler(
             provider=embedding_provider, settings=embedding_settings, tracer=tracer
         ),
+        # 索引重建：声明 owns_transaction，引擎会传 session_factory 而不是
+        # 一个会话——它要按批提交（十万 chunk 塞一个事务会占住连接、
+        # 崩溃丢进度、且锁不刷新会被误判为卡死重派）。
+        TaskType.REBUILD_INDEX.value: RebuildIndexHandler(provider=embedding_provider),
     }
 
     # 尚未实现的任务类型在这里显式列出，启动日志会打出"缺哪些"。

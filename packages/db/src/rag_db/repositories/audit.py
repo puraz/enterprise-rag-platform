@@ -645,3 +645,62 @@ class ModelCallRepository:
             "output_tokens": int(row[2]),
             "cost_usd": row[3] if isinstance(row[3], Decimal) else Decimal(str(row[3])),
         }
+
+    async def cost_by_tenant(
+        self,
+        *,
+        since: datetime,
+        until: datetime | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """按租户聚合成本（全平台视图）。
+
+        ## 这是唯一一个**不带 tenant_id 条件**的成本查询
+
+        调用方必须是平台角色，且必须写审计——**本方法不做权限判断**，
+        它在仓储层（仓储不认识权限）。安全性由上层保证：
+        只有 `GET /admin/cost/cross-tenant` 用它，且那个接口挂了
+        `AdminCapability.ADMIN` + 强制审计。
+
+        ## 为什么需要 BYPASSRLS 会话
+
+        `model_calls` 在 `RLS_TABLES` 里。普通会话下没有任何
+        `app.tenant_id` 上下文时 RLS 返回 0 行；设了某个租户又只能看到
+        那一个。所以调用方必须传 `transaction_bypass_rls()` 的会话。
+
+        ## `limit` 是必需的
+
+        租户数理论上无上限（平台超管能开通任意多租户）。
+        不设上限会让响应体随租户数线性增长，最终拖垮浏览器。
+
+        排序按花费倒序：运营关心的是"谁在烧钱"，而不是字母序。
+        """
+        stmt = (
+            select(
+                ModelCall.tenant_id,
+                func.count().label("call_count"),
+                func.coalesce(func.sum(ModelCall.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(ModelCall.output_tokens), 0).label("output_tokens"),
+                func.coalesce(func.sum(ModelCall.cached_tokens), 0).label("cached_tokens"),
+                func.coalesce(func.sum(ModelCall.cost_usd), 0).label("cost_usd"),
+            )
+            .where(ModelCall.created_at >= since)
+            .group_by(ModelCall.tenant_id)
+            .order_by(func.sum(ModelCall.cost_usd).desc())
+            .limit(limit)
+        )
+        if until is not None:
+            stmt = stmt.where(ModelCall.created_at < until)
+
+        result = await self._session.execute(stmt)
+        return [
+            {
+                "tenant_id": row[0],
+                "call_count": int(row[1]),
+                "input_tokens": int(row[2]),
+                "output_tokens": int(row[3]),
+                "cached_tokens": int(row[4]),
+                "cost_usd": row[5] if isinstance(row[5], Decimal) else Decimal(str(row[5])),
+            }
+            for row in result
+        ]

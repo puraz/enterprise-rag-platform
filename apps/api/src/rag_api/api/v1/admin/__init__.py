@@ -29,6 +29,7 @@ from rag_api.api.v1.admin.audit import router as audit_router
 from rag_api.api.v1.admin.dashboard import router as dashboard_router
 from rag_api.api.v1.admin.documents import index_router
 from rag_api.api.v1.admin.documents import router as documents_router
+from rag_api.api.v1.admin.indexing import router as indexing_router
 from rag_api.api.v1.admin.tasks import router as tasks_router
 
 
@@ -56,8 +57,10 @@ def build_admin_router() -> APIRouter:
     api_v1.include_router(tasks_router)
     # 文档台账、版本、chunk 预览（C3）
     api_v1.include_router(documents_router)
-    # 索引版本与 alias 状态（C3）
+    # 索引版本与 alias 状态（C3，只读）
     api_v1.include_router(index_router)
+    # 索引重建 / 切换 / 回滚（C3，写：三段独立接口）
+    api_v1.include_router(indexing_router)
     # 安全审计查询与链验证（C5）
     api_v1.include_router(audit_router)
 

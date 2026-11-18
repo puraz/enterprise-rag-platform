@@ -114,14 +114,36 @@ class TaskHandler(Protocol):
     - 不吞异常：失败必须抛出，由引擎决定重试或死信；
     - 不记录文档内容（日志里只能有 ID 与计数）；
     - 长任务应通过 `progress` 回调报告进度。
+
+    ## `owns_transaction`：长任务的分批提交开关
+
+    默认（`owns_transaction = False`）引擎给一个租户会话并把整个 handler
+    包在一个事务里——绝大多数 handler（解析/切分/向量化单个文档）都该这样：
+    失败整体回滚，不留半成品。
+
+    **但索引重建做不到**：一份 10 万 chunk 的库回填要几十分钟，
+    整段一个事务意味着——
+
+    - 长时间占住一个连接，阻塞 vacuum；
+    - 崩溃时全部进度丢失（下次从头再来）；
+    - 事务里的 `locked_at` 不更新，会被 `reclaim_stale` 判为卡死并重派，
+      于是**两个 worker 同时回填同一个版本**。
+
+    所以这类 handler 声明 `owns_transaction = True`，引擎改为传
+    `session_factory`（一个"开新事务"的工厂），由 handler 自己按批提交。
+    代价是**幂等责任完全转移给 handler**——引擎不再能整体回滚它。
     """
+
+    owns_transaction: bool = False
+    """是否自己管理事务边界。为 True 时引擎传 `session_factory`。"""
 
     async def __call__(
         self,
         *,
-        session: AsyncSession,
+        session: AsyncSession | None,
         task: Any,
         progress: Callable[[int, str], Awaitable[None]],
+        session_factory: TenantSessionFactory | None = None,
     ) -> None: ...
 
 
@@ -374,9 +396,23 @@ class WorkerEngine:
 
         try:
             # 业务写在**租户会话**里：RLS 生效，越权即失败而不是静默读到别人数据
-            async with trace_cm as span, self._tenant_sessions(task.tenant_id) as session:
-                await handler(session=session, task=task, progress=reporter)
-                await session.commit()
+            async with trace_cm as span:
+                if getattr(handler, "owns_transaction", False):
+                    # 长任务（索引重建）：handler 自己按批开事务。
+                    #
+                    # 传进去的是"开新事务"的工厂，而不是一个已开启的会话。
+                    # 引擎不再能整体回滚它——所以这类 handler 必须自己幂等，
+                    # 且要自己刷新任务锁（见 RebuildIndexHandler 的说明）。
+                    await handler(
+                        session=None,
+                        task=task,
+                        progress=reporter,
+                        session_factory=self._tenant_sessions,
+                    )
+                else:
+                    async with self._tenant_sessions(task.tenant_id) as session:
+                        await handler(session=session, task=task, progress=reporter)
+                        await session.commit()
         except Exception as exc:
             # 失败原因写进 span：trace 里看到的应该是"parse 失败: ParseError"，
             # 而不是一个 3 秒就结束、没有任何结论的黑块。
@@ -649,6 +685,30 @@ def _safe_message(exc: BaseException) -> str:
     return redact_text(str(exc)[:200])
 
 
+def require_session(session: AsyncSession | None) -> AsyncSession:
+    """单文档 handler 的会话断言（`owns_transaction = False` 时用）。
+
+    ## 为什么不用裸 `assert`
+
+    `assert` 在 `python -O` 下会被**整个移除**（生产镜像一旦启用优化，
+    这个防护就静默消失）。用显式 `raise` 才能保证它在任何模式下都生效。
+
+    ## 为什么需要这个检查
+
+    引擎按 `owns_transaction` 分支传参。如果哪天分支写错、给单文档 handler
+    传了 `session=None`，Go 到 handler 里第一行就会 `AttributeError`
+    （`None.execute`），错误信息指向业务代码，而根因在引擎的分派逻辑。
+
+    显式检查让错误直接指向"引擎没给会话"，一眼能定位。
+    """
+    if session is None:
+        raise RuntimeError(
+            "单文档 handler 必须由引擎提供会话（owns_transaction=False 时 "
+            "引擎会包一个事务并传 session；传 None 说明分派逻辑有误）"
+        )
+    return session
+
+
 __all__ = [
     "ProgressReporter",
     "SessionFactory",
@@ -656,4 +716,5 @@ __all__ = [
     "TenantSessionFactory",
     "WorkerEngine",
     "WorkerStats",
+    "require_session",
 ]
