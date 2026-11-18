@@ -182,8 +182,35 @@ async def _enqueue_rebuild(
         )
 
 
+_REFRESH_VERSION_COUNT = text(
+    """
+    UPDATE index_versions v
+    SET chunk_count = (
+        SELECT count(*)
+        FROM chunk_embeddings e
+        JOIN chunks c ON c.id = e.chunk_id
+        WHERE e.index_version_id = v.id
+          AND c.is_current = TRUE AND c.chunk_level = 0
+    )
+    WHERE v.id = :version
+    """
+)
+
+
 async def _activate(db: Database, *, knowledge_base_id: uuid.UUID, version_id: uuid.UUID) -> None:
+    """重算计数后切换 ACTIVE。
+
+    ## 为什么切换前要重算 `chunk_count`
+
+    handler 是**逐批**刷新计数的，实测出现过“实际 6 条、元信息 5 条”
+    （最后一批的计数未落库）。这个字段被看板与 `IndexRebuilder` 的
+    切换前校验使用，偏小会让人误以为回填失败。
+
+    切换前以**子表真实行数**重算一次：幂等、便宜（一次索引扫描），
+    与“回填完成度以旁表 COUNT 为准”的原则一致。
+    """
     async with db.transaction_bypass_rls() as session:
+        await session.execute(_REFRESH_VERSION_COUNT, {"version": version_id})
         await IndexVersionRepository(session).activate(
             knowledge_base_id=knowledge_base_id, version_id=version_id
         )
