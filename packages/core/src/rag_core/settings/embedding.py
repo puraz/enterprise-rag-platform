@@ -1,93 +1,157 @@
-"""Embedding 模型配置。
+"""Embedding 模型配置（远程 API 形态）。
+
+## 为什么从"本地模型"换成"远程 API"
+
+本地 bge-m3 需要 `sentence-transformers` + `torch`。PyPI 上的 torch 默认是
+CUDA 构建，会连带拉 `nvidia-*` / `triton` 共 2GB+：一次镜像构建要十几分钟，
+最终镜像 7GB，而实际推理跑在 CPU 上——这些 CUDA 运行时从未被使用。
+
+换成 OpenAI 兼容的 embedding API（当前是智谱 `embedding-3`）后：
+- 镜像不再需要 torch，构建从十几分钟降到一两分钟；
+- 不再需要 2GB 模型缓存卷与 HF 镜像地址；
+- 代价是每次入库/查询都走网络，且数据要离开进程（合规需评估）。
+
+**插拔能力完整保留**：`provider` 是注册表键，换供应商只改配置；
+所有实现都必须满足同一份 `EmbeddingProvider` 契约（维度、顺序、归一化）。
 
 ## 维度必须与数据库一致
 
 `chunks.embedding` 是 `vector(1024)`（A3-3 固定）。配置里的 `dimension`
-必须相同，否则入库报错。`LocalBGEEmbedding` 在初始化时会校验。
+必须相同，否则入库报错。工厂会在构造时校验（`build_embedding_provider`）。
 
-**改维度是 expand-contract 迁移**（A3-3 的 docstring 已写）：
-新增列 → 双写 → 回填 → 切索引 → 删旧列。不要直接 `ALTER COLUMN TYPE`。
+**换 provider / 换模型 = 换向量空间**：旧向量与新向量不可比较，
+必须重建索引（A10 的版本化重建），否则检索结果会静默变差（不报错）。
 
-## 为什么不放在 LLMSettings 里
+## 为什么 `api_key` 用 SecretStr
 
-Embedding 与 LLM 是两类完全不同的能力：
-- 计价方式不同（本地免费 / API 按 token）；
-- 部署形态不同（本地模型占 2GB 内存，LLM 是远程 HTTP）；
-- 更换频率不同（embedding 换了要重建全部索引，LLM 换了只影响新请求）。
-
-放在一起会让人误以为"换 LLM 模型会同时换 embedding"——那是灾难性的
-（所有向量失效）。
+配置对象会被 `safe_dump()` 打进启动日志。SecretStr 序列化成 `**********`，
+避免"启动日志里躺着明文 key"这种最常见也最致命的泄漏方式。
 """
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+
+#: 默认的智谱（BigModel）OpenAI 兼容端点。
+#:
+#: 智谱的 embeddings 接口与 OpenAI 的 `/v1/embeddings` 形状一致：
+#: `{"model": ..., "input": [...] , "dimensions": 1024}` + Bearer 鉴权。
+DEFAULT_EMBEDDING_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
 
 
 class EmbeddingSettings(BaseModel):
-    """Embedding 模型配置。"""
+    """Embedding 配置（远程 API）。"""
 
     model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
 
-    provider: str = "local_bge"
+    provider: str = "zhipu"
     """实现名。对应 `rag_adapters.providers.factory` 的注册表键。
 
-    可选：`local_bge`（sentence-transformers）、`openai`（API）、`fake`（测试）。
+    可选：
+    - `zhipu`：智谱 OpenAI 兼容端点（当前默认）；
+    - `siliconflow`：硅基流动（同样是 OpenAI 兼容）；
+    - `openai_compatible` / `openai`：任何提供 `/embeddings` 的服务
+      （阿里百炼兼容模式 / vLLM / TEI 的 OpenAI 适配层等）。
+
+    这几个键指向**同一个实现**（LangChain `OpenAIEmbeddings` 适配），
+    区别只在 `base_url` 与模型名——形状相同的东西不该写多遍。
     """
 
-    model_name: str = "BAAI/bge-m3"
-    """HuggingFace 模型标识或本地路径。
+    model_name: str = "embedding-3"
+    """模型标识。由供应商定义，不要臆造。
 
-    `bge-m3`：1024 维，8192 token 上下文，多语言。**当前选择**。
-    `BAAI/bge-large-zh-v1.5`：1024 维，512 token，纯中文更强但上下文短。
+    智谱 `embedding-3`：支持自定义输出维度（`dimensions` 参数）。
     """
 
-    dimension: int = Field(default=1024, ge=1)
-    """输出维度。**必须与 `chunks.embedding` 的列定义一致**（A3-3 是 1024）。"""
+    dimension: int = Field(default=1024, ge=1, le=4096)
+    """输出维度。**必须与 `chunks.embedding` 的列定义一致**（当前 1024）。
 
-    device: str = "cpu"
-    """`cpu` / `cuda` / `mps`。本机无 GPU（NVML 驱动不匹配），故默认 cpu。"""
+    模型原生维度可能更大（例如 2048），通过 `dimensions` 参数降维后
+    仍是同一向量空间的前缀投影，可与库里的 1024 维向量比较。
+    """
+
+    base_url: str = DEFAULT_EMBEDDING_BASE_URL
+    """API 根地址（**包含版本段**，如 `.../api/paas/v4`）。
+
+    实现内部会拼成 `{base_url}/embeddings`。
+    """
+
+    api_key: SecretStr | None = None
+    """API Key。只走环境变量（`RAG_EMBEDDING__API_KEY`），不进库、不进日志。"""
+
+    timeout_s: int = Field(default=30, ge=1, le=300)
+    """单次 HTTP 请求超时。批量越大越需要放宽。"""
 
     batch_size: int = Field(default=32, ge=1, le=256)
-    """单次 encode 的批大小。
+    """单次请求携带多少条文本。
 
-    太大会一次性占满内存（bge-m3 每条最长 8192 token，32 条已接近 1GB
-    显存/内存）；太小则浪费批处理优势。32 是 CPU 上的经验值。
+    批量太小 → 请求数线性增长、延迟翻倍；
+    批量太大 → 单次请求的 token 数触顶（服务端 400），且失败时整批重试。
+
+    32 是 1024 维中文短文本的经验值；服务端报"批量过大"时调小即可。
     """
 
     max_input_tokens: int = Field(default=8192, ge=1)
-    """单条文本的最大 token 数。bge-m3 支持 8192。
+    """单条文本的长度上限（**按字符数近似**，由调用方/切分保证）。
 
-    超长会被模型静默截断（损失语义），所以切分策略（A9）要保证
-    chunk 不超过这个值。
+    这里不是精确 tokenizer：它只是防止把整篇文档当一条发出去的护栏。
+    真正的向量化对象是 chunk（≤ 800 字符），远小于该值。
     """
 
-    cache_dir: str | None = None
-    """模型缓存目录。None 用 HuggingFace 默认（~/.cache/huggingface）。"""
+    send_dimensions: bool = True
+    """是否在请求里带 `dimensions` 参数。
 
-    hf_endpoint: str | None = None
-    """HuggingFace 镜像地址。
+    支持自定义维度的模型（智谱 `embedding-3`）必须带，否则返回原生维度，
+    与 `vector(1024)` 不匹配。个别自建服务不认这个字段，可关闭。
+    """
 
-    **国内必须配置**：直连 huggingface.co 会超时（实测）。
-    用 `https://hf-mirror.com`。
+    normalize: bool = True
+    """是否对返回向量做 L2 归一化。
 
-    这个值会在模型加载前写入 `HF_ENDPOINT` 环境变量——
-    sentence-transformers 通过该变量选择下载源。
+    **默认开**：归一化后余弦相似度 = 内积，与 pgvector 的
+    `vector_cosine_ops` 语义一致，且未来切内积索引无需改数据。
+    服务端多数不保证归一化，所以这一层必须自己做。
     """
 
     query_instruction: str | None = None
-    """查询时的指令前缀。
+    """查询指令前缀（仅部分模型需要）。
 
-    `bge-m3` 不需要（官方说明），保持 None。
-    换成 `bge-large-zh-v1.5` 时需要配：
-    `"为这个句子生成表示以用于检索相关文章："`
+    - 智谱 `embedding-3`：不需要，保持 None；
+    - 某些 bge 系 API：需要 `"为这个句子生成表示以用于检索相关文章："`。
 
-    用错前缀不会报错，只会让召回率下降。
+    加错前缀不会报错，只会让召回率下降——所以它是配置项而不是硬编码。
     """
 
-    max_concurrency: int = Field(default=2, ge=1)
-    """并发上限。
+    max_concurrency: int = Field(default=4, ge=1, le=64)
+    """并发请求上限（ResilientCaller 的信号量）。
 
-    CPU 上同时跑多个 embedding 请求只会互相抢核，吞吐反而下降。
-    默认 2：一个跑批、一个等待，避免长任务饿死短任务。
+    远程 API 的瓶颈在服务端配额；并发过高只会换来 429。
     """
+
+    @field_validator("base_url")
+    @classmethod
+    def _validate_base_url(cls, value: str) -> str:
+        url = value.strip().rstrip("/")
+        if not url.startswith(("http://", "https://")):
+            raise ValueError(f"embedding.base_url 必须带协议，当前是 {value!r}")
+        return url
+
+    @property
+    def configured(self) -> bool:
+        """是否具备调用远程 API 的条件。"""
+        return bool(self.api_key)
+
+    @property
+    def redacted_summary(self) -> dict[str, object]:
+        """可安全打印的配置摘要。"""
+        return {
+            "provider": self.provider,
+            "model": self.model_name,
+            "base_url": self.base_url,
+            "dimension": self.dimension,
+            "batch_size": self.batch_size,
+            "has_api_key": self.configured,
+        }
+
+
+__all__ = ["DEFAULT_EMBEDDING_BASE_URL", "EmbeddingSettings"]

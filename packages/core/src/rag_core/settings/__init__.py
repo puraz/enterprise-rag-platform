@@ -17,9 +17,11 @@ from rag_core.settings.ratelimit import ChatRateLimitSettings, RateLimitSettings
 from rag_core.settings.redis import RedisSettings
 from rag_core.settings.retrieval import RerankerSettings, RetrievalSettings
 from rag_core.settings.storage import StorageSettings
+from rag_core.settings.tracing import DEFAULT_LANGFUSE_HOST, TracingSettings
 from rag_core.settings.worker import WorkerSettings
 
 __all__ = [
+    "DEFAULT_LANGFUSE_HOST",
     "ENV_SELECTOR",
     "ChatRateLimitSettings",
     "DatabaseSettings",
@@ -36,6 +38,7 @@ __all__ = [
     "Settings",
     "StorageSettings",
     "TokenPricing",
+    "TracingSettings",
     "WorkerSettings",
     "find_project_root",
     "get_settings",

@@ -28,6 +28,7 @@ from rag_core.settings.ratelimit import RateLimitSettings
 from rag_core.settings.redis import RedisSettings
 from rag_core.settings.retrieval import RerankerSettings, RetrievalSettings
 from rag_core.settings.storage import StorageSettings
+from rag_core.settings.tracing import TracingSettings
 from rag_core.settings.worker import WorkerSettings
 
 # RAG_ENV 要参与"选哪个 .env 文件"，所以常量单独暴露
@@ -102,6 +103,9 @@ class Settings(BaseSettings):
     # 前者是策略参数，后者是一次模型替换（不影响已入库向量）。
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
     reranker: RerankerSettings = Field(default_factory=RerankerSettings)
+    # 链路追踪（Langfuse）：默认关闭，开启后导出脱敏 span。
+    # 与 Prometheus 指标互补：指标回答"多少"，trace 回答"哪一步慢/错"。
+    tracing: TracingSettings = Field(default_factory=TracingSettings)
 
     @property
     def resolved_log_format(self) -> Literal["json", "console"]:
@@ -153,6 +157,18 @@ class Settings(BaseSettings):
         # LLM 供应商密钥：配了 provider 就必须有 key，否则所有 AI 功能不可用
         if self.llm.provider and not self.llm.api_key:
             problems.append(f"RAG_LLM__API_KEY 未配置（provider={self.llm.provider}）")
+
+        # Embedding 是远程 API：没 key 意味着所有文档都无法向量化，
+        # 文档会停在 embedding 阶段。这类缺陷不会让请求失败，
+        # 只会让"传了文档但检索不到"，所以必须在启动时拦住。
+        if not self.embedding.configured:
+            problems.append(f"RAG_EMBEDDING__API_KEY 未配置（provider={self.embedding.provider}）")
+
+        # 追踪开启但缺凭证：生产里这意味着"以为在观测，其实什么都没记"。
+        # 这类错误不会让请求失败，只会让事故复盘时发现没有数据，
+        # 所以必须在启动阶段就拦住。
+        if self.tracing.enabled and not self.tracing.configured:
+            problems.append("RAG_TRACING__ENABLED=true 但 PUBLIC_KEY / SECRET_KEY 未配置")
 
         if problems:
             joined = "；".join(problems)

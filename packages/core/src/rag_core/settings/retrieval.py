@@ -19,7 +19,7 @@
 |---|---|---|
 | `use_rewrite` | 开 | 多轮必需（"那二线呢"单独检索召回为零） |
 | `use_keyword` | 开 | 精确词（编号、姓名、错误码）向量检索天然弱 |
-| `use_rerank` | 关 | 本地 cross-encoder 是 CPU 密集，20 条候选约数百毫秒；先在评估里验证增益再开 |
+| `use_rerank` | 关 | 当前只有 `NoOpReranker`（直通）；接远程 rerank API 后用评估验证增益再开 |
 | `use_self_check` | 关 | 每次问答多一次 LLM 调用（约 500~1500ms）；对外客服场景应打开 |
 
 `self_check_action` 决定"生成后自省未通过"时怎么处理：
@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 
 class RetrievalSettings(BaseModel):
@@ -131,7 +131,22 @@ class RetrievalSettings(BaseModel):
 
 
 class RerankerSettings(BaseModel):
-    """Reranker（cross-encoder）配置。
+    """Reranker（远程 rerank API）配置。
+
+    ## 现在接的是 SiliconFlow 的 `/rerank`
+
+    ```
+    POST {base_url}/rerank
+    {"model": "Qwen/Qwen3-Reranker-4B", "query": "...",
+     "documents": ["..."], "return_documents": false, "top_n": N}
+    → {"results": [{"index": 0, "relevance_score": 0.93}, ...]}
+    ```
+
+    这个形状与 Cohere 的 rerank 一致，但它**不是 OpenAI 协议的一部分**，
+    LangChain 也没有通用的 OpenAI 兼容 rerank 封装
+    （`langchain_community` 里只有 Cohere 与本地 CrossEncoder 两种实现，
+    都依赖额外 SDK / torch）。所以 rerank 保留一个薄适配器：
+    协议不变，换家只改 `base_url` + `model_name`。
 
     ## 为什么不放在 `EmbeddingSettings`
 
@@ -146,32 +161,51 @@ class RerankerSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
 
     provider: str = "none"
-    """实现名。可选：`none`（直通）/ `local_bge`（sentence-transformers CrossEncoder）。"""
+    """实现名。可选：`none`（直通）/ `siliconflow`（远程 /rerank）。"""
 
-    model_name: str = "BAAI/bge-reranker-base"
-    """HuggingFace 模型标识或本地路径。
+    model_name: str = "Qwen/Qwen3-Reranker-4B"
+    """供应商模型标识（不臆造：这是当前实际使用的模型）。"""
 
-    `BAAI/bge-reranker-base`：约 280M，中文效果稳定，CPU 可接受；
-    `BAAI/bge-reranker-v2-m3`：更强但约 568M，CPU 上明显更慢。
-    """
+    base_url: str = "https://api.siliconflow.cn/v1"
+    """API 根地址（不包含 `/rerank`）。"""
 
-    device: str = "cpu"
-    """`cpu` / `cuda` / `mps`。"""
+    api_key: SecretStr | None = None
+    """API Key。只走环境变量（`RAG_RERANKER__API_KEY`）。"""
+
+    timeout_s: int = Field(default=30, ge=1, le=300)
+    """单次请求超时。重排一次要跑 N 对，比 embedding 慢。"""
 
     batch_size: int = Field(default=8, ge=1, le=64)
-    """单次 predict 的批大小。CPU 上 8 是延迟与吞吐的折中。"""
-
-    max_length: int = Field(default=512, ge=64, le=8192)
-    """(query, document) 对的最大 token 数。超出会被模型静默截断。"""
+    """单次请求的重排对数（批量上限）。"""
 
     max_pairs: int = Field(default=100, ge=1, le=1000)
-    """单次（分批后）处理的最大对数，防止候选过多时一次性吃满内存。"""
+    """单次（分批后）处理的最大对数，防止候选过多时一次性吃满配额。"""
 
-    cache_dir: str | None = None
-    """模型缓存目录。None 用 HuggingFace 默认。"""
+    max_concurrency: int = Field(default=2, ge=1, le=32)
+    """并发请求上限（ResilientCaller 信号量）。"""
 
-    hf_endpoint: str | None = None
-    """HuggingFace 镜像地址（国内必须配置，见 `EmbeddingSettings`）。"""
+    @field_validator("base_url")
+    @classmethod
+    def _validate_base_url(cls, value: str) -> str:
+        url = value.strip().rstrip("/")
+        if not url.startswith(("http://", "https://")):
+            raise ValueError(f"reranker.base_url 必须带协议，当前是 {value!r}")
+        return url
+
+    @property
+    def configured(self) -> bool:
+        """是否具备调用远程 rerank 的条件。"""
+        return self.provider != "none" and bool(self.api_key)
+
+    @property
+    def redacted_summary(self) -> dict[str, object]:
+        """可安全打印的配置摘要。"""
+        return {
+            "provider": self.provider,
+            "model": self.model_name,
+            "base_url": self.base_url,
+            "has_api_key": bool(self.api_key),
+        }
 
 
 __all__ = ["RerankerSettings", "RetrievalSettings"]

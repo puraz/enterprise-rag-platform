@@ -113,6 +113,7 @@ def test_production_with_real_secret_passes_and_uses_json_logs(
     monkeypatch.setenv("RAG_IDENTITY__JWT_ALGORITHM", "RS256")
     monkeypatch.setenv("RAG_LLM__API_KEY", "sk-a-real-production-key-value")
     monkeypatch.setenv("RAG_DATABASE__PASSWORD", "a-real-strong-secret")
+    monkeypatch.setenv("RAG_EMBEDDING__API_KEY", "a-real-embedding-key")
     settings = Settings()
     assert settings.env is RunEnv.PROD
     assert settings.resolved_log_format == "json"

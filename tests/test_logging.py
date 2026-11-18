@@ -53,6 +53,8 @@ def json_logs(monkeypatch: pytest.MonkeyPatch) -> Iterator[io.StringIO]:
         database={"password": "a-real-strong-secret"},
         identity={"jwt_secret": "a-production-grade-secret-value-32+", "jwt_algorithm": "RS256"},
         llm={"api_key": "sk-a-real-production-key-value"},
+        # Embedding 现在是远程 API：生产守卫要求有 key
+        embedding={"api_key": "a-real-embedding-key"},
     )
     setup_logging(settings, stream=stream)
     yield stream
@@ -302,6 +304,8 @@ def test_repeated_setup_does_not_duplicate_lines(monkeypatch: pytest.MonkeyPatch
         database={"password": "a-real-strong-secret"},
         identity={"jwt_secret": "a-production-grade-secret-value-32+", "jwt_algorithm": "RS256"},
         llm={"api_key": "sk-a-real-production-key-value"},
+        # Embedding 现在是远程 API：生产守卫要求有 key
+        embedding={"api_key": "a-real-embedding-key"},
     )
     setup_logging(settings, stream=stream)
     setup_logging(settings, stream=stream)
