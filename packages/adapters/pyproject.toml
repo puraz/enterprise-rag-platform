@@ -20,9 +20,14 @@ dependencies = [
     # LangGraph 提供显式图结构 + 可中断/可恢复的状态，且能导出执行轨迹
     # （A11 要求"每个节点耗时可见"，B4 要求"链路可视化"）。
     "langgraph>=0.2",
-    # 本地 embedding（bge-m3）+ CUDA
-    "sentence-transformers>=3.3",
-    "torch>=2.5",
+    # 远程 embedding：智谱/OpenAI 兼容的 /embeddings。
+    #
+    # **不再依赖 sentence-transformers / torch**：本地 bge-m3 需要 torch，
+    # 而 PyPI 的 torch 默认是 CUDA 构建（连带 nvidia-* ~2GB），
+    # 本项目的推理实际跑在 CPU 上——为从未用到的 CUDA 运行时付十几分钟构建时间。
+    # 插拔能力保留在 `providers/embedding.py` 的 EmbeddingProvider 契约上。
+    # 显式声明 httpx：直接 import 它，不能靠 langchain-openai 的传递依赖
+    "httpx>=0.27",
     # 对象存储：S3 协议一套代码兼容 AWS/MinIO/OSS/COS
     "boto3>=1.35",
     "types-boto3>=1.35",

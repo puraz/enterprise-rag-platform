@@ -53,6 +53,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import nullcontext
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
@@ -110,9 +111,10 @@ def _build_service(request: Request, session: AsyncSession) -> ChatService:
 
     settings = get_settings()
     retrieval = settings.retrieval
-    # 开了 use_rerank 但 provider=none 时，重排在融合顺序上做全 0 分排序，
-    # 纯属浪费。这里在装配期就把它关掉（配置错误要“显式降级”而不是静默跑空）。
-    use_rerank = retrieval.use_rerank and settings.reranker.provider != "none"
+    # 开了 use_rerank 但 provider=none 或缺 key 时，会在请求期失败并降级为
+    # RRF 顺序。这里在装配期就把它关掉（配置错误要“显式降级”而不是静默跑空），
+    # 启动日志会给出对应的 warning。
+    use_rerank = retrieval.use_rerank and settings.reranker.configured
 
     retrieval_config = RetrievalConfig(
         use_keyword=retrieval.use_keyword,
@@ -138,6 +140,9 @@ def _build_service(request: Request, session: AsyncSession) -> ChatService:
         settings=settings,
         retrieval_config=retrieval_config,
         metrics=getattr(request.app.state, "metrics", None),
+        # 追踪器：与 LLM/Embedding 一样从 app.state 取（进程级单例）。
+        # None 时所有 span 退化为 nullcontext，不影响业务。
+        tracer=getattr(request.app.state, "tracer", None),
     )
 
 
@@ -180,6 +185,7 @@ async def chat(
     session: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     service = _build_service(request, session)
+    tracer = getattr(request.app.state, "tracer", None)
 
     async def event_stream() -> AsyncIterator[str]:
         # 收集流里的事件，用于**流结束后写审计**。
@@ -188,52 +194,72 @@ async def chat(
         # 这些只有流结束才知道。提前写会记录一个"正在进行"的状态，
         # 而流可能随后失败——审计内容就错了。
         final_event: ChatEvent | None = None
-        try:
-            async for event in service.chat_stream(
-                tenant_id=ctx.tenant_id,
-                user_id=ctx.user_id,
-                query=payload.query,
+
+        # 一轮问答 = 一条 trace。`session_id` 用会话 ID，
+        # 这样 Langfuse 侧能把多轮追问串成同一条会话（同一条会话里的 trace
+        # 共享 session，而不是各看各的）。新会话首轮没有 ID，此时不设 session，
+        # 从第二轮开始就有。
+        trace_cm = (
+            tracer.atrace(
+                "chat.turn",
+                user_id=str(ctx.user_id),
+                session_id=str(payload.conversation_id) if payload.conversation_id else None,
+                tenant_id=str(ctx.tenant_id),
+                query_chars=len(payload.query),
+                knowledge_base_count=len(payload.knowledge_base_ids),
                 conversation_id=payload.conversation_id,
-                knowledge_base_ids=payload.knowledge_base_ids or None,
-                # 传 ACL 上下文：检索侧据此过滤越权文档
-                permission_ctx=ctx,
-            ):
-                if event.event in {"done", "error"}:
-                    final_event = event
-                yield _serialize(event)
-        except Exception as exc:
-            # 流已经开始后出错，无法改 HTTP 状态码（响应头已发出）。
-            # 只能发一个 error 事件让前端处理。
-            #
-            # **不能把异常细节发给客户端**：堆栈/SQL/路径都会泄漏。
-            log.error(
-                "chat_stream_failed",
-                error_type=type(exc).__name__,
-                exc_info=True,
             )
-            yield _serialize(
-                ChatEvent(
-                    "error",
-                    {
-                        "code": 90000,
-                        "code_name": "INTERNAL_UNEXPECTED",
-                        "message": "服务内部错误，请稍后重试",
-                    },
+            if tracer is not None
+            else nullcontext()
+        )
+
+        async with trace_cm:
+            try:
+                async for event in service.chat_stream(
+                    tenant_id=ctx.tenant_id,
+                    user_id=ctx.user_id,
+                    query=payload.query,
+                    conversation_id=payload.conversation_id,
+                    knowledge_base_ids=payload.knowledge_base_ids or None,
+                    # 传 ACL 上下文：检索侧据此过滤越权文档
+                    permission_ctx=ctx,
+                ):
+                    if event.event in {"done", "error"}:
+                        final_event = event
+                    yield _serialize(event)
+            except Exception as exc:
+                # 流已经开始后出错，无法改 HTTP 状态码（响应头已发出）。
+                # 只能发一个 error 事件让前端处理。
+                #
+                # **不能把异常细节发给客户端**：堆栈/SQL/路径都会泄漏。
+                log.error(
+                    "chat_stream_failed",
+                    error_type=type(exc).__name__,
+                    exc_info=True,
                 )
-            )
-        finally:
-            # **审计必须写**（合规硬要求）：记录谁在什么时候问了什么、
-            # 引用了哪些文档。这是"知识库被如何使用"的唯一痕迹。
-            #
-            # 细节脱敏：`details` 里只放 ID 与计数，**不放问题原文**
-            # （问题里可能有个人信息，而审计日志保留期很长）。
-            await service.record_audit(
-                ctx=ctx,
-                query=payload.query,
-                conversation_id=payload.conversation_id,
-                knowledge_base_ids=payload.knowledge_base_ids,
-                final_event=final_event,
-            )
+                yield _serialize(
+                    ChatEvent(
+                        "error",
+                        {
+                            "code": 90000,
+                            "code_name": "INTERNAL_UNEXPECTED",
+                            "message": "服务内部错误，请稍后重试",
+                        },
+                    )
+                )
+            finally:
+                # **审计必须写**（合规硬要求）：记录谁在什么时候问了什么、
+                # 引用了哪些文档。这是"知识库被如何使用"的唯一痕迹。
+                #
+                # 细节脱敏：`details` 里只放 ID 与计数，**不放问题原文**
+                # （问题里可能有个人信息，而审计日志保留期很长）。
+                await service.record_audit(
+                    ctx=ctx,
+                    query=payload.query,
+                    conversation_id=payload.conversation_id,
+                    knowledge_base_ids=payload.knowledge_base_ids,
+                    final_event=final_event,
+                )
 
     return StreamingResponse(
         event_stream(),
@@ -328,6 +354,7 @@ async def delete_conversation(
 async def submit_feedback(
     message_id: uuid.UUID,
     payload: FeedbackRequest,
+    request: Request,
     ctx: PermissionContext = Depends(get_permission_context),
     session: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
@@ -346,7 +373,9 @@ async def submit_feedback(
 
     允许覆盖（用户改主意）：同一条消息再次提交会更新而不是报错。
     """
-    await ConversationService(session).submit_feedback(
+    await ConversationService(
+        session, tracer=getattr(request.app.state, "tracer", None)
+    ).submit_feedback(
         tenant_id=ctx.tenant_id,
         message_id=message_id,
         rating=payload.rating,

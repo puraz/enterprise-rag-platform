@@ -56,6 +56,7 @@ from rag_core.errors import ConfigError
 from rag_core.logging import get_logger, register_text_redactor, setup_logging
 from rag_core.redis import RedisClient
 from rag_core.settings import Settings, get_settings
+from rag_core.tracing import build_tracer
 
 log = get_logger(__name__)
 
@@ -79,6 +80,9 @@ def _build_lifespan(settings: Settings) -> Any:
         # 构造所有可用后端：配置的主后端 + local（迁移期读老数据）
         storages = build_all_storages(settings)
         primary_storage = storages[settings.storage.backend]
+        # 追踪器：**与其他进程级资源一起构造**，因为它的生命周期也是进程级。
+        # 关闭时必须 shutdown（不是只 flush），否则最后一批 span 会丢。
+        tracer = build_tracer(settings.tracing)
 
         try:
             # 3. 等依赖就绪（容器编排里 API 与 PG 同时启动，PG 需要几秒）。
@@ -141,6 +145,7 @@ def _build_lifespan(settings: Settings) -> Any:
             app.state.token_service = TokenService(settings.identity)
             app.state.storage = primary_storage
             app.state.storages = storages
+            app.state.tracer = tracer
             app.state.app_version = _app_version()
             # 惰性持有：第一次访问时才构造（线程/协程安全由 GIL 与
             # 单次赋值保证——两个请求同时构造会各建一个，但都正确，
@@ -153,15 +158,47 @@ def _build_lifespan(settings: Settings) -> Any:
                 "model_providers_lazy",
                 llm_configured=llm_configured,
                 llm_model=settings.llm.chat_model,
+                embedding_provider=settings.embedding.provider,
                 embedding_model=settings.embedding.model_name,
                 embedding_dim=settings.embedding.dimension,
+                embedding_api_key_configured=settings.embedding.configured,
                 reranker_provider=settings.reranker.provider,
-                reranker_model=settings.reranker.model_name,
                 retrieval_hybrid=settings.retrieval.use_keyword,
                 retrieval_rerank=settings.retrieval.use_rerank,
                 retrieval_self_check=settings.retrieval.use_self_check,
-                note="provider 在首次使用时构造；embedding 模型首次向量化时加载",
+                note="provider 在首次使用时构造；远程 embedding 无需加载本地模型",
             )
+
+            # 远程 embedding 缺 key 不阻断启动（上传/鉴权/管理都不依赖它），
+            # 但必须在启动日志里说清楚，否则"文档一直停在 embedding"很难排查。
+            if not settings.embedding.configured:
+                log.warning(
+                    "embedding_not_configured",
+                    provider=settings.embedding.provider,
+                    impact="文档会停在向量化阶段，检索/问答不可用",
+                    hint="设置 RAG_EMBEDDING__API_KEY",
+                )
+
+            # 6. 追踪：配置了就必须能用。
+            #
+            # SDK 的导出是后台异步的：host 写错 / 凭证错 / 服务没起，
+            # 业务侧一次异常都不会看到（表现为"Langfuse 没有数据"）。
+            # 所以启动时主动探测一次，把静默失效变成一条明确 warning。
+            tracing_ready = False
+            if settings.tracing.configured:
+                tracing_ready = await tracer.averify()
+            log.info(
+                "tracing_ready",
+                **settings.tracing.redacted_summary,
+                verified=tracing_ready,
+                implementation=type(tracer).__name__,
+            )
+            if settings.tracing.enabled and not settings.tracing.configured:
+                log.warning(
+                    "tracing_enabled_without_credentials",
+                    impact="只记录本地内存 span，不导出",
+                    hint="设置 RAG_TRACING__PUBLIC_KEY / RAG_TRACING__SECRET_KEY",
+                )
 
             # 配置矛盾要在启动时说出来：开了重排却没有 reranker，
             # 请求层会让它退化为 RRF 顺序（不报 500），但启动日志必须能解释
@@ -171,8 +208,18 @@ def _build_lifespan(settings: Settings) -> Any:
                     "rerank_enabled_without_provider",
                     impact="重排不会执行，检索使用 RRF 顺序",
                     hint=(
-                        "设置 RAG_RERANKER__PROVIDER=local_bge，或关闭 RAG_RETRIEVAL__USE_RERANK"
+                        "设置 RAG_RERANKER__PROVIDER=siliconflow 并配置 API_KEY，"
+                        "或关闭 RAG_RETRIEVAL__USE_RERANK"
                     ),
+                )
+            elif settings.retrieval.use_rerank and not settings.reranker.configured:
+                # 选了 provider 但缺 key：构造会在首次请求时失败，
+                # 而重排失败会被降级成 RRF 顺序——启动日志必须提前说出来。
+                log.warning(
+                    "rerank_provider_not_configured",
+                    provider=settings.reranker.provider,
+                    impact="重排调用会失败并降级为 RRF 顺序",
+                    hint="设置 RAG_RERANKER__API_KEY",
                 )
 
             yield
@@ -194,6 +241,9 @@ def _build_lifespan(settings: Settings) -> Any:
                 if reranker_aclose is not None:
                     with contextlib.suppress(Exception):
                         await reranker_aclose()
+            # 追踪最后关：前面任何资源关闭时产生的 span 都还能被记录。
+            with contextlib.suppress(Exception):
+                await tracer.aclose()
             await redis.close()
             await database.close()
             log.info("shutdown_complete")
@@ -331,9 +381,9 @@ def get_llm_provider(app: Any) -> Any:
 def get_embedding_provider(app: Any) -> Any:
     """取（或首次构造）Embedding provider。
 
-    `LocalBGEEmbedding.__init__` 只存配置，模型在首次 `embed_batch`
-    时才加载——所以首次问答会有 13 秒的模型加载延迟（实测），
-    后续走缓存。
+    进程级单例：httpx 连接池复用。远程 API 实现不含本地模型，
+    构造本身很轻（只建 client）；单例仍必要，因为每次请求新建 client
+    会反复 TLS 握手并泄漏 fd。
     """
     existing = getattr(app.state, "_embedding_provider", None)
     if existing is not None:
@@ -349,11 +399,9 @@ def get_embedding_provider(app: Any) -> Any:
 def get_reranker_provider(app: Any) -> Any:
     """取（或首次构造）Reranker provider。
 
-    与 embedding 一样是**进程级单例**：`__init__` 只存配置，
-    CrossEncoder 在首次 `rerank` 时才加载（否则每个请求重读 280MB 权重）。
-
+    进程级单例。当前只有 `NoOpReranker`（直通），
     只有 `RAG_RETRIEVAL__USE_RERANK=true` 时路由层才会调用它——
-    避免"没开重排却加载了模型"。
+    避免"没开重排却构造 provider"。
     """
     existing = getattr(app.state, "_reranker_provider", None)
     if existing is not None:

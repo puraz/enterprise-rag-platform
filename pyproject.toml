@@ -19,6 +19,9 @@ package = false
 members = ["packages/*", "apps/api", "apps/worker"]
 exclude = ["apps/web", "apps/admin"]
 
+# 说明：这里曾经配置过 `pytorch-cpu` 索引（为了绕开 CUDA wheel 的 2GB 下载），
+# 后来本地模型整体移除（embedding/rerank 改远程 API），torch 不再是依赖，
+# 索引配置一并删掉——保留一个“没有包会用到”的索引只会让后来人困惑。
 [dependency-groups]
 dev = [
     "pytest>=8.3",

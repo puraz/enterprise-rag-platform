@@ -82,7 +82,7 @@ import contextlib
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from contextlib import AbstractAsyncContextManager
+from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -230,6 +230,8 @@ class WorkerEngine:
         # metrics 端点进程暴露（或推送到 Pushgateway）。
         # 传 None 时跳过记录，不影响任务执行。
         self._metrics: Any = None
+        # 追踪器（可选）：每个任务一条 span，task_type 就是 parse/chunk/embed。
+        self._tracer: Any = None
 
     @property
     def stats(self) -> WorkerStats:
@@ -242,6 +244,18 @@ class WorkerEngine:
         强制传参会让所有测试都要造一个 fake metrics。
         """
         self._metrics = metrics
+
+    def attach_tracer(self, tracer: Any) -> None:
+        """接入链路追踪。
+
+        与 `attach_metrics` 一样单独一个方法：测试里不装配追踪，
+        强制构造参数会让所有用例都要造 fake tracer。
+
+        **每个任务一条 span**（`worker.task`），`task_type` 区分
+        parse / chunk / embed / index：本质上每个任务就是管线上的一个阶段，
+        再往里拆子 span 只在阶段内部有多个 IO 时才值得。
+        """
+        self._tracer = tracer
 
     @property
     def should_stop(self) -> bool:
@@ -343,13 +357,35 @@ class WorkerEngine:
         reporter = ProgressReporter(
             self._task_sessions, task_id=task_id, worker_id=self._worker.worker_id
         )
+        span: Any = None
+        # 一条任务 = 一条 trace（worker 没有 HTTP 请求作为 trace 边界）。
+        trace_cm = (
+            self._tracer.aspan(
+                "worker.task",
+                task_type=task_type,
+                task_id=str(task_id),
+                tenant_id=str(task.tenant_id),
+                attempt=int(getattr(task, "retry_count", 0) or 0),
+                worker_id=self._worker.worker_id,
+            )
+            if self._tracer is not None
+            else nullcontext()
+        )
 
         try:
             # 业务写在**租户会话**里：RLS 生效，越权即失败而不是静默读到别人数据
-            async with self._tenant_sessions(task.tenant_id) as session:
+            async with trace_cm as span, self._tenant_sessions(task.tenant_id) as session:
                 await handler(session=session, task=task, progress=reporter)
                 await session.commit()
         except Exception as exc:
+            # 失败原因写进 span：trace 里看到的应该是"parse 失败: ParseError"，
+            # 而不是一个 3 秒就结束、没有任何结论的黑块。
+            if self._tracer is not None and span is not None:
+                self._tracer.annotate(
+                    span,
+                    outcome="failed",
+                    error_type=type(exc).__name__,
+                )
             await self._handle_failure(task=task, exc=exc, started=started)
             return
 
@@ -368,6 +404,8 @@ class WorkerEngine:
 
         self._stats.succeeded += 1
         elapsed = time.perf_counter() - started
+        if self._tracer is not None and span is not None:
+            self._tracer.annotate(span, outcome="succeeded", elapsed_s=round(elapsed, 3))
         if self._metrics is not None:
             from rag_core.metrics import record_task
 

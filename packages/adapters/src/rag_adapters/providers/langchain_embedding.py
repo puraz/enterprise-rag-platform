@@ -1,0 +1,283 @@
+"""基于 LangChain `OpenAIEmbeddings` 的 Embedding 实现。
+
+## 为什么用 LangChain 而不是自己发 HTTP
+
+`/embeddings` 看着简单，但换供应商时要重写的东西比想象中多：
+
+- 鉴权头、base_url、路径拼接的差异；
+- 批量切分与并发（`chunk_size`）；
+- 重试开关（`max_retries`，必须与我们的 ResilientCaller 互斥）；
+- 维度参数（有的叫 `dimensions`，有的只认模型原生维度）；
+- 响应解析与错误类型。
+
+这些 LangChain 已经封装且被大量供应商验证过。自研第二套的结局是
+"某个字段只在一家实现里修好"——这正是 AGENTS.md 4.4 要避免的。
+换成 SiliconFlow / 百炼 / vLLM / TEI 只改 `base_url` + `model_name`。
+
+## 为什么仍然要一层自己的 Adapter
+
+项目的检索层只认 `EmbeddingProvider` 协议（维度、顺序、归一化、
+`EmbeddingTask`）。直接把 LangChain 对象传进业务，会让
+"换 embedding 框架"变成一次全链路改造。这层 Adapter 很薄，
+只做四件 LangChain 不做/不该由它决定的事，见下面各节。
+
+## 三个必须显式设置、否则会静默出错的参数
+
+### 1. `check_embedding_ctx_length=False`（最关键）
+
+默认 `True` 时，LangChain 会用 **tiktoken** 把文本编码成 token id 数组，
+再以 `input: [[...], [...]]` 发给服务端——那是 OpenAI 的扩展字段。
+智谱/SiliconFlow 等兼容端点只接受字符串，会直接 400 或（更糟）
+把 token 数组当字符串处理，产出无意义向量。
+
+### 2. `max_retries=0`
+
+LangChain 默认重试 2 次。与 `ResilientCaller` 叠加会变成
+"3 × 3 = 9 次"，且熔断器看不到真实的失败节奏。
+
+### 3. 独立的 `http_async_client`
+
+默认共享模块级 client；某个实例 `aclose()` 会让其它实例抛
+`Event loop is closed`（本项目在 LLM 侧踩过同样的坑）。
+
+## 三、一个已知取舍（已实测）
+
+LangChain 在 `check_embedding_ctx_length=False` 时，**按响应 `data` 的顺序**
+装配向量，不按 `index` 归位（`langchain_openai/embeddings/base.py:750`）。
+
+这意味着我们依赖一个**协议未强制、但所有 OpenAI 兼容端点都遵守**的约定：
+`data` 与输入同序。`index` 字段存在的意义就是让客户端能归位，
+但 LangChain 没用它。
+
+为什么不自己接管：一旦自己解析响应，就不再用 LangChain 了，
+而鉴权/批量/重试开关/维度参数这些反而要再写一遍。
+这里的取舍是：**保留框架、把假设写成文档与测试**。
+`tests/test_embedding_provider.py` 里有一条用例锁住"按响应顺序返回"，
+将来 LangChain 改行为会立刻被发现。
+
+## 归一化必须自己做
+
+LangChain 不管归一化，OpenAI 协议也不保证单位向量。本项目用
+`vector_cosine_ops` 建索引，归一化后余弦 = 内积：查询更快，
+且将来换内积索引不用重建数据。
+"""
+
+from __future__ import annotations
+
+import math
+import time
+
+import httpx
+
+from rag_adapters.providers.embedding import (
+    EmbeddingCapabilities,
+    EmbeddingProvider,
+    EmbeddingProviderError,
+    EmbeddingResult,
+    EmbeddingTask,
+)
+from rag_core.logging import get_logger
+from rag_core.resilience import ResiliencePolicy, ResilientCaller
+from rag_core.settings.embedding import EmbeddingSettings
+
+log = get_logger(__name__)
+
+
+class LangChainEmbedding(EmbeddingProvider):
+    """OpenAI 兼容 embedding（LangChain `OpenAIEmbeddings` 适配）。"""
+
+    def __init__(
+        self,
+        settings: EmbeddingSettings,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        """构造客户端。
+
+        Args:
+            settings: embedding 配置。
+            transport: 仅用于测试（注入 `httpx.MockTransport`）。
+        """
+        if settings.api_key is None or not settings.api_key.get_secret_value():
+            # 构造期失败：配置缺失应该在装配/启动时报，
+            # 而不是等 worker 处理到向量化（那时已烧掉解析成本）。
+            raise EmbeddingProviderError(
+                "未配置 RAG_EMBEDDING__API_KEY（远程 embedding 必需）",
+                retryable=False,
+            )
+
+        from langchain_openai import OpenAIEmbeddings
+
+        self.name = settings.model_name
+        self._settings = settings
+        self._expected_dimension = settings.dimension
+        # 独立 client：不要与其它 provider 共享（关闭会互相影响）
+        self._http = httpx.AsyncClient(
+            timeout=settings.timeout_s,
+            transport=transport,
+        )
+        self._embeddings = OpenAIEmbeddings(
+            model=settings.model_name,
+            # 收 SecretStr 而不是 str：这是 LangChain 声明的类型，
+            # 且 SecretStr 不会被 repr 打出来。
+            api_key=settings.api_key,
+            base_url=settings.base_url,
+            # 只有需要显式降维时才传；None 表示用模型原生维度
+            dimensions=settings.dimension if settings.send_dimensions else None,
+            # 每次 `aembed_documents` 只发一个 HTTP 请求（我们自己分批）
+            chunk_size=settings.batch_size,
+            max_retries=0,
+            # 关键：否则会发 tiktoken token 数组，第三方端点不认
+            check_embedding_ctx_length=False,
+            http_async_client=self._http,
+        )
+        self._caller = ResilientCaller(
+            f"embedding:{settings.provider}",
+            ResiliencePolicy(max_concurrency=settings.max_concurrency),
+        )
+
+    @property
+    def capabilities(self) -> EmbeddingCapabilities:
+        return EmbeddingCapabilities(
+            dimension=self._expected_dimension,
+            max_input_tokens=self._settings.max_input_tokens,
+            supports_batch=True,
+            is_local=False,
+            requires_query_instruction=self._settings.query_instruction is not None,
+        )
+
+    async def embed_batch(
+        self,
+        texts: list[str],
+        *,
+        task: EmbeddingTask = EmbeddingTask.DOCUMENT,
+    ) -> EmbeddingResult:
+        """批量生成向量（顺序与输入严格对应）。"""
+        if not texts:
+            return EmbeddingResult(vectors=[], dimension=self._expected_dimension, model=self.name)
+
+        prepared = self._apply_instruction(texts, task)
+        started = time.perf_counter()
+        vectors: list[list[float]] = []
+
+        # 显式分批：失败只重试当前批，不会把整份文档的所有批再算一遍。
+        size = self._settings.batch_size
+        for offset in range(0, len(prepared), size):
+            batch = prepared[offset : offset + size]
+            vectors.extend(await self._embed_batch(batch))
+
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        self._validate(vectors, expected_count=len(texts))
+
+        log.info(
+            "embedding_batch_completed",
+            count=len(vectors),
+            batches=math.ceil(len(texts) / size),
+            latency_ms=latency_ms,
+            task=str(task),
+        )
+        return EmbeddingResult(
+            vectors=vectors,
+            dimension=self._expected_dimension,
+            model=self.name,
+            latency_ms=latency_ms,
+        )
+
+    # ------------------------------------------------------------ 内部
+
+    async def _embed_batch(self, batch: list[str]) -> list[list[float]]:
+        async def _call() -> list[list[float]]:
+            try:
+                raw = await self._embeddings.aembed_documents(batch)
+            except Exception as exc:
+                raise _classify(exc) from exc
+            return [[float(value) for value in vector] for vector in raw]
+
+        vectors, _stats = await self._caller.call(_call, operation="embeddings")
+        return [self._finalize(vector) for vector in vectors]
+
+    def _finalize(self, vector: list[float]) -> list[float]:
+        if not self._settings.normalize:
+            return vector
+        norm = math.sqrt(sum(value * value for value in vector))
+        if norm == 0.0:
+            # 零向量无法归一化，也无法用于余弦检索；通常是空串输入，
+            # 属于上游切分问题，重试无用。
+            raise EmbeddingProviderError("embedding 返回零向量（输入可能为空）", retryable=False)
+        return [value / norm for value in vector]
+
+    def _validate(self, vectors: list[list[float]], *, expected_count: int) -> None:
+        """返回前校验条数与维度。
+
+        服务端忽略 `dimensions` 时，错误会在**批量入库**阶段才暴露，
+        届时已切分完几百个 chunk。这里失败能直接指向配置。
+        """
+        if len(vectors) != expected_count:
+            raise EmbeddingProviderError(
+                f"返回向量数 {len(vectors)} 与输入条数 {expected_count} 不一致",
+                retryable=False,
+            )
+        for vector in vectors:
+            if len(vector) != self._expected_dimension:
+                raise EmbeddingProviderError(
+                    f"服务端返回维度 {len(vector)} 与配置的 "
+                    f"{self._expected_dimension} 不一致；"
+                    "请检查 RAG_EMBEDDING__DIMENSION 与 chunks.embedding 的列定义",
+                    retryable=False,
+                )
+
+    def _apply_instruction(self, texts: list[str], task: EmbeddingTask) -> list[str]:
+        """按任务类型加指令前缀（只有配置了才加）。"""
+        instruction = self._settings.query_instruction
+        if instruction is None or task is not EmbeddingTask.QUERY:
+            return texts
+        return [f"{instruction}{text}" for text in texts]
+
+    async def health(self) -> bool:
+        """探活：验证鉴权、维度与网络（成本可忽略）。"""
+        try:
+            result = await self.embed_batch(["健康检查"])
+            return bool(result.vectors) and len(result.vectors[0]) == self._expected_dimension
+        except Exception as exc:
+            log.warning("embedding_health_failed", error_type=type(exc).__name__)
+            return False
+
+    async def aclose(self) -> None:
+        """关闭连接池（worker 优雅退出时必须调用）。"""
+        await self._http.aclose()
+
+
+def _classify(exc: Exception) -> EmbeddingProviderError:
+    """把 SDK 异常映射成带 `retryable` 的领域异常。
+
+    ## 为什么按异常类型而不是 HTTP 状态码
+
+    LangChain/OpenAI SDK 已经把状态码分类成异常类型了，再自己解析
+    `response.status_code` 反而会漏掉包装层。`retryable` 是 worker
+    决定"重试还是死信"的唯一依据（AGENTS.md 4.11）。
+    """
+    try:
+        import openai
+    except ImportError:  # pragma: no cover - 由 langchain-openai 保证已安装
+        return EmbeddingProviderError(f"embedding 调用失败: {type(exc).__name__}")
+
+    # 配置类：重试不会变好
+    if isinstance(exc, (openai.AuthenticationError, openai.PermissionDeniedError)):
+        return EmbeddingProviderError(
+            "embedding 鉴权失败：检查 RAG_EMBEDDING__API_KEY 与模型权限", retryable=False
+        )
+    if isinstance(exc, openai.BadRequestError):
+        return EmbeddingProviderError(
+            "embedding 请求被拒绝：检查模型名 / 维度 / 批量大小", retryable=False
+        )
+    # 可恢复类
+    if isinstance(exc, openai.RateLimitError):
+        return EmbeddingProviderError("embedding 触发限流（429）", retryable=True)
+    if isinstance(exc, (openai.APITimeoutError, openai.APIConnectionError)):
+        return EmbeddingProviderError("embedding 网络超时/连接失败", retryable=True)
+    if isinstance(exc, openai.InternalServerError):
+        return EmbeddingProviderError("embedding 服务端错误（5xx）", retryable=True)
+    return EmbeddingProviderError(f"embedding 调用失败: {type(exc).__name__}", retryable=False)
+
+
+__all__ = ["LangChainEmbedding"]

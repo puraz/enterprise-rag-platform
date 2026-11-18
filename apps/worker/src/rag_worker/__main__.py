@@ -8,7 +8,7 @@
       ├─ setup_logging()           结构化日志 + PII 脱敏钩子
       ├─ Database / Redis          建连接池
       ├─ build_all_storages()      存储后端（S3 client 有连接池，必须单例）
-      ├─ build_embedding_provider()  **惰性**：构造不加载模型
+      ├─ build_embedding_provider()  远程 /embeddings 客户端（需要 API Key）
       ├─ build_handlers()          任务注册表
       ├─ 注册信号处理              SIGTERM/SIGINT → 优雅退出
       ├─ engine.run_forever()      主循环
@@ -134,18 +134,17 @@ async def run(settings: Settings) -> int:
             rls_bypass_configured=settings.database.admin_user is not None,
         )
 
-        # Embedding provider 是**惰性构造**：`LocalBGEEmbedding.__init__`
-        # 只存配置，不加载模型（见其 `_ensure_loaded`）。模型在首次
-        # embed 调用时才加载。
-        #
-        # 为什么这样设计：worker 可能只跑解析任务，不该为"可能用不到的
-        # 能力"付 2-5 秒加载时间与 2GB 内存。多副本时这个开销会乘上副本数。
+        # Embedding provider 构造很轻（只建 httpx 连接池），但**必须在启动时**
+        # 构造并报错：远程 embedding 缺 API Key 时，解析/切分都能跑，
+        # 直到向量化那一步才失败——那时已经烧掉了解析成本，
+        # 且表现是"文档一直停在 embedding"，很难指向根因。
         embedding_provider = build_embedding_provider(settings)
         log.info(
             "embedding_provider_configured",
-            provider=embedding_provider.name,
+            provider=settings.embedding.provider,
+            model=embedding_provider.name,
             dimension=embedding_provider.capabilities.dimension,
-            note="模型将在首次向量化时加载",
+            base_url=settings.embedding.base_url,
         )
 
         handlers = build_handlers(
@@ -197,12 +196,24 @@ async def run(settings: Settings) -> int:
             note="多副本场景建议 PROMETHEUS_MULTIPROC_DIR 或逐实例抓取",
         )
 
-        # 追踪器：未配置凭证时用 LocalTracer（内存记录），
+        # 追踪器：未配置时用 LocalTracer（内存记录），
         # 不会因为缺少 Langfuse 而起不来。
+        #
+        # 与 API 一致：配置了就**主动探测一次**服务端，
+        # SDK 后台导出失败不会抛异常，不探测的话"没数据"无从发现。
         from rag_core.tracing import build_tracer
 
-        tracer = build_tracer(enabled=False)
-        log.info("worker_tracer_ready", kind=type(tracer).__name__)
+        tracer = build_tracer(settings.tracing)
+        engine.attach_tracer(tracer)
+        tracing_ready = False
+        if settings.tracing.configured:
+            tracing_ready = await tracer.averify()
+        log.info(
+            "worker_tracer_ready",
+            implementation=type(tracer).__name__,
+            verified=tracing_ready,
+            **settings.tracing.redacted_summary,
+        )
 
         loop = asyncio.get_running_loop()
         _install_signal_handlers(engine, loop)

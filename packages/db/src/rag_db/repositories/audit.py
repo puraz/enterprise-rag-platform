@@ -435,6 +435,31 @@ class ModelCallRepository:
         await self._session.flush()
         return record
 
+    async def find_trace_id(self, *, tenant_id: uuid.UUID, message_id: uuid.UUID) -> str | None:
+        """取某条助手消息对应 LLM 调用的 trace_id（反馈回写 score 用）。
+
+        ## 为什么不给 `messages` 加一列 trace_id
+
+        `model_calls` 已经是"每次模型调用"的权威明细，且与消息是多对一
+        （改写/判断调用的 `message_id` 为空，只有真正的答案调用带消息 ID）。
+        再加一列意味着两处都要写、两处都可能漏——而对账仍以 model_calls 为准。
+
+        这里按 `created_at DESC` 取最新一条：将来若一条消息有多次重试，
+        最新那次才是用户实际看到的那次。
+        """
+        result = await self._session.execute(
+            select(ModelCall.trace_id)
+            .where(
+                ModelCall.tenant_id == tenant_id,
+                ModelCall.message_id == message_id,
+                ModelCall.trace_id.is_not(None),
+            )
+            .order_by(ModelCall.created_at.desc())
+            .limit(1)
+        )
+        trace_id = result.scalar_one_or_none()
+        return str(trace_id) if trace_id else None
+
     async def sum_cost(
         self,
         *,

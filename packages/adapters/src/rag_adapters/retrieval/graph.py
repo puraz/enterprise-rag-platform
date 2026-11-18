@@ -34,7 +34,8 @@ from __future__ import annotations
 
 import time
 from collections.abc import Sequence
-from typing import Protocol
+from contextlib import nullcontext
+from typing import Any, Protocol
 
 from rag_adapters.retrieval.fusion import reciprocal_rank_fusion
 from rag_adapters.retrieval.state import (
@@ -131,6 +132,7 @@ class RetrievalGraph:
         reranker: Reranker | None = None,
         rewriter: QueryRewriter | None = None,
         self_checker: SelfChecker | None = None,
+        tracer: Any = None,
         config: RetrievalConfig | None = None,
     ) -> None:
         self._vector = vector_searcher
@@ -138,6 +140,10 @@ class RetrievalGraph:
         self._reranker = reranker
         self._rewriter = rewriter
         self._self_check = self_checker
+        # 追踪器是**可选**的（类型用 Any）：adapters 不依赖具体 tracer 实现，
+        # 只要求提供 aspan/span/annotate（见 rag_core.tracing.Tracer）。
+        # 传 None 时所有 span 退化为 nullcontext，不产生任何额外开销。
+        self._tracer = tracer
         self.config = config or RetrievalConfig()
 
         # 配置与依赖的一致性校验。
@@ -183,9 +189,15 @@ class RetrievalGraph:
         # ---- 1. 改写 / 独立化（可选，多轮必需）----
         if self.config.use_rewrite and self._rewriter is not None:
             started = time.perf_counter()
-            # **必须传历史**：多轮里的"那二线呢"没有历史就无法独立化，
-            # 直接拿去检索召回为零。
-            rewritten = await self._rewriter(query, history=state.history)
+            async with self._span("retrieval.rewrite", history_turns=len(state.history)) as span:
+                # **必须传历史**：多轮里的"那二线呢"没有历史就无法独立化，
+                # 直接拿去检索召回为零。
+                rewritten = await self._rewriter(query, history=state.history)
+                self._annotate(
+                    span,
+                    applied=bool(rewritten.strip()),
+                    rewritten_length=len(rewritten),
+                )
             state.record_timing("rewrite", started)
             if rewritten.strip():
                 state.rewritten_query = rewritten.strip()
@@ -209,13 +221,25 @@ class RetrievalGraph:
         # ---- 3. 融合（可选）----
         if self.config.use_keyword:
             started = time.perf_counter()
-            self._fuse(state, keyword_hits)
+            with self._span_sync(
+                "retrieval.fuse",
+                vector_count=len(state.candidates),
+                keyword_count=len(keyword_hits),
+                rrf_k=self.config.rrf_k,
+            ) as span:
+                self._fuse(state, keyword_hits)
+                self._annotate(span, fused_count=len(state.candidates))
             state.record_timing("fuse", started)
 
         # ---- 4. 重排（可选）----
         if self.config.use_rerank and self._reranker is not None:
             started = time.perf_counter()
-            await self._rerank(effective_query, state)
+            async with self._span("retrieval.rerank", top_n=self.config.rerank_top_n) as span:
+                await self._rerank(effective_query, state)
+                self._annotate(
+                    span,
+                    candidate_count=len(state.candidates),
+                )
             state.reranked = True
             state.record_timing("rerank", started)
 
@@ -259,7 +283,14 @@ class RetrievalGraph:
             `(向量候选, 关键词命中)`。关键词命中单独返回而不是混进候选——
             两路分数量纲不同，混在一起排序会得到无意义的结果（必须走 RRF）。
         """
-        vector_hits = list(await self._vector(query, limit=self.config.vector_limit))
+        vector_hits: list[tuple[str, str, float]]
+        async with self._span(
+            "retrieval.vector",
+            limit=self.config.vector_limit,
+            candidate_multiplier=self.config.candidate_multiplier,
+        ) as span:
+            vector_hits = list(await self._vector(query, limit=self.config.vector_limit))
+            self._annotate(span, hits=len(vector_hits))
         candidates = [
             RetrievedChunk(
                 chunk_id=chunk_id,
@@ -273,7 +304,9 @@ class RetrievalGraph:
 
         keyword_hits: list[tuple[str, str, float]] = []
         if self.config.use_keyword and self._keyword is not None:
-            keyword_hits = list(await self._keyword(query, limit=self.config.keyword_limit))
+            async with self._span("retrieval.keyword", limit=self.config.keyword_limit) as span:
+                keyword_hits = list(await self._keyword(query, limit=self.config.keyword_limit))
+                self._annotate(span, hits=len(keyword_hits))
 
         return candidates, keyword_hits
 
@@ -357,6 +390,30 @@ class RetrievalGraph:
         # （丢弃会让"开启 rerank"反而减少候选，可能伤召回）。
         state.candidates = reranked + tail
         log.info("reranked", reranked_count=len(reranked), tail_count=len(tail))
+
+    # ------------------------------------------------------------ 追踪
+
+    def _span(self, name: str, **attributes: Any) -> Any:
+        """异步 span（tracer 缺失时退化 nullcontext）。"""
+        if self._tracer is None:
+            return nullcontext()
+        return self._tracer.aspan(name, **attributes)
+
+    def _span_sync(self, name: str, **attributes: Any) -> Any:
+        """同步 span（融合是纯 CPU，没有 await 点）。"""
+        if self._tracer is None:
+            return nullcontext()
+        return self._tracer.span(name, **attributes)
+
+    def _annotate(self, span: Any, **attributes: Any) -> None:
+        """给已打开的 span 补运行时结果（命中数、是否生效）。
+
+        为什么不在开 span 时就写：这些值要等节点跑完才知道。
+        分开写也让"开关打开了但结果为空"这种降级在 trace 里一眼可见。
+        """
+        if self._tracer is None or span is None:
+            return
+        self._tracer.annotate(span, **attributes)
 
 
 # ---------------------------------------------------------------- 生成与自省

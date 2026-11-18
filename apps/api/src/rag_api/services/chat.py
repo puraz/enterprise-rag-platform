@@ -64,6 +64,7 @@ import json
 import time
 import uuid
 from collections.abc import AsyncIterator, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -168,12 +169,17 @@ class ChatService:
         retrieval_config: RetrievalConfig | None = None,
         reranker: Any = None,
         metrics: Any = None,
+        tracer: Any = None,
     ) -> None:
         self._session = session
         self._llm = llm
         self._embedder = embedder
         self._reranker = reranker
         self._settings = settings
+        # 追踪器（可选）：None 时所有 span 退化为 nullcontext。
+        # 用 Any 而不是 `Tracer`，避免服务层 import core 的协议——
+        # 服务层只需要它提供 aspan/ageneration/annotate/record_usage。
+        self._tracer = tracer
         self._conversations = ConversationRepository(session)
         self._messages = MessageRepository(session)
         self._documents = DocumentRepository(session)
@@ -505,12 +511,39 @@ class ChatService:
         def _on_usage(usage: Any) -> None:
             usage_holder.append(usage)
 
+        usage: tuple[int, int] = (0, 0)
+        # generation 类型让 Langfuse 把它归到"模型调用"而不是普通 span，
+        # 这样才能按 provider/model 聚合 token 与延迟。
+        # **只记长度不记 prompt 正文**（见 rag_core.tracing 的脱敏约定）。
+        generation_cm = (
+            self._tracer.ageneration(
+                "llm.stream",
+                provider=self._llm.name,
+                model=self._llm.model_name,
+                temperature=0.3,
+                prompt_chars=len(prompt),
+            )
+            if self._tracer is not None
+            else nullcontext()
+        )
+
         try:
-            async for delta in self._llm.stream(
-                messages, temperature=0.3, usage_callback=_on_usage
-            ):
-                collected.append(delta)
-                yield ChatEvent("delta", {"text": delta})
+            async with generation_cm as generation_span:
+                async for delta in self._llm.stream(
+                    messages, temperature=0.3, usage_callback=_on_usage
+                ):
+                    collected.append(delta)
+                    yield ChatEvent("delta", {"text": delta})
+
+                # usage 在流结束后才齐。写进 span 让 trace 里能看到单次成本量级；
+                # 金额的权威来源仍是 `model_calls`（见 `_record_cost`）。
+                usage = _extract_usage(usage_holder)
+                if self._tracer is not None:
+                    self._tracer.record_usage(
+                        generation_span,
+                        input_tokens=usage[0],
+                        output_tokens=usage[1],
+                    )
         except asyncio.CancelledError:
             # **客户端断连**：必须把已有内容落库并标成 interrupted。
             # 不落库的话用户重新打开会话会看到"一条空白回答"。
@@ -622,7 +655,7 @@ class ChatService:
             citations = citations_result.citations
 
         # ---- 落库：消息 + 成本 ----
-        usage = _extract_usage(usage_holder)
+        # 注意：`usage` 已在生成 span 内解析完（见上面），这里不再重复提取。
         cost_usd = 0.0
         await self._record_cost(
             tenant_id=tenant_id,
@@ -934,12 +967,34 @@ class ChatService:
             keyword_searcher=keyword_search,
             reranker=rerank if config.use_rerank else None,
             rewriter=rewrite if config.use_rewrite else None,
+            tracer=self._tracer,
             # 生成后自省不属于检索图（图不负责生成）。图里保留这个开关
             # 只用于构造期一致性校验；真正执行在 `chat_stream` 里，
             # 所以这里把它置 false，避免"开了却没有 checker"的误报。
             config=replace(config, use_self_check=False),
         )
-        state = await graph.run(query, history=history)
+        # `retrieval.pipeline` 是各节点的父 span：父 span 的耗时就是"检索总共花了多久"，
+        # 子 span 回答"花在哪一步"。两者都必要（只看子节点无法知道总量，
+        # 只看总量无法定位瓶颈）。
+        pipeline_cm = (
+            self._tracer.aspan(
+                "retrieval.pipeline",
+                query_chars=len(query),
+                knowledge_base_count=len(kb_ids or []),
+                strategy=self._retrieval_strategy(),
+            )
+            if self._tracer is not None
+            else nullcontext()
+        )
+        async with pipeline_cm as pipeline_span:
+            state = await graph.run(query, history=history)
+            if self._tracer is not None:
+                self._tracer.annotate(
+                    pipeline_span,
+                    candidate_count=len(state.candidates),
+                    final_count=len(state.final),
+                    source_counts=dict(state.source_counts),
+                )
 
         # ---- 把检索结果回填成完整材料 ----
         #
@@ -1095,33 +1150,53 @@ class ChatService:
         """用 LLM 判断"材料能否回答"（A11 的拒答机制）。"""
         prompt = build_answerability_prompt(query=query, materials=[m.content for m in materials])
         started = time.perf_counter()
-        try:
-            response = await self._llm.complete(
-                [LLMMessage(role=LLMRole.USER, content=prompt)],
-                temperature=0.0,
-                json_mode=True,
-                max_tokens=200,
-            )
-        except Exception as exc:
-            # 判断失败不能拦死问答：保守地"往下走"（让生成模型自己判断），
-            # 但记录日志——拒答机制失效是重要信号。
-            log.warning(
-                "answerability_check_failed",
-                error_type=type(exc).__name__,
-            )
-            return None
-
-        await self._record_cost(
-            tenant_id=tenant_id,
-            user_id=None,
-            conversation_id=None,
-            message_id=None,
-            input_tokens=response.usage.input_tokens,
-            output_tokens=response.usage.output_tokens,
-            latency_ms=int((time.perf_counter() - started) * 1000),
-            task_type=ModelTaskType.CHAT,
+        # 独立 span：拒答是用户可感知的行为，阀值与误判必须能在 trace 里
+        # 和"检索命中了几条"放在一起看，否则无法判断是"没检索到"还是"检到但判错"。
+        span_cm = (
+            self._tracer.aspan("answerability", material_count=len(materials))
+            if self._tracer is not None
+            else nullcontext()
         )
-        return parse_self_check_output(response.content)
+        async with span_cm as span:
+            try:
+                response = await self._llm.complete(
+                    [LLMMessage(role=LLMRole.USER, content=prompt)],
+                    temperature=0.0,
+                    json_mode=True,
+                    max_tokens=200,
+                )
+            except Exception as exc:
+                # 判断失败不能拦死问答：保守地"往下走"（让生成模型自己判断），
+                # 但记录日志——拒答机制失效是重要信号。
+                log.warning(
+                    "answerability_check_failed",
+                    error_type=type(exc).__name__,
+                )
+                if self._tracer is not None:
+                    self._tracer.annotate(span, error_type=type(exc).__name__)
+                return None
+
+            await self._record_cost(
+                tenant_id=tenant_id,
+                user_id=None,
+                conversation_id=None,
+                message_id=None,
+                input_tokens=response.usage.input_tokens,
+                output_tokens=response.usage.output_tokens,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                task_type=ModelTaskType.CHAT,
+            )
+            result = parse_self_check_output(response.content)
+            if self._tracer is not None:
+                self._tracer.annotate(
+                    span,
+                    # parsed=False 表示模型输出不是合法 JSON（调用失败与此不同）
+                    parsed=bool(result.raw_output),
+                    can_answer=result.can_answer if result.raw_output else None,
+                    input_tokens=response.usage.input_tokens,
+                    output_tokens=response.usage.output_tokens,
+                )
+            return result
 
     async def _judge_support(
         self, *, tenant_id: uuid.UUID, query: str, answer: str, materials: list[Material]
@@ -1142,32 +1217,51 @@ class ChatService:
             materials=[m.content for m in materials],
         )
         started = time.perf_counter()
-        try:
-            response = await self._llm.complete(
-                [LLMMessage(role=LLMRole.USER, content=prompt)],
-                temperature=0.0,
-                json_mode=True,
-                max_tokens=300,
-            )
-        except Exception as exc:
-            log.warning(
-                "support_check_failed",
-                error_type=type(exc).__name__,
-                note="自省调用失败，本次不标记答案",
-            )
-            return None
-
-        await self._record_cost(
-            tenant_id=tenant_id,
-            user_id=None,
-            conversation_id=None,
-            message_id=None,
-            input_tokens=response.usage.input_tokens,
-            output_tokens=response.usage.output_tokens,
-            latency_ms=int((time.perf_counter() - started) * 1000),
-            task_type=ModelTaskType.EVALUATION,
+        # 与 `answerability` 分开埋点：两个判断的误判代价不同
+        # （前者误判=少答，后者误判=幻觉被标/漏标），混在一个 span 里无法分开评估。
+        span_cm = (
+            self._tracer.aspan("support_check", material_count=len(materials))
+            if self._tracer is not None
+            else nullcontext()
         )
-        return parse_self_check_output(response.content)
+        async with span_cm as span:
+            try:
+                response = await self._llm.complete(
+                    [LLMMessage(role=LLMRole.USER, content=prompt)],
+                    temperature=0.0,
+                    json_mode=True,
+                    max_tokens=300,
+                )
+            except Exception as exc:
+                log.warning(
+                    "support_check_failed",
+                    error_type=type(exc).__name__,
+                    note="自省调用失败，本次不标记答案",
+                )
+                if self._tracer is not None:
+                    self._tracer.annotate(span, error_type=type(exc).__name__)
+                return None
+
+            await self._record_cost(
+                tenant_id=tenant_id,
+                user_id=None,
+                conversation_id=None,
+                message_id=None,
+                input_tokens=response.usage.input_tokens,
+                output_tokens=response.usage.output_tokens,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                task_type=ModelTaskType.EVALUATION,
+            )
+            result = parse_self_check_output(response.content)
+            if self._tracer is not None:
+                self._tracer.annotate(
+                    span,
+                    parsed=bool(result.raw_output),
+                    supported=result.can_answer if result.raw_output else None,
+                    input_tokens=response.usage.input_tokens,
+                    output_tokens=response.usage.output_tokens,
+                )
+            return result
 
     def _retrieval_strategy(self) -> str:
         """指标/埋点里的策略名（低基数，可安全做 label）。"""
@@ -1233,6 +1327,15 @@ class ChatService:
             user_id=user_id,
             conversation_id=conversation_id,
             message_id=message_id,
+            # ## 为什么这两列必须填
+            #
+            # 只有接口返回的 request_id，排障时能从日志找到 HTTP 请求，
+            # 但找不到"这次调用在 trace 里的那个 LLM span"；
+            # 只有 trace_id，又看不到对应的访问日志。
+            # 实测初版这两列全空（count(request_id)=count(trace_id)=0），
+            # 于是"成本涨了但不知道是哪一步"只能翻 Langfuse 手动对时间。
+            request_id=_current_request_id(),
+            trace_id=self._tracer.current_trace_id() if self._tracer is not None else None,
         )
 
     def _pricing_for(self, provider: str) -> tuple[Any, Any, Any]:
@@ -1337,20 +1440,20 @@ def _as_chunks(materials: list[Material]) -> list[RetrievedChunk]:
     ]
 
 
-def _extract_usage(holder: list[Any]) -> tuple[int, int]:
+def _extract_usage(usage_holder: list[Any]) -> tuple[int, int]:
     """从 usage 回调收集器里取 (input_tokens, output_tokens)。
 
     回调是 `stream(usage_callback=...)` 在流结束时触发的
     （见 `LangChainLLMProvider.stream`）。取不到时返回 (0, 0) 并记日志
     ——**不静默**：成本记 0 会让账不平，必须可观测。
     """
-    if not holder:
+    if not usage_holder:
         log.warning(
             "stream_usage_missing",
             note="流式未返回 usage，本条消息成本记 0（对账会显示差异）",
         )
         return (0, 0)
-    usage = holder[-1]
+    usage = usage_holder[-1]
     return (int(getattr(usage, "input_tokens", 0)), int(getattr(usage, "output_tokens", 0)))
 
 
@@ -1365,7 +1468,23 @@ def _error_code_of(exc: BaseException) -> str:
     return mapping.get(type(exc).__name__, f"UNHANDLED_{type(exc).__name__}")
 
 
-def _safe_message(exc: BaseException) -> str:
+def _current_request_id() -> str | None:
+    """取当前请求的 request_id（由 `RequestContextMiddleware` 绑进 contextvars）。
+
+    为什么不在函数签名里一路传：`_record_cost` 被改写/判断/生成四处调用，
+    多一个参数就要四处加，而它与业务语义无关，只是日志关联。
+    取不到（worker/脚本/单测）时返回 None，不编造。
+    """
+    try:
+        from structlog.contextvars import get_contextvars
+
+        value = get_contextvars().get("request_id")
+    except Exception:  # pragma: no cover - structlog 内部异常
+        return None
+    return str(value) if value else None
+
+
+def _safe_message(exc: Exception) -> str:
     """安全的错误描述（脱敏 + 截断）。"""
     from rag_core.pii import redact_text
 

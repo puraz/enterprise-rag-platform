@@ -1,21 +1,24 @@
 """Embedding Provider 测试。
 
-分两层：
+分两层，都**不依赖网络**：
 
-- **不依赖 torch 的测试**（默认跑）：验证抽象契约、维度校验、
-  顺序一致性、指令前缀、错误处理。用 fake 实现，任何环境都能跑。
-- **真实模型测试**（`-m integration`）：加载 bge-m3 验证真实输出。
-  首次运行需要下载 2.2GB 模型。
+- **抽象契约**：验证维度校验、顺序一致性、指令前缀、错误传播。
+  用 fake 实现，任何环境都能跑。
+- **远程实现**（`OpenAICompatibleEmbedding`）：用 `httpx.MockTransport`
+  验证"按 index 归位、归一化、分批、错误分类、维度校验"。
+  这些是服务端**不保证**、必须由我们兜住的部分。
 
-**为什么不用 mock 替代真实测试**：维度、归一化、语义相似度这些
-只有真实模型能验证。用 fake 只能验证"代码不崩"，不能验证"检索能工作"。
+真实 API 的连通性由 `health()` 在运行时探测（`-m integration` 的
+真实调用不再放进单测：会让每次 `make test` 依赖外部配额与网络）。
 """
 
 from __future__ import annotations
 
+import json
 import math
 from typing import Any
 
+import httpx
 import pytest
 
 from rag_adapters.providers.embedding import (
@@ -26,6 +29,7 @@ from rag_adapters.providers.embedding import (
     EmbeddingTask,
     NoOpReranker,
 )
+from rag_adapters.providers.langchain_embedding import LangChainEmbedding
 from rag_core.settings import get_settings
 from rag_core.settings.embedding import EmbeddingSettings
 
@@ -307,130 +311,261 @@ def test_embedding_settings_rejects_invalid_dimension() -> None:
         EmbeddingSettings(dimension=0)
 
 
-# ==================================================== 真实模型（integration）
+# ==================================================== 远程实现（LangChain OpenAIEmbeddings）
 
 
-@pytest.fixture(scope="module")
-def real_provider() -> Any:
-    """真实 bge-m3 Provider（module 级复用，避免重复加载 2.2GB 模型）。"""
-    from rag_adapters.providers.bge import LocalBGEEmbedding
+def _remote_settings(**overrides: Any) -> EmbeddingSettings:
+    """测试用配置：4 维让断言可读，batch_size=2 方便验证分批。"""
+    base: dict[str, Any] = {
+        "provider": "zhipu",
+        "model_name": "embedding-3",
+        "dimension": 4,
+        "base_url": "https://example.invalid/v4",
+        "api_key": "test-key",
+        "batch_size": 2,
+        "normalize": True,
+    }
+    base.update(overrides)
+    return EmbeddingSettings(**base)
 
-    settings = get_settings().embedding
-    return LocalBGEEmbedding(settings)
+
+def _provider(handler: Any, **overrides: Any) -> LangChainEmbedding:
+    return LangChainEmbedding(_remote_settings(**overrides), transport=httpx.MockTransport(handler))
 
 
-@pytest.mark.integration
-async def test_real_model_dimension(real_provider: Any) -> None:
-    """真实模型输出维度必须是 1024。
+def _embedding_response(
+    vectors: list[list[float]], *, indexes: list[int] | None = None
+) -> dict[str, Any]:
+    order = indexes or list(range(len(vectors)))
+    return {
+        "object": "list",
+        "model": "embedding-3",
+        "usage": {"prompt_tokens": 1, "total_tokens": 1},
+        "data": [
+            {"object": "embedding", "index": index, "embedding": vectors[position]}
+            for position, index in enumerate(order)
+        ],
+    }
 
-    这是最基础的正确性验证——维度不对，整个索引都用不了。
+
+async def test_remote_follows_response_order_and_normalizes() -> None:
+    """LangChain 在字符串模式下**按响应顺序**装配向量（已知取舍）。
+
+    实测 `langchain_openai/embeddings/base.py:750`：
+    `embeddings.extend(r["embedding"] for r in response["data"])`，
+    不读 `index`。所以这里锁定的是实际行为：服务端按输入顺序返回时，
+    我们按位对应；乱序返回不会被修正——这是保留框架的代价，
+    已写进 `langchain_embedding.py` 的模块 docstring。
+
+    归一化仍然是我们自己做的（服务端不保证单位向量）。
     """
-    result = await real_provider.embed_batch(["测试文本"])
-    assert result.dimension == 1024
-    assert len(result.vectors[0]) == 1024
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        # 按输入顺序返回；向量未归一化（模长 5 与 10）
+        return httpx.Response(
+            200,
+            json=_embedding_response([[3.0, 0.0, 4.0, 0.0], [0.0, 6.0, 0.0, 8.0]]),
+        )
+
+    provider = _provider(handler)
+    try:
+        result = await provider.embed_batch(["第一条", "第二条"])
+    finally:
+        await provider.aclose()
+
+    # 请求形状：模型名 + 显式维度（否则服务端返回原生维度）+ 纯字符串输入
+    assert requests[0]["model"] == "embedding-3"
+    assert requests[0]["dimensions"] == 4
+    assert requests[0]["input"] == ["第一条", "第二条"]
+
+    assert result.vectors[0] == pytest.approx([0.6, 0.0, 0.8, 0.0], abs=1e-6)
+    assert result.vectors[1] == pytest.approx([0.0, 0.6, 0.0, 0.8], abs=1e-6)
+    for vector in result.vectors:
+        assert math.sqrt(sum(value * value for value in vector)) == pytest.approx(1.0)
 
 
-@pytest.mark.integration
-async def test_real_model_vectors_normalized(real_provider: Any) -> None:
-    """真实模型输出归一化（模长 ≈ 1）。"""
-    vector = await real_provider.embed_one("这是一个用于验证归一化的句子")
-    norm = math.sqrt(sum(v * v for v in vector))
-    assert abs(norm - 1.0) < 1e-4, f"未归一化，模长 {norm}"
+async def test_remote_sends_strings_not_token_ids() -> None:
+    """`check_embedding_ctx_length=False` 的回归测试。
 
-
-@pytest.mark.integration
-async def test_real_model_semantic_similarity(real_provider: Any) -> None:
-    """**语义相似度验证**：相近语义的文本向量距离应显著更近。
-
-    这是 embedding 质量的核心验证——只测"维度对"是不够的，
-    一个随机向量的实现也能通过维度测试。
-
-    用余弦相似度（向量已归一化，所以等于点积）。
+    默认 True 时 LangChain 会把文本编码成 tiktoken id 数组发出去，
+    第三方端点（智谱/SiliconFlow）不认，会 400 或产出无意义向量。
     """
-    texts = [
-        "如何申请年假",
-        "年休假怎么申请",
-        "服务器的CPU温度过高",
-    ]
-    result = await real_provider.embed_batch(texts)
-    a, b, c = result.vectors
+    seen: list[Any] = []
 
-    def cosine(x: list[float], y: list[float]) -> float:
-        return sum(xi * yi for xi, yi in zip(x, y, strict=True))
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content)["input"])
+        return httpx.Response(200, json=_embedding_response([[1.0, 0.0, 0.0, 0.0]]))
 
-    similar = cosine(a, b)  # 两个问年假的
-    different = cosine(a, c)  # 年假 vs CPU
+    provider = _provider(handler, batch_size=1)
+    try:
+        await provider.embed_batch(["纯字符串"])
+    finally:
+        await provider.aclose()
 
-    assert similar > different, f"语义相近的文本相似度 {similar:.3f} 应高于无关文本 {different:.3f}"
-    assert similar > 0.6, f"同义问题的相似度应 > 0.6，实际 {similar:.3f}"
+    assert seen == [["纯字符串"]]
 
 
-@pytest.mark.integration
-async def test_real_model_batch_order_preserved(real_provider: Any) -> None:
-    """批量处理时顺序必须与输入严格对应。
+async def test_remote_batches_and_keeps_global_order() -> None:
+    """超过 batch_size 要分批；每批的向量数量与输入一致。"""
+    sizes: list[int] = []
 
-    错位的后果：向量与文本对不上，检索能跑但结果完全乱，且不报错。
-    """
-    texts = [f"第{i}条独立测试文本" for i in range(8)]
-    result = await real_provider.embed_batch(texts)
+    def handler(request: httpx.Request) -> httpx.Response:
+        batch = json.loads(request.content)["input"]
+        sizes.append(len(batch))
+        vectors = [[float(index + 1), 0.0, 0.0, 0.0] for index in range(len(batch))]
+        return httpx.Response(200, json=_embedding_response(vectors))
 
-    # 逐条单独算，应与批量结果的对应位置一致
-    individual = await real_provider.embed_one(texts[3])
+    provider = _provider(handler, batch_size=2)
+    try:
+        result = await provider.embed_batch(["a", "b", "c"])
+    finally:
+        await provider.aclose()
 
-    def cosine(x: list[float], y: list[float]) -> float:
-        return sum(xi * yi for xi, yi in zip(x, y, strict=True))
-
-    assert cosine(result.vectors[3], individual) > 0.999, "批量与单条结果不一致（顺序错位？）"
-
-
-@pytest.mark.integration
-async def test_real_model_throughput(real_provider: Any) -> None:
-    """吞吐基准：记录本机实际速度（不设硬性断言，只打印）。
-
-    本机 16 核 CPU 的预期：约 30-60 条/秒（短文本）。
-    这个数字决定 A8 的 worker 并发配置。
-    """
-    import time
-
-    texts = [f"这是第{i}条用于吞吐测试的文本内容，长度约三十个字" for i in range(32)]
-    # 预热（首次调用会加载模型）
-    await real_provider.embed_batch(["预热"])
-
-    started = time.perf_counter()
-    result = await real_provider.embed_batch(texts)
-    elapsed = time.perf_counter() - started
-
-    rate = len(texts) / elapsed
-    print(f"\n[吞吐] {len(texts)} 条耗时 {elapsed:.2f}s，约 {rate:.1f} 条/秒")
-    print(f"[延迟] {result.latency_ms}ms")
-
-    assert len(result.vectors) == len(texts)
-    # 宽松下限：只要不是完全不可用（比如 1 条/秒）
-    assert rate > 1.0, f"吞吐过低：{rate:.1f} 条/秒"
+    assert sizes == [2, 1]
+    assert len(result.vectors) == 3
+    # 第二批的第一个（全局第 3 条）在批内 index=0 → 归一化后 [1,0,0,0]
+    assert result.vectors[2] == pytest.approx([1.0, 0.0, 0.0, 0.0])
 
 
-@pytest.mark.integration
-async def test_real_model_health(real_provider: Any) -> None:
-    """健康检查能加载模型并产出正确维度。"""
-    assert await real_provider.health() is True
+async def test_remote_rejects_wrong_dimension() -> None:
+    """服务端忽略 dimensions 时必须报错，且是永久失败。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_embedding_response([[1.0, 0.0]]))
+
+    provider = _provider(handler)
+    try:
+        with pytest.raises(EmbeddingProviderError) as excinfo:
+            await provider.embed_batch(["x"])
+    finally:
+        await provider.aclose()
+
+    assert excinfo.value.retryable is False
+    assert "维度" in str(excinfo.value)
 
 
-@pytest.mark.integration
-async def test_real_model_handles_long_text(real_provider: Any) -> None:
-    """长文本（接近上下文上限）能处理，不崩。
+async def test_remote_rejects_wrong_count() -> None:
+    """返回条数与输入不符 → 失败（重试不会变好）。"""
 
-    bge-m3 支持 8192 token；这里用约 3000 字的中文验证。
-    """
-    long_text = "人工智能技术在近年来快速发展。" * 150  # 约 3000 字
-    result = await real_provider.embed_batch([long_text])
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_embedding_response([[1.0, 0.0, 0.0, 0.0]]))
 
-    assert len(result.vectors) == 1
-    assert len(result.vectors[0]) == 1024
+    provider = _provider(handler)
+    try:
+        with pytest.raises(EmbeddingProviderError) as excinfo:
+            await provider.embed_batch(["a", "b"])
+    finally:
+        await provider.aclose()
+
+    assert excinfo.value.retryable is False
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _cleanup_provider() -> Any:
-    """测试结束后释放模型内存。"""
-    yield
-    # module 级 fixture 的 aclose 在 teardown 里做：
-    # 这里不持有引用，由 real_provider fixture 的调用者负责
+async def test_remote_auth_error_is_not_retryable() -> None:
+    """401 不应被 ResilientCaller 重试（重试只会浪费配额）。"""
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(401, json={"error": {"message": "bad key"}})
+
+    provider = _provider(handler)
+    try:
+        with pytest.raises(EmbeddingProviderError) as excinfo:
+            await provider.embed_batch(["x"])
+    finally:
+        await provider.aclose()
+
+    assert excinfo.value.retryable is False
+    assert calls == 1
+
+
+async def test_remote_rate_limit_is_retryable() -> None:
+    """429 必须标记为可重试（worker 据此退避重试而不是直接死信）。"""
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(429, json={"error": {"message": "slow down"}})
+
+    provider = _provider(handler)
+    try:
+        with pytest.raises(EmbeddingProviderError) as excinfo:
+            await provider.embed_batch(["x"])
+    finally:
+        await provider.aclose()
+
+    assert excinfo.value.retryable is True
+    # ResilientCaller 默认 3 次尝试
+    assert calls >= 2
+
+
+async def test_remote_error_does_not_echo_input() -> None:
+    """异常信息不能带响应体里的长文本（可能是文档正文，而异常会进日志）。"""
+    long_text = "机密内容" * 500
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"message": long_text}})
+
+    provider = _provider(handler)
+    try:
+        with pytest.raises(EmbeddingProviderError) as excinfo:
+            await provider.embed_batch(["x"])
+    finally:
+        await provider.aclose()
+
+    assert "机密内容" not in str(excinfo.value)
+
+
+def test_remote_requires_api_key() -> None:
+    """缺 key 必须在构造期失败（而不是等 worker 处理到向量化）。"""
+    with pytest.raises(EmbeddingProviderError, match="API_KEY"):
+        LangChainEmbedding(_remote_settings(api_key=None))
+
+
+async def test_remote_health_reports_ok() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_embedding_response([[1.0, 0.0, 0.0, 0.0]]))
+
+    provider = _provider(handler, batch_size=1)
+    try:
+        assert await provider.health() is True
+    finally:
+        await provider.aclose()
+
+
+async def test_factory_builds_langchain_provider() -> None:
+    """工厂按配置装配 LangChain 实现，并校验维度与库列定义一致。"""
+    from rag_adapters.providers import factory as provider_factory
+
+    base = get_settings()
+    embedding = EmbeddingSettings(
+        provider="zhipu",
+        model_name="embedding-3",
+        dimension=1024,
+        api_key="test-key",
+    )
+    settings = base.model_copy(update={"embedding": embedding})
+
+    provider = provider_factory.build_embedding_provider(settings)
+    try:
+        assert isinstance(provider, LangChainEmbedding)
+        assert provider.capabilities.dimension == 1024
+        assert provider.capabilities.is_local is False
+    finally:
+        await provider.aclose()
+
+
+def test_configured_requires_api_key() -> None:
+    assert _remote_settings().configured is True
+    assert _remote_settings(api_key=None).configured is False
+    # 摘要里不能出现 key 原文
+    assert "test-key" not in str(_remote_settings().redacted_summary)
+
+
+def test_base_url_must_have_scheme() -> None:
+    with pytest.raises(ValueError, match="必须带协议"):
+        _remote_settings(base_url="open.bigmodel.cn/api/paas/v4")

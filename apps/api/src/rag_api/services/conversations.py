@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,17 +24,25 @@ from rag_contracts.enums.conversations import (
     MessageRole,
 )
 from rag_core.errors import NotFoundError, ValidationFailedError
+from rag_core.logging import get_logger
+from rag_core.pii import redact_text
 from rag_db.models.conversation import Conversation, Message
 from rag_db.repositories import ConversationRepository, MessageRepository
+from rag_db.repositories.audit import ModelCallRepository
+
+log = get_logger(__name__)
 
 
 class ConversationService:
     """会话与消息的读取与轻量写操作（不涉及模型调用）。"""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, *, tracer: Any = None) -> None:
         self._session = session
         self._conversations = ConversationRepository(session)
         self._messages = MessageRepository(session)
+        # 追踪器（可选）：反馈要回写到对应 trace 的 score 上。
+        # None（未开启追踪 / 单测）时只落库，不报错。
+        self._tracer = tracer
 
     async def list_for_user(
         self,
@@ -126,6 +135,76 @@ class ConversationService:
             reason=reason,
             comment=comment,
         )
+
+        # 落库之后再写 score：库里是**事实**，Langfuse 是**旁路**。
+        # 顺序反了会出现"Langfuse 记了差评但数据库没有"的不可信状态。
+        await self._write_feedback_score(
+            tenant_id=tenant_id,
+            message_id=message_id,
+            rating=rating,
+            reason=reason,
+            comment=comment,
+        )
+
+    async def _write_feedback_score(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        message_id: uuid.UUID,
+        rating: FeedbackRating,
+        reason: FeedbackReason | None,
+        comment: str | None,
+    ) -> None:
+        """把用户反馈写回对应 trace 的 score（评估数据闭环）。
+
+        ## 三条边界
+
+        1. **失败不影响入库**：反馈已经落到 `messages.feedback_*`，
+           score 只是让评估集能直接按 trace 追溯；
+        2. **找不到 trace 就跳过**：追踪未开 / 采样丢弃 / 旧消息，
+           都是正常情况，记 info 而不是 warning（否则日志噪音）；
+        3. **评论文本必须脱敏**：Langfuse 是另一个系统，出口规则与日志一致。
+        """
+        if self._tracer is None:
+            return
+        try:
+            trace_id = await ModelCallRepository(self._session).find_trace_id(
+                tenant_id=tenant_id, message_id=message_id
+            )
+        except Exception as exc:
+            log.warning(
+                "feedback_trace_lookup_failed",
+                message_id=str(message_id),
+                error_type=type(exc).__name__,
+            )
+            return
+
+        if not trace_id:
+            log.info(
+                "feedback_trace_missing",
+                message_id=str(message_id),
+                note="该消息没有关联 trace（未开启追踪或已被采样丢弃）",
+            )
+            return
+
+        detail = " ".join(part for part in (reason.value if reason else "", comment or "") if part)
+        safe_comment = redact_text(detail)[:200] if detail else None
+        try:
+            await self._tracer.score_trace(
+                trace_id=trace_id,
+                name="user_feedback",
+                # 1.0 / 0.0 而不是 1/2：Langfuse 的数值 score 支持负数（例如 -1），
+                # 用 0/1 便于直接算"好评率 = mean"。
+                value=1.0 if rating == FeedbackRating.LIKE else 0.0,
+                comment=safe_comment,
+            )
+        except Exception as exc:
+            log.warning(
+                "feedback_score_failed",
+                message_id=str(message_id),
+                error_type=type(exc).__name__,
+                note="反馈已入库，score 写入失败（旁路）",
+            )
 
     async def require_owned(
         self, *, tenant_id: uuid.UUID, user_id: uuid.UUID, conversation_id: uuid.UUID

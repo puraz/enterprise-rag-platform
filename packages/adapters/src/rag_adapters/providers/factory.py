@@ -14,27 +14,38 @@
 所以它们各自有独立的 provider 配置项与工厂函数。混在一起会让
 "改 LLM 模型"误触发 embedding 重建。
 
-## Reranker 的现状
+## Reranker 的实现
 
-`RAG_RERANKER__PROVIDER` 默认 `none`（直通），可选 `local_bge`
-（sentence-transformers CrossEncoder）。是否参与检索由
-`RAG_RETRIEVAL__USE_RERANK` 控制——**两个开关分开**：
+`RAG_RERANKER__PROVIDER` 可选 `none`（直通）/ `siliconflow` / `cohere_compatible`
+（后两者是同一个 Cohere 风格 `/rerank` 适配器，区别只在配置）。
+是否参与检索由 `RAG_RETRIEVAL__USE_RERANK` 控制——**两个开关分开**：
 换模型与"开不开这个节点"是两件事。
 "Reranker 挂 → 只用 RRF"的降级由调用方（`ChatService`）实现，
 而不是在工厂里静默换成 NoOp（那会让评估"看起来开了但没跑"）。
+
+为什么没有用 LangChain 的 rerank 封装：它只有厂商专属实现
+（Jina/Infinity/本地模型），没有通用的远程 rerank 抽象（rerank 不在
+OpenAI 协议里）。详见 `cohere_reranker.py` 的模块 docstring。
+
+## Embedding 为什么用 LangChain
+
+`/embeddings` 是 OpenAI 协议的一部分，LangChain 的 `OpenAIEmbeddings`
+已经封装了鉴权/批量/重试开关/维度参数；自己再写一套只会让
+"新增一家供应商"变成改代码。本地 bge-m3 已移除（它把 torch 带进镜像，
+连带 2GB+ CUDA wheel）。
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 
-from rag_adapters.providers.bge import LocalBGEEmbedding
-from rag_adapters.providers.bge_reranker import LocalBGEReranker
+from rag_adapters.providers.cohere_reranker import CohereStyleReranker
 from rag_adapters.providers.embedding import (
     EmbeddingProvider,
     NoOpReranker,
     RerankerProvider,
 )
+from rag_adapters.providers.langchain_embedding import LangChainEmbedding
 from rag_adapters.providers.langchain_llm import LangChainLLMProvider
 from rag_adapters.providers.llm import LLMProvider
 from rag_core.errors import ConfigError
@@ -68,7 +79,15 @@ def build_llm_provider(settings: Settings) -> LLMProvider:
 # ---------------------------------------------------------------- Embedding
 
 _EMBEDDING_BUILDERS: dict[str, Callable[[Settings], EmbeddingProvider]] = {
-    "local_bge": lambda settings: LocalBGEEmbedding(settings.embedding),
+    # 智谱（BigModel）：OpenAI 兼容的 /embeddings
+    "zhipu": lambda settings: LangChainEmbedding(settings.embedding),
+    # SiliconFlow / 百炼兼容模式 / vLLM / TEI 等所有提供 /embeddings 的服务。
+    #
+    # 三个键指向同一个实现："用哪家"是配置（base_url + model_name），
+    # 不是代码分支。保留多个键是为了让配置语义清晰、日志可读。
+    "siliconflow": lambda settings: LangChainEmbedding(settings.embedding),
+    "openai_compatible": lambda settings: LangChainEmbedding(settings.embedding),
+    "openai": lambda settings: LangChainEmbedding(settings.embedding),
 }
 
 
@@ -95,8 +114,12 @@ def build_embedding_provider(settings: Settings) -> EmbeddingProvider:
 # ---------------------------------------------------------------- Reranker
 
 _RERANKER_BUILDERS: dict[str, Callable[[Settings], RerankerProvider]] = {
+    # 直通：不做重排，按融合顺序返回。
     "none": lambda settings: NoOpReranker(),
-    "local_bge": lambda settings: LocalBGEReranker(settings.reranker),
+    # 远程 /rerank（Cohere 风格协议）。两个键指向同一个实现：
+    # "用哪家"是配置（base_url + model_name），不是代码分支。
+    "siliconflow": lambda settings: CohereStyleReranker(settings.reranker),
+    "cohere_compatible": lambda settings: CohereStyleReranker(settings.reranker),
 }
 
 
