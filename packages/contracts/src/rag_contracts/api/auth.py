@@ -76,6 +76,114 @@ class HealthResponse(BaseModel):
     )
 
 
+class OIDCAuthorizeResponse(BaseModel):
+    """OIDC 登录跳转信息。
+
+    ## 为什么不在服务端 302 直接跳
+
+    前端 SPA 需要先把 `state` 与 `code_verifier` 存到 localStorage/sessionStorage
+    （缓存住才能在校验回调时用）。服务端直接 302 的话，前端拿不到这两个值，
+    回调时就无法完成 PKCE 校验。
+
+    所以拆成两步：本接口返回 URL 与 state，前端自己跳。
+    `code_verifier` **绝不出现在响应里**（它必须只留在浏览器）。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    authorize_url: str = Field(description="IdP 授权地址（含 state 与 PKCE challenge）")
+    state: str = Field(description="CSRF 校验值，前端需原样带回回调接口")
+
+
+class OIDCExchangeRequest(BaseModel):
+    """授权码换取本系统 token。
+
+    ## 为什么 code_verifier 由前端传
+
+    PKCE 的前提是"只有发起授权的客户端持有 verifier"。放在服务端状态里
+    会被多副本/重启破坏，也会让服务端变成可被重放的中心。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(min_length=1, max_length=2048, description="IdP 回调带回的授权码")
+    state: str = Field(min_length=1, max_length=256, description="授权时下发的 state")
+    code_verifier: str = Field(
+        min_length=43, max_length=128, description="前端保存的 PKCE code_verifier"
+    )
+    redirect_uri: str = Field(min_length=1, max_length=500, description="必须与授权时一致")
+
+
+class LogoutRequest(BaseModel):
+    """登出请求。
+
+    `refresh_token` 可选：只传 access token 时按"不报文"处理（用户可能
+    已经丢了本地存储）。带上时同时作废该 refresh token。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    refresh_token: str | None = Field(
+        default=None,
+        description="要作废的 refresh token。只作废当前设备，不影响其它设备",
+    )
+
+
+class LogoutResponse(BaseModel):
+    """登出响应。
+
+    ## 为什么不是 204
+
+    登出是"有结果的动作"：前端要知道 refresh token 是否真的被作废
+    （比如它已过期时，服务端只能返回 revoked=false）。用单对象表达，
+    与"无内容"的三类形态不冲突。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    revoked: bool = Field(description="是否成功作废了 refresh token（未提供时为 false）")
+
+
+class TenantMembershipItem(BaseModel):
+    """用户可访问的一个租户。
+
+    ## 为什么要有这个接口
+
+    用户可能属于多个租户（外部顾问、跨部门协作）。但 access token 里
+    只能带**一个** `tenant_id`，没有列表接口前端就不知道"我还能切到哪"，
+    表现为"登录后永远停在第一个租户"。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    tenant_id: uuid.UUID
+    tenant_slug: str
+    tenant_name: str
+    role: str = Field(description="该租户内的角色：owner/admin/knowledge_admin/member/viewer")
+    is_active: bool = Field(description="该租户当前是否可用（暂停/删除的为 false）")
+
+
+class TenantListResponse(BaseModel):
+    """`GET /me/tenants` 响应。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    items: list[TenantMembershipItem]
+    active_tenant_id: uuid.UUID = Field(description="当前 token 生效的租户")
+
+
+class SwitchTenantRequest(BaseModel):
+    """切换租户。
+
+    **tenant_id 只用于校验成员关系**：新 token 的 tenant 来自服务端
+    校验通过的成员关系，绝不直接采信请求参数。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: uuid.UUID = Field(description="目标租户（必须是当前用户的 active 成员关系）")
+
+
 class RefreshRequest(BaseModel):
     """刷新 token 请求。
 
@@ -106,3 +214,20 @@ class RefreshResponse(BaseModel):
     refresh_token: str
     token_type: str = Field(default="Bearer")
     expires_at: int = Field(description="access token 过期时间（Unix 秒）")
+
+
+__all__ = [
+    "CurrentUserResponse",
+    "DevLoginRequest",
+    "HealthResponse",
+    "LoginResponse",
+    "LogoutRequest",
+    "LogoutResponse",
+    "OIDCAuthorizeResponse",
+    "OIDCExchangeRequest",
+    "RefreshRequest",
+    "RefreshResponse",
+    "SwitchTenantRequest",
+    "TenantListResponse",
+    "TenantMembershipItem",
+]

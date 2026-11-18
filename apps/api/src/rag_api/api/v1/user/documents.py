@@ -48,12 +48,14 @@ import uuid
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rag_api.deps import get_db
+from rag_adapters.storages.base import StorageBackend
+from rag_api.deps import get_db, get_storage
 from rag_api.deps.pagination import PageQuery, page_query
 from rag_api.openapi import (
     ASYNC_ENDPOINT,
     DELETE_ENDPOINT,
     TENANT_ENDPOINT,
+    TENANT_WRITE_ENDPOINT,
 )
 from rag_api.permissions import PermissionContext, get_permission_context
 from rag_api.schemas.common import Page
@@ -68,6 +70,7 @@ from rag_api.schemas.documents import (
     to_retry_response,
 )
 from rag_api.services.documents import DocumentService
+from rag_contracts.api.knowledge import DocumentDownloadResponse
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -193,3 +196,61 @@ async def retry_document(
     ctx.require_kb_write()
     document_id, task_id = await DocumentService(session).retry(ctx=ctx, doc_id=doc_id)
     return to_retry_response(document_id=document_id, task_id=task_id)
+
+
+@router.get(
+    "/{doc_id}/download",
+    response_model=DocumentDownloadResponse,
+    summary="获取下载地址",
+    description=(
+        "返回临时下载地址（默认 15 分钟）。\n\n"
+        "**S3 后端返回签名直链**（客户端直连存储）；**local 后端返回本服务代理地址**。"
+        "前端两种情况都是 GET 这个 URL，不需要区分。\n\n"
+        "**签名 URL 一旦发出，有效期内任何人都能下载**：所以权限与密级校验"
+        "在签发前完成（文档不可读返回 404，不泄漏存在性）。\n\n"
+        "下载动作会写审计（`document.download`）——把文件带走比在线阅读更敏感。\n\n"
+        "`version_no` 可指定历史版本；省略则下载当前版本。"
+    ),
+    responses=TENANT_ENDPOINT,
+)
+async def download_document(
+    doc_id: uuid.UUID,
+    ctx: PermissionContext = Depends(get_permission_context),
+    session: AsyncSession = Depends(get_db),
+    storage: StorageBackend = Depends(get_storage),
+    version_no: int | None = Query(
+        default=None, ge=1, description="指定版本号；省略则下载当前版本"
+    ),
+) -> DocumentDownloadResponse:
+    return await DocumentService(session).create_download(
+        ctx=ctx, doc_id=doc_id, storage=storage, version_no=version_no
+    )
+
+
+@router.post(
+    "/{doc_id}/versions/{version_id}/activate",
+    response_model=DocumentDetail,
+    summary="回滚到指定版本",
+    description=(
+        "把指定版本设为当前生效版本。\n\n"
+        "**纯元数据操作，秒级完成**：改版本指针与 chunk 的 `is_current` 标记，"
+        "不重新解析、不重新向量化——这正是版本快照设计的价值。\n\n"
+        "约束：\n"
+        "- 目标版本必须属于该文档且状态为 `ready`（回滚到失败版本等于把文档变不可检索）；\n"
+        "- 已是当前版本时返回 409；\n"
+        "- 需要知识库写权限。\n\n"
+        "响应返回回滚后的文档详情（含版本列表），前端可直接刷新界面。"
+    ),
+    responses=TENANT_WRITE_ENDPOINT,
+)
+async def rollback_document_version(  # pyright: ignore[reportUnusedFunction]
+    doc_id: uuid.UUID,
+    version_id: uuid.UUID,
+    ctx: PermissionContext = Depends(get_permission_context),
+    session: AsyncSession = Depends(get_db),
+) -> DocumentDetail:
+    ctx.require_kb_write()
+    doc, versions = await DocumentService(session).rollback(
+        ctx=ctx, doc_id=doc_id, version_id=version_id
+    )
+    return to_detail(doc, versions)

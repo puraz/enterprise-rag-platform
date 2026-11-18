@@ -55,7 +55,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import nullcontext
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -75,6 +75,8 @@ from rag_api.schemas.conversations import (
     ConversationItem,
     FeedbackRequest,
     MessageItem,
+    UpdateConversationRequest,
+    to_conversation_item,
     to_conversation_page,
     to_message_page,
 )
@@ -285,6 +287,9 @@ async def list_conversations(
     ctx: PermissionContext = Depends(get_permission_context),
     session: AsyncSession = Depends(get_db),
     page: PageQuery = Depends(page_query),
+    status: str | None = Query(
+        default=None, description="active（默认）/ archived（查归档的会话）"
+    ),
 ) -> Page[ConversationItem]:
     rows, total = await ConversationService(session).list_for_user(
         tenant_id=ctx.tenant_id,
@@ -292,6 +297,7 @@ async def list_conversations(
         limit=page.limit,
         offset=page.offset,
         include_total=page.include_total,
+        status=status,
     )
     return to_conversation_page(rows, total=total, limit=page.limit, offset=page.offset)
 
@@ -317,6 +323,51 @@ async def list_messages(
         include_total=page.include_total,
     )
     return to_message_page(rows, total=total, limit=page.limit, offset=page.offset)
+
+
+@router.patch(
+    "/conversations/{conversation_id}",
+    response_model=ConversationItem,
+    summary="重命名 / 归档会话",
+    description=(
+        "更新会话标题或状态。\n\n"
+        '**标题**：`{"title": "差旅制度汇总"}`。首轮自动生成的标题是问题前 30 字，'
+        "追问后往往已跑题，用户需要能自己整理。\n\n"
+        '**归档**：`{"status": "archived"}`。归档是「收起来」不是删除——'
+        "消息与反馈完整保留，可用 `status=archived` 查回；"
+        "已归档会话不能继续提问（`POST /chat` 返回 409）。\n\n"
+        "跨用户访问返回 404（不泄漏存在性）。"
+    ),
+    responses=TENANT_WRITE_ENDPOINT,
+)
+async def update_conversation(
+    conversation_id: uuid.UUID,
+    payload: UpdateConversationRequest,
+    ctx: PermissionContext = Depends(get_permission_context),
+    session: AsyncSession = Depends(get_db),
+) -> ConversationItem:
+    service = ConversationService(session)
+    conversation = await service.require_owned(
+        tenant_id=ctx.tenant_id, user_id=ctx.user_id, conversation_id=conversation_id
+    )
+    # 两个字段都可选，但契约保证至少有一个（`_require_one`）。
+    # 顺序：先改状态再改标题——状态是安全相关（归档后不可提问），
+    # 标题是展示相关，任何一步失败都该整体回滚（同一事务）。
+    if payload.status is not None:
+        conversation = await service.set_status(
+            tenant_id=ctx.tenant_id,
+            user_id=ctx.user_id,
+            conversation_id=conversation_id,
+            status=payload.status.value,
+        )
+    if payload.title is not None:
+        conversation = await service.rename(
+            tenant_id=ctx.tenant_id,
+            user_id=ctx.user_id,
+            conversation_id=conversation_id,
+            title=payload.title,
+        )
+    return to_conversation_item(conversation)
 
 
 @router.delete(

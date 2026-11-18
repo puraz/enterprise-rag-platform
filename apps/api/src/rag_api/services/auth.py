@@ -37,7 +37,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag_api.identity.provider import ExternalIdentity
-from rag_contracts.enums import MembershipStatus, TenantRole, UserStatus
+from rag_contracts.api.auth import TenantMembershipItem
+from rag_contracts.enums import MembershipStatus, TenantRole, TenantStatus, UserStatus
 from rag_core.errors import AuthenticationError, PermissionDeniedError
 from rag_core.logging import get_logger
 from rag_db.models.membership import TenantMembership
@@ -123,6 +124,90 @@ class AuthService:
 
         membership = await self._memberships.get_active(tenant_id=tenant_id, user_id=user_id)
         return user, membership
+
+    async def list_tenants(self, *, user_id: uuid.UUID) -> list[TenantMembershipItem]:
+        """列出用户可访问的租户（`GET /me/tenants`）。
+
+        ## 为什么 inactive 租户也返回（但标 is_active=false）
+
+        被暂停/删除的租户如果直接过滤掉，用户会看到"我的两个租户忽然只剩一个"，
+        无法解释是自己被移出还是租户被停。标出来让前端能显示
+        "XX 租户已停用，请联系管理员"。
+
+        ## 为什么不用 `PermissionContext`
+
+        这个接口本身不需要租户内权限——"我属于哪些租户"是用户级事实。
+        用 `get_session`（无租户上下文）查询 `tenant_memberships`，
+        并显式按 `user_id` 过滤。RLS 在这条路径上不适用，
+        所以**必须**写 `user_id` 条件（仓储已保证签名里有）。
+        """
+        memberships = await self._memberships.list_for_user(user_id)
+        items: list[TenantMembershipItem] = []
+        for membership in memberships:
+            tenant = await self._tenants.get_by_id(membership.tenant_id)
+            if tenant is None:
+                # FK 是 CASCADE，正常情况下不会出现；出现说明数据不一致
+                log.error(
+                    "membership_tenant_missing",
+                    membership_id=str(membership.id),
+                    tenant_id=str(membership.tenant_id),
+                )
+                continue
+            items.append(
+                TenantMembershipItem(
+                    tenant_id=tenant.id,
+                    tenant_slug=tenant.slug,
+                    tenant_name=tenant.name,
+                    role=str(membership.role),
+                    is_active=tenant.status == TenantStatus.ACTIVE.value,
+                )
+            )
+        return items
+
+    async def switch_tenant(
+        self, *, user_id: uuid.UUID, target_tenant_id: uuid.UUID
+    ) -> AuthenticatedUser:
+        """切换当前租户（换发 token 用）。
+
+        ## 校验链（缺一条就是越权）
+
+        1. 用户仍 active（token 有效但账号可能已禁用）；
+        2. 目标租户存在且 active；
+        3. **用户在目标租户里有 active 成员关系**。
+
+        第 3 条是核心：`tenant_id` 来自请求参数，不可信。
+        只校验"该租户存在"就换发 token，等于任何人都能进任何租户。
+
+        ## 为什么返回 `created=False`
+
+        切换不是登录，不该让前端误以为"这是新用户"（会触发引导流程）。
+        """
+        user = await self._users.get_active_by_id(user_id)
+        if user is None:
+            raise AuthenticationError("账号不可用，请重新登录")
+
+        membership = await self._memberships.get_active(tenant_id=target_tenant_id, user_id=user_id)
+        if membership is None:
+            # 不区分"租户不存在"与"你不是成员"：两者都返回 403，
+            # 避免被用来枚举租户 ID 是否存在
+            log.warning(
+                "tenant_switch_denied",
+                user_id=str(user_id),
+                target_tenant=str(target_tenant_id),
+            )
+            raise PermissionDeniedError("无权访问该租户")
+
+        tenant = await self._tenants.get_active_by_id(target_tenant_id)
+        if tenant is None:
+            raise PermissionDeniedError("该租户已停用，请联系管理员")
+
+        return AuthenticatedUser(
+            user_id=user.id,
+            tenant_id=tenant.id,
+            email=user.email,
+            display_name=user.display_name,
+            created=False,
+        )
 
     async def bootstrap_tenant(self, identity: ExternalIdentity) -> AuthenticatedUser:
         """开发引导：确保用户存在，并自动建 `dev-<subject>` 租户。

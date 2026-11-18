@@ -95,7 +95,7 @@ def _request(*, enabled: bool = True, redis: object | None = _RedisStub()) -> _R
 
 def test_chat_route_declares_ratelimit_dependency() -> None:
     """重构路由时不能把限流依赖丢掉。"""
-    from rag_api.api.v1.chat import router
+    from rag_api.api.v1.user.chat import router
 
     chat_route = next(
         route for route in router.routes if isinstance(route, APIRoute) and route.path == "/chat"

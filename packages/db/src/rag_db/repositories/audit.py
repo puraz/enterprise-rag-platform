@@ -340,6 +340,34 @@ class AuditRepository:
         )
         return {str(row[0]): int(row[1]) for row in result}
 
+    async def count_denied(self, *, tenant_id: uuid.UUID, since: datetime) -> int:
+        """统计窗口内被拒绝的操作数（安全看板）。
+
+        独立方法而不是从 `count_by_action` 里挑几个 action 求和：
+        "被拒绝"是一个 outcome 维度的事实，与 action 可能任意组合
+        （未来任何新动作都可能被拒）。按 action 枚举求和会漏掉新动作。
+
+        **必须排除提示词注入外的系统噪音**：这里不排除，看板要看到全部。
+        真正需要过滤的场景由调用方传更窄的窗口。
+        """
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(
+                AuditLog.tenant_id == tenant_id,
+                AuditLog.created_at >= since,
+                AuditLog.outcome == AuditOutcome.DENIED,
+            )
+        )
+        return int(result.scalar_one())
+
+    async def count_total(self, *, tenant_id: uuid.UUID) -> int:
+        """该租户审计记录总数（验链时判断是否全量覆盖）。"""
+        result = await self._session.execute(
+            select(func.count()).select_from(AuditLog).where(AuditLog.tenant_id == tenant_id)
+        )
+        return int(result.scalar_one())
+
 
 class ModelCallRepository:
     """模型调用明细数据访问。成本账的基础。"""
@@ -541,3 +569,79 @@ class ModelCallRepository:
         )
         total, hits = result.one()
         return float(hits) / float(total) if total else 0.0
+
+    async def daily_costs(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        since: datetime,
+        until: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """按天聚合成本（管理端趋势图）。
+
+        ## 为什么按 UTC 日期归集
+
+        `created_at` 是 `timestamptz`，按会话时区做 `date_trunc` 会让
+        "同一条记录在不同副本上落到不同天"（副本的 TimeZone 设置可能不同）。
+        固定 `UTC` 后时间边界是确定的；前端按用户本地时区展示时自己做换算，
+        但**对账口径唯一**。
+
+        ## 为什么不用 `generated_always` 物化视图
+
+        日聚合表（A13 设计里的日汇总）尚未落地。这里直接扫明细：
+        数据量在百万级以内时，`(tenant_id, created_at)` 索引上的
+        range scan 足够快，且没有"视图与明细漂移"的问题。
+        真到需要预聚合时，替换点只有这一个方法。
+        """
+        day = func.date_trunc("day", func.timezone("UTC", ModelCall.created_at)).label("day")
+        stmt = (
+            select(
+                day,
+                func.count().label("call_count"),
+                func.coalesce(func.sum(ModelCall.cost_usd), 0).label("cost_usd"),
+                func.coalesce(func.sum(ModelCall.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(ModelCall.output_tokens), 0).label("output_tokens"),
+            )
+            .where(ModelCall.tenant_id == tenant_id, ModelCall.created_at >= since)
+            .group_by(day)
+            .order_by(day)
+        )
+        if until is not None:
+            stmt = stmt.where(ModelCall.created_at < until)
+
+        result = await self._session.execute(stmt)
+        return [
+            {
+                "date": row[0].date().isoformat() if hasattr(row[0], "date") else str(row[0]),
+                "call_count": int(row[1]),
+                "cost_usd": row[2] if isinstance(row[2], Decimal) else Decimal(str(row[2])),
+                "input_tokens": int(row[3]),
+                "output_tokens": int(row[4]),
+            }
+            for row in result
+        ]
+
+    async def totals(
+        self, *, tenant_id: uuid.UUID, since: datetime, until: datetime | None = None
+    ) -> dict[str, Any]:
+        """窗口内的总量（调用数 / tokens / 成本）。
+
+        `sum_cost` + `cache_hit_rate` 需要两次往返，这里一次拿全，
+        供个人用量页与管理看板复用。
+        """
+        stmt = select(
+            func.count().label("calls"),
+            func.coalesce(func.sum(ModelCall.input_tokens), 0).label("input_tokens"),
+            func.coalesce(func.sum(ModelCall.output_tokens), 0).label("output_tokens"),
+            func.coalesce(func.sum(ModelCall.cost_usd), 0).label("cost_usd"),
+        ).where(ModelCall.tenant_id == tenant_id, ModelCall.created_at >= since)
+        if until is not None:
+            stmt = stmt.where(ModelCall.created_at < until)
+
+        row = (await self._session.execute(stmt)).one()
+        return {
+            "call_count": int(row[0]),
+            "input_tokens": int(row[1]),
+            "output_tokens": int(row[2]),
+            "cost_usd": row[3] if isinstance(row[3], Decimal) else Decimal(str(row[3])),
+        }

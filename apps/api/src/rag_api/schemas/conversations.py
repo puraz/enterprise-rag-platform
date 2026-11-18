@@ -11,6 +11,7 @@ from rag_contracts.api.chat import (
     ConversationItem,
     FeedbackRequest,
     MessageItem,
+    UpdateConversationRequest,
 )
 from rag_contracts.api.citations import Citation
 from rag_contracts.api.pagination import Page, PageMeta
@@ -103,6 +104,7 @@ __all__ = [
     "ConversationItem",
     "FeedbackRequest",
     "MessageItem",
+    "UpdateConversationRequest",
     "to_conversation_item",
     "to_conversation_page",
     "to_message_item",

@@ -52,14 +52,22 @@ class ConversationService:
         limit: int,
         offset: int,
         include_total: bool,
+        status: str | None = None,
     ) -> tuple[list[Conversation], int | None]:
-        """当前用户的会话列表（按最后消息时间倒序）。"""
+        """当前用户的会话列表（按最后消息时间倒序）。
+
+        `status` 省略时默认只看 active：归档的会话不该混在正常列表里，
+        但用户要能通过 `status=archived` 找回它们——否则"归档"等于"消失"。
+        """
+        from rag_contracts.enums.conversations import ConversationStatus
+
         rows, total = await self._conversations.list_for_user(
             tenant_id=tenant_id,
             user_id=user_id,
             limit=limit,
             offset=offset,
             include_total=include_total,
+            status=status or ConversationStatus.ACTIVE.value,
         )
         return list(rows), total
 
@@ -218,6 +226,80 @@ class ConversationService:
         if conversation is None:
             raise NotFoundError("会话不存在")
         return conversation
+
+    async def rename(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        user_id: uuid.UUID,
+        conversation_id: uuid.UUID,
+        title: str,
+    ) -> Conversation:
+        """重命名会话。
+
+        ## 为什么归属校验必须在写入前
+
+        `ConversationRepository.rename()` 只按 `conversation_id` 更新。
+        如果先写后校验（或忘了校验），同租户任何人都能改别人的会话标题。
+        所以这里用 `require_owned` 先确认归属，再写。
+
+        ## 为什么允许改标题
+
+        首轮标题是「问题前 30 字」，追问之后往往已经跑题。
+        用户需要一个能自己整理历史的方式，否则列表里全是长句截断。
+        """
+        await self.require_owned(
+            tenant_id=tenant_id, user_id=user_id, conversation_id=conversation_id
+        )
+        await self._conversations.rename(conversation_id=conversation_id, title=title)
+        # 重新读取：rename 是 UPDATE，内存里的 ORM 对象还是旧标题
+        return await self.require_owned(
+            tenant_id=tenant_id, user_id=user_id, conversation_id=conversation_id
+        )
+
+    async def set_status(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        user_id: uuid.UUID,
+        conversation_id: uuid.UUID,
+        status: str,
+    ) -> Conversation:
+        """更新会话状态（归档 / 取消归档）。
+
+        ## 归档与删除是两件事
+
+        归档 = "从默认列表收起来，但仍可查回来"。它保留全部消息与反馈
+        （反馈是评估集来源），只是 `status=archived`。
+        删除是软删（`deleted_at`），默认查询完全排除。
+        合并成一个动作会丢掉"临时收起但还要翻"的用法。
+
+        ## 已归档的会话不能继续提问
+
+        这个约束在 `ChatService` 里检查（`conversation.status`），
+        不在本方法——本方法只改状态，不管问答链路。
+        """
+        from rag_contracts.enums.conversations import ConversationStatus
+
+        await self.require_owned(
+            tenant_id=tenant_id, user_id=user_id, conversation_id=conversation_id
+        )
+
+        if status == ConversationStatus.ARCHIVED.value:
+            await self._conversations.archive(conversation_id=conversation_id)
+        elif status == ConversationStatus.ACTIVE.value:
+            await self._conversations.unarchive(conversation_id=conversation_id)
+        else:
+            log.warning(
+                "conversation_status_unsupported",
+                conversation_id=str(conversation_id),
+                status=status,
+            )
+            raise ValidationFailedError("只支持 active / archived")
+
+        return await self.require_owned(
+            tenant_id=tenant_id, user_id=user_id, conversation_id=conversation_id
+        )
 
 
 __all__ = ["ConversationService"]

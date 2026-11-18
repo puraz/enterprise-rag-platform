@@ -35,13 +35,12 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import APIRouter, FastAPI
+from fastapi import FastAPI
 
 from rag_adapters.storages.factory import build_all_storages
 from rag_api.api.health import router as health_router
-from rag_api.api.v1.admin_audit import router as admin_audit_router
-from rag_api.api.v1.auth import build_auth_router, build_me_router
-from rag_api.api.v1.uploads import router as uploads_router
+from rag_api.api.v1.admin import build_admin_router
+from rag_api.api.v1.user import build_user_router
 from rag_api.errors_handlers import register_exception_handlers
 from rag_api.identity.factory import available_providers
 from rag_api.identity.tokens import TokenService
@@ -320,29 +319,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_exception_handlers(app)
 
     # ---- 路由装配 ----
-    api_v1 = APIRouter(prefix="/api/v1")
-
-    # dev 登录：**只在显式开启且非生产时注册端点**（不注册 = 404，
-    # 比"注册了但返回 403"更彻底）。每次创建新 router，
-    # 避免模块级单例把 dev 端点泄漏给其它 app 实例。
+    #
+    # ## 为什么分成 user / admin 两个装配函数
+    #
+    # URL 完全不变（`/api/v1/*` 用户面、`/api/v1/admin/*` 管理面），
+    # 但两面的**鉴权依赖根本不同**：用户面是 `get_permission_context`
+    # （租户角色 + ACL），管理面是 `get_admin_context`（平台角色 ∪ 租户
+    # owner/admin + 能力集）。混在一个函数里装配时，"哪个路由挂了哪套
+    # 依赖"只存在于每个路由的签名中间，审查时看不出来。
+    #
+    # 拆开后，`build_admin_router()` 里每一条都显式声明能力，
+    # 且 `tests/test_api_layering.py` 会检查 admin 包下每个路由都有
+    # 管理面依赖（漏挂 = 测试红，而不是"上线后任何人都能调"）。
     dev_enabled = resolved.dev_auth_enabled and not resolved.env.is_production_like
-    api_v1.include_router(build_auth_router(dev_enabled=dev_enabled))
-    api_v1.include_router(build_me_router())
-    api_v1.include_router(uploads_router)
-    api_v1.include_router(admin_audit_router)
-    # 知识库与文档（B4）：KB 的 CRUD + blob 登记为文档并触发解析
-    from rag_api.api.v1.documents import router as documents_router
-    from rag_api.api.v1.knowledge_bases import router as knowledge_bases_router
-
-    api_v1.include_router(knowledge_bases_router)
-    api_v1.include_router(documents_router)
-    # 问答与会话（A16）：SSE 流式 chat + 会话 CRUD + 反馈
-    from rag_api.api.v1.chat import router as chat_router
-
-    api_v1.include_router(chat_router)
 
     app.include_router(health_router)
-    app.include_router(api_v1)
+    app.include_router(build_user_router(dev_enabled=dev_enabled))
+    app.include_router(build_admin_router())
 
     log.info(
         "app_created",

@@ -16,14 +16,31 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from rag_contracts.api.admin import (
+    AdminChunkItem,
+    AdminDocumentItem,
+    AdminDocumentVersionItem,
+    AdminTaskItem,
+    AuditChainVerification,
+    DashboardCounters,
+    DashboardResponse,
+    IndexVersionItem,
+)
 from rag_contracts.api.audit import AuditLogItem, AuditQueryResponse
 from rag_contracts.api.auth import (
     CurrentUserResponse,
     DevLoginRequest,
     HealthResponse,
     LoginResponse,
+    LogoutRequest,
+    LogoutResponse,
+    OIDCAuthorizeResponse,
+    OIDCExchangeRequest,
     RefreshRequest,
     RefreshResponse,
+    SwitchTenantRequest,
+    TenantListResponse,
+    TenantMembershipItem,
 )
 from rag_contracts.api.chat import (
     ChatDonePayload,
@@ -32,6 +49,7 @@ from rag_contracts.api.chat import (
     ConversationItem,
     FeedbackRequest,
     MessageItem,
+    UpdateConversationRequest,
 )
 from rag_contracts.api.citations import AnswerWithCitations, Citation
 from rag_contracts.api.knowledge import (
@@ -39,13 +57,16 @@ from rag_contracts.api.knowledge import (
     CreateDocumentResponse,
     CreateKnowledgeBaseRequest,
     DocumentDetail,
+    DocumentDownloadResponse,
     DocumentItem,
     DocumentVersionItem,
     KnowledgeBaseItem,
+    RollbackVersionRequest,
     UpdateKnowledgeBaseRequest,
 )
 from rag_contracts.api.pagination import PageMeta, PageRequest
 from rag_contracts.api.success import CreatedResource, TaskAccepted
+from rag_contracts.api.tasks import RetryTaskResponse, TaskItem
 from rag_contracts.api.uploads import (
     CompleteUploadRequest,
     CompleteUploadResponse,
@@ -54,6 +75,7 @@ from rag_contracts.api.uploads import (
     UploadPartResponse,
     UploadSessionStatusResponse,
 )
+from rag_contracts.api.usage import DailyCostPoint, UsageBucket, UsageSummary
 from rag_contracts.enums import (
     AuditAction,
     AuditOutcome,
@@ -143,6 +165,34 @@ EXPORTED_MODELS: tuple[type[BaseModel], ...] = (
     DocumentItem,
     DocumentDetail,
     DocumentVersionItem,
+    DocumentDownloadResponse,
+    RollbackVersionRequest,
+    # 会话更新（B3）：改名 / 归档。不导出前端就不知道 PATCH 能传什么
+    UpdateConversationRequest,
+    # 认证扩展（C1）：OIDC 登录、登出、多租户切换
+    OIDCAuthorizeResponse,
+    OIDCExchangeRequest,
+    LogoutRequest,
+    LogoutResponse,
+    TenantMembershipItem,
+    TenantListResponse,
+    SwitchTenantRequest,
+    # 任务进度（B4 断链修复）：202 返回的 task_id 要有地方查
+    TaskItem,
+    RetryTaskResponse,
+    # 用量与成本（B6 / C2）
+    UsageBucket,
+    UsageSummary,
+    DailyCostPoint,
+    # 管理面（C2 / C3 / C5）
+    DashboardCounters,
+    DashboardResponse,
+    AdminTaskItem,
+    AdminDocumentItem,
+    AdminDocumentVersionItem,
+    AdminChunkItem,
+    IndexVersionItem,
+    AuditChainVerification,
 )
 
 # 需要导出的枚举。导出成 TS 字符串联合类型，而不是 TS enum

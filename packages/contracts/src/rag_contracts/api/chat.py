@@ -80,7 +80,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from rag_contracts.api.citations import Citation
 from rag_contracts.enums.conversations import (
@@ -276,6 +276,45 @@ class ChatDonePayload(BaseModel):
     )
 
 
+class UpdateConversationRequest(BaseModel):
+    """会话更新：标题与状态（都可选，至少给一个）。
+
+    ## 为什么用 PATCH + status 而不是 POST /archive
+
+    归档与取消归档是同一个属性上的两个值，不是一个动作的两种结果。
+    用两个端点会让「取消归档」无处安放（它不属于 archive 语义）。
+
+    ## 为什么标题与状态放在同一个模型
+
+    两者都是会话元数据，且前端「重命名」与「归档」是同一个右键菜单里的
+    两个动作，共用一个 PATCH 端点可以减少一次路由（也避免"改名时不小心
+    把状态重置了"这类分裂语义）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, min_length=1, max_length=200, description="新标题")
+    status: ConversationStatus | None = Field(
+        default=None, description="active（取消归档）/ archived（归档）"
+    )
+
+    @field_validator("title")
+    @classmethod
+    def _strip_title(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("标题不能为空")
+        return stripped
+
+    @model_validator(mode="after")
+    def _require_one(self) -> UpdateConversationRequest:
+        if self.title is None and self.status is None:
+            raise ValueError("至少要修改 title 或 status 之一")
+        return self
+
+
 __all__ = [
     "ChatDonePayload",
     "ChatRequest",
@@ -283,4 +322,5 @@ __all__ = [
     "ConversationItem",
     "FeedbackRequest",
     "MessageItem",
+    "UpdateConversationRequest",
 ]

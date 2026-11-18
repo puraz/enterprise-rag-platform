@@ -46,12 +46,21 @@ class AuditAction(StrEnum):
 
     # ---- 管理面 ----
     ADMIN_INDEX_REBUILD = "admin.index_rebuild"
+    ADMIN_INDEX_ACTIVATE = "admin.index_activate"
+    """切换 ACTIVE 索引版本（高危：影响检索结果）。"""
     ADMIN_PERMISSION_CHANGE = "admin.permission_change"
     ADMIN_PROVIDER_CHANGE = "admin.provider_change"
     ADMIN_CONFIG_CHANGE = "admin.config_change"
+    ADMIN_TASK_RETRY = "admin.task_retry"
+    """人工重试死信任务（运维动作，需留痕：谁在何时让什么重跑了）。"""
     ADMIN_AUDIT_QUERY = "admin.audit_query"
     """查询审计日志。**查询本身要留痕**：它是敏感操作，
     能暴露"谁在什么时候看了什么文档"。"""
+    ADMIN_AUDIT_VERIFY = "admin.audit_verify"
+    """验证审计链完整性（读全表，敏感度低于查询明细但仍是管理动作）。"""
+    ADMIN_CHUNK_VIEW = "admin.chunk_view"
+    """查看 chunk 正文（切分质量检查）。**这是管理面唯一读正文的动作**，
+    必须留痕：管理员可能没有该文档的读权限。"""
 
 
 class AuditOutcome(StrEnum):
@@ -75,6 +84,10 @@ class AuditTargetType(StrEnum):
     DOCUMENT = "document"
     DOCUMENT_VERSION = "document_version"
     CONVERSATION = "conversation"
+    TASK = "task"
+    """异步任务（重试动作的作用对象）。"""
+    CHUNK = "chunk"
+    """分块（切分质量检查的预览对象）。"""
     PROVIDER = "provider"
     CONFIG = "config"
 

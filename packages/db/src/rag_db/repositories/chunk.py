@@ -149,6 +149,47 @@ class ChunkRepository:
         result = await self._session.execute(stmt)
         return list(result.scalars())
 
+    async def list_by_version_paginated(
+        self,
+        *,
+        document_version_id: uuid.UUID,
+        limit: int = 50,
+        offset: int = 0,
+        include_total: bool = False,
+    ) -> tuple[list[Chunk], int | None]:
+        """分页读取某版本的 chunk（管理端切分质量检查）。
+
+        ## 为什么不能复用 `list_by_version`
+
+        那个方法的 `limit=None` 表示"全取"，切分质量检查恰恰想看全部——
+        但一份 200 页 PDF 可能切出 2000 个 chunk，每个 800 字，
+        一次全取 = 1.6MB JSON，浏览器会卡住。分页是必须的。
+
+        ## 为什么按 `chunk_index` 而不是 `created_at`
+
+        `chunk_index` 是**原文顺序**，质量检查要看"相邻块是否被切坏"
+        （比如表格被从中间切开）。按时间排序在批量插入时顺序不稳定。
+        """
+        stmt = (
+            select(Chunk)
+            .where(Chunk.document_version_id == document_version_id)
+            .order_by(Chunk.chunk_index)
+            .limit(limit)
+        )
+        if offset > 0:
+            stmt = stmt.offset(offset)
+        rows = list((await self._session.execute(stmt)).scalars())
+
+        total: int | None = None
+        if include_total:
+            count_stmt = (
+                select(func.count())
+                .select_from(Chunk)
+                .where(Chunk.document_version_id == document_version_id)
+            )
+            total = int((await self._session.execute(count_stmt)).scalar_one())
+        return rows, total
+
     async def list_pending_embedding(
         self,
         *,
@@ -239,6 +280,27 @@ class ChunkRepository:
             update(Chunk)
             .where(Chunk.document_version_id == document_version_id, Chunk.is_current.is_(True))
             .values(is_current=False)
+            .returning(Chunk.id)
+        )
+        return len(list(result.scalars()))
+
+    async def mark_version_chunks_current(self, *, document_version_id: uuid.UUID) -> int:
+        """把某版本的 chunk 标记回当前（版本回滚时调用）。
+
+        与 `mark_version_chunks_stale` 成对：回滚 = 旧版本 stale + 目标版本 current。
+        **必须在同一事务里完成**，否则中间窗口检索会看到"两个版本都 current"
+        （同一内容出现两次）或"一个都不 current"（检索结果为空）。
+
+        返回恢复的 chunk 数 —— 为 0 说明目标版本没有 chunk（数据异常），
+        调用方应据此判断回滚是否真的生效。
+        """
+        result = await self._session.execute(
+            update(Chunk)
+            .where(
+                Chunk.document_version_id == document_version_id,
+                Chunk.is_current.is_(False),
+            )
+            .values(is_current=True)
             .returning(Chunk.id)
         )
         return len(list(result.scalars()))
@@ -603,3 +665,39 @@ class IndexVersionRepository:
             .where(IndexVersion.id == version_id)
             .values(status="ready", chunk_count=chunk_count)
         )
+
+    async def list_for_kb(
+        self, *, knowledge_base_id: uuid.UUID, limit: int = 50
+    ) -> list[IndexVersion]:
+        """列出某知识库的索引版本（管理端）。
+
+        按创建时间倒序：排障时"刚建的那个版本"最常被查。
+        `limit` 有默认值而不是必填——一个库的版本数天然很少
+        （每次重建一个），但它会随时间线性增长，不能无上限返回。
+        """
+        result = await self._session.execute(
+            select(IndexVersion)
+            .where(IndexVersion.knowledge_base_id == knowledge_base_id)
+            .order_by(IndexVersion.created_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars())
+
+    async def get(
+        self, *, knowledge_base_id: uuid.UUID, version_id: uuid.UUID
+    ) -> IndexVersion | None:
+        """按 ID 取版本，并校验它属于该知识库。
+
+        **必须校验 knowledge_base_id**：版本切换是破坏性操作
+        （改 alias 指向），只按 version_id 操作会让"知道版本 ID"
+        就能切换别的库的索引。
+        """
+        result = await self._session.execute(
+            select(IndexVersion)
+            .where(
+                IndexVersion.id == version_id,
+                IndexVersion.knowledge_base_id == knowledge_base_id,
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none()

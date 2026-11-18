@@ -81,8 +81,7 @@ class CreateKnowledgeBaseRequest(BaseModel):
     confidentiality: ConfidentialityLevel = Field(
         default=ConfidentialityLevel.INTERNAL,
         description=(
-            "库级密级。文档密级不得低于它——否则机密文档能混进公开库，"
-            "整个库变成一个随便问的入口"
+            "库级密级。文档密级不得低于它——否则机密文档能混进公开库，整个库变成一个随便问的入口"
         ),
     )
 
@@ -93,8 +92,7 @@ class CreateKnowledgeBaseRequest(BaseModel):
         default="recursive",
         max_length=64,
         description=(
-            "切分策略：fixed / recursive / structured / "
-            "sentence_window / parent_child / semantic"
+            "切分策略：fixed / recursive / structured / sentence_window / parent_child / semantic"
         ),
     )
     chunk_size: int = Field(default=800, ge=100, le=4000, description="目标块大小（字符）")
@@ -115,9 +113,7 @@ class CreateKnowledgeBaseRequest(BaseModel):
 
     @field_validator("visibility")
     @classmethod
-    def _reject_department(
-        cls, value: KnowledgeBaseVisibility
-    ) -> KnowledgeBaseVisibility:
+    def _reject_department(cls, value: KnowledgeBaseVisibility) -> KnowledgeBaseVisibility:
         """拒绝 department（见模块 docstring）。"""
         if value not in _CREATABLE_VISIBILITIES:
             raise ValueError(
@@ -247,8 +243,7 @@ class CreateDocumentRequest(BaseModel):
     confidentiality: ConfidentialityLevel | None = Field(
         default=None,
         description=(
-            "文档密级。省略时继承知识库密级。"
-            "只能更严不能更松：比库级更松会绕过库的密级约束"
+            "文档密级。省略时继承知识库密级。只能更严不能更松：比库级更松会绕过库的密级约束"
         ),
     )
 
@@ -338,13 +333,64 @@ class CreateDocumentResponse(BaseModel):
     )
 
 
+class DocumentDownloadResponse(BaseModel):
+    """文档下载地址。
+
+    ## 为什么返回 URL 而不是直接流式返回文件
+
+    两个后端（local / S3）的能力不同：
+
+    | 后端 | 能签临时直链 | 说明 |
+    |---|---|---|
+    | S3 协议 | ✅ | 客户端直连存储，不经过 API 进程 |
+    | local | ❌ | 只能由 API 代理读取 |
+
+    统一契约用 `download_url` 表达："能拿到一个可 GET 的地址"。
+    local 后端给出的是本服务的代理地址（同源，前端无需区分）。
+    **签名 URL 一旦发出，有效期内任何人可访问** —— 所以签发前
+    必须已完成权限与密级校验（在 service 里做，不在路由里）。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    document_id: uuid.UUID
+    version_no: int = Field(ge=1, description="下载的是哪个版本")
+    filename: str = Field(description="下载时的文件名（原始文件名）")
+    content_type: str = Field(description="MIME 类型（以魔数校验结果为准）")
+    size_bytes: int = Field(ge=0)
+    download_url: str = Field(description="临时下载地址（GET 即可）")
+    expires_in_s: int = Field(ge=1, description="URL 有效期（秒）")
+
+
+class RollbackVersionRequest(BaseModel):
+    """回滚到指定文档版本。
+
+    ## 为什么要显式传 version_id 而不是"上一个版本"
+
+    "回滚到上一版"在多版本场景下语义含糊（上一版可能是失败版本）。
+    显式指定目标版本，配合详情接口返回的版本列表，用户的选择是明确的。
+
+    ## 为什么这不是异步操作
+
+    回滚只做三件事：把版本置 current、把旧版本的 chunk 置 `is_current=false`、
+    把目标版本的 chunk 置回 `is_current=true`。**都是元数据操作，没有
+    重新解析或向量化**——这正是 `DocumentVersion` 快照设计的价值。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version_id: uuid.UUID = Field(description="目标版本 ID（必须是该文档的 ready 版本）")
+
+
 __all__ = [
     "CreateDocumentRequest",
     "CreateDocumentResponse",
     "CreateKnowledgeBaseRequest",
     "DocumentDetail",
+    "DocumentDownloadResponse",
     "DocumentItem",
     "DocumentVersionItem",
     "KnowledgeBaseItem",
+    "RollbackVersionRequest",
     "UpdateKnowledgeBaseRequest",
 ]

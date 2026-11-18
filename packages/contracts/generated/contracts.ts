@@ -430,10 +430,14 @@ export type AuditAction =
   | "security.token_reused"
   | "security.prompt_injection"
   | "admin.index_rebuild"
+  | "admin.index_activate"
   | "admin.permission_change"
   | "admin.provider_change"
   | "admin.config_change"
-  | "admin.audit_query";
+  | "admin.task_retry"
+  | "admin.audit_query"
+  | "admin.audit_verify"
+  | "admin.chunk_view";
 
 /** 操作结果。 */
 export type AuditOutcome =
@@ -449,6 +453,8 @@ export type AuditTargetType =
   | "document"
   | "document_version"
   | "conversation"
+  | "task"
+  | "chunk"
   | "provider"
   | "config";
 
@@ -1143,4 +1149,423 @@ export interface DocumentVersionItem {
   page_count?: number | null;
   parser_name?: string | null;
   created_at: string;
+}
+
+/**
+ * 文档下载地址。
+ * ## 为什么返回 URL 而不是直接流式返回文件
+ * 两个后端（local / S3）的能力不同：
+ * | 后端 | 能签临时直链 | 说明 |
+ * |---|---|---|
+ * | S3 协议 | ✅ | 客户端直连存储，不经过 API 进程 |
+ * | local | ❌ | 只能由 API 代理读取 |
+ * 统一契约用 `download_url` 表达："能拿到一个可 GET 的地址"。
+ * local 后端给出的是本服务的代理地址（同源，前端无需区分）。
+ * **签名 URL 一旦发出，有效期内任何人可访问** —— 所以签发前
+ * 必须已完成权限与密级校验（在 service 里做，不在路由里）。
+ */
+export interface DocumentDownloadResponse {
+  document_id: string;
+  /** 下载的是哪个版本 */
+  version_no: number;
+  /** 下载时的文件名（原始文件名） */
+  filename: string;
+  /** MIME 类型（以魔数校验结果为准） */
+  content_type: string;
+  size_bytes: number;
+  /** 临时下载地址（GET 即可） */
+  download_url: string;
+  /** URL 有效期（秒） */
+  expires_in_s: number;
+}
+
+/**
+ * 回滚到指定文档版本。
+ * ## 为什么要显式传 version_id 而不是"上一个版本"
+ * "回滚到上一版"在多版本场景下语义含糊（上一版可能是失败版本）。
+ * 显式指定目标版本，配合详情接口返回的版本列表，用户的选择是明确的。
+ * ## 为什么这不是异步操作
+ * 回滚只做三件事：把版本置 current、把旧版本的 chunk 置 `is_current=false`、
+ * 把目标版本的 chunk 置回 `is_current=true`。**都是元数据操作，没有
+ * 重新解析或向量化**——这正是 `DocumentVersion` 快照设计的价值。
+ */
+export interface RollbackVersionRequest {
+  /** 目标版本 ID（必须是该文档的 ready 版本） */
+  version_id: string;
+}
+
+/**
+ * 会话更新：标题与状态（都可选，至少给一个）。
+ * ## 为什么用 PATCH + status 而不是 POST /archive
+ * 归档与取消归档是同一个属性上的两个值，不是一个动作的两种结果。
+ * 用两个端点会让「取消归档」无处安放（它不属于 archive 语义）。
+ * ## 为什么标题与状态放在同一个模型
+ * 两者都是会话元数据，且前端「重命名」与「归档」是同一个右键菜单里的
+ * 两个动作，共用一个 PATCH 端点可以减少一次路由（也避免"改名时不小心
+ * 把状态重置了"这类分裂语义）。
+ */
+export interface UpdateConversationRequest {
+  /** 新标题 */
+  title?: string | null;
+  /** active（取消归档）/ archived（归档） */
+  status?: ConversationStatus | null;
+}
+
+/**
+ * OIDC 登录跳转信息。
+ * ## 为什么不在服务端 302 直接跳
+ * 前端 SPA 需要先把 `state` 与 `code_verifier` 存到 localStorage/sessionStorage
+ * （缓存住才能在校验回调时用）。服务端直接 302 的话，前端拿不到这两个值，
+ * 回调时就无法完成 PKCE 校验。
+ * 所以拆成两步：本接口返回 URL 与 state，前端自己跳。
+ * `code_verifier` **绝不出现在响应里**（它必须只留在浏览器）。
+ */
+export interface OIDCAuthorizeResponse {
+  /** IdP 授权地址（含 state 与 PKCE challenge） */
+  authorize_url: string;
+  /** CSRF 校验值，前端需原样带回回调接口 */
+  state: string;
+}
+
+/**
+ * 授权码换取本系统 token。
+ * ## 为什么 code_verifier 由前端传
+ * PKCE 的前提是"只有发起授权的客户端持有 verifier"。放在服务端状态里
+ * 会被多副本/重启破坏，也会让服务端变成可被重放的中心。
+ */
+export interface OIDCExchangeRequest {
+  /** IdP 回调带回的授权码 */
+  code: string;
+  /** 授权时下发的 state */
+  state: string;
+  /** 前端保存的 PKCE code_verifier */
+  code_verifier: string;
+  /** 必须与授权时一致 */
+  redirect_uri: string;
+}
+
+/**
+ * 登出请求。
+ * `refresh_token` 可选：只传 access token 时按"不报文"处理（用户可能
+ * 已经丢了本地存储）。带上时同时作废该 refresh token。
+ */
+export interface LogoutRequest {
+  /** 要作废的 refresh token。只作废当前设备，不影响其它设备 */
+  refresh_token?: string | null;
+}
+
+/**
+ * 登出响应。
+ * ## 为什么不是 204
+ * 登出是"有结果的动作"：前端要知道 refresh token 是否真的被作废
+ * （比如它已过期时，服务端只能返回 revoked=false）。用单对象表达，
+ * 与"无内容"的三类形态不冲突。
+ */
+export interface LogoutResponse {
+  /** 是否成功作废了 refresh token（未提供时为 false） */
+  revoked: boolean;
+}
+
+/**
+ * 用户可访问的一个租户。
+ * ## 为什么要有这个接口
+ * 用户可能属于多个租户（外部顾问、跨部门协作）。但 access token 里
+ * 只能带**一个** `tenant_id`，没有列表接口前端就不知道"我还能切到哪"，
+ * 表现为"登录后永远停在第一个租户"。
+ */
+export interface TenantMembershipItem {
+  tenant_id: string;
+  tenant_slug: string;
+  tenant_name: string;
+  /** 该租户内的角色：owner/admin/knowledge_admin/member/viewer */
+  role: string;
+  /** 该租户当前是否可用（暂停/删除的为 false） */
+  is_active: boolean;
+}
+
+/** `GET /me/tenants` 响应。 */
+export interface TenantListResponse {
+  items: TenantMembershipItem[];
+  /** 当前 token 生效的租户 */
+  active_tenant_id: string;
+}
+
+/**
+ * 切换租户。
+ * **tenant_id 只用于校验成员关系**：新 token 的 tenant 来自服务端
+ * 校验通过的成员关系，绝不直接采信请求参数。
+ */
+export interface SwitchTenantRequest {
+  /** 目标租户（必须是当前用户的 active 成员关系） */
+  tenant_id: string;
+}
+
+/**
+ * 一个任务的状态快照。
+ * ## `progress=100` 的语义
+ * 只由 worker 的 `complete()` 设置。handler 上报上限 99 —— 否则
+ * "仍在跑（甚至马上失败）"的任务会显示已完成，用户看到 100 却等不到结果。
+ */
+export interface TaskItem {
+  id: string;
+  task_type: TaskType;
+  status: TaskStatus;
+  /** 0-100。100 表示任务已成功结束 */
+  progress: number;
+  /** 已重试次数 */
+  retry_count: number;
+  max_retries: number;
+  /** 关联文档（如有） */
+  document_id?: string | null;
+  /** 关联知识库（如有） */
+  knowledge_base_id?: string | null;
+  /** 失败错误码（仅 failed/dead 有值） */
+  error_code?: string | null;
+  /** 失败原因（已脱敏，不含文档正文） */
+  error_message?: string | null;
+  /** 入队时间（= created_at） */
+  queued_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+/**
+ * 死信任务重试的响应（202 语义）。
+ * ## 为什么重试是"新建任务"而不是"复活旧任务"
+ * 复用同一行会抹掉 `error_message` 与 `retry_count` 历史——而管理端
+ * 恰恰要看"这个任务失败过 3 次、每次为什么"。所以重试插入一条新任务，
+ * 旧任务保持 `dead` 状态供追溯。
+ * 幂等键用 `retry:{task_id}:{uuid4}`：同一死信可以被重试多次，
+ * 每次都是独立的执行记录（人工重试是显式动作，不需要去重）。
+ */
+export interface RetryTaskResponse {
+  /** 新任务 ID */
+  task_id: string;
+  /** 被重试的原死信任务 */
+  original_task_id: string;
+  /** 新任务状态，正常为 pending */
+  status: TaskStatus;
+  /** 轮询地址，前端可直接 GET */
+  poll_url: string;
+}
+
+/**
+ * 一组同维度调用的用量与花费。
+ * `provider` / `model` 在个人视图里可为 None（用户不关心内部模型名，
+ * 只看"这个功能花了我多少额度"）——聚合维度由查询参数决定。
+ */
+export interface UsageBucket {
+  task_type: ModelTaskType;
+  provider?: string | null;
+  model?: string | null;
+  /** 调用次数 */
+  call_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  /** 其中命中供应商 prompt cache 的 token 数（按更低单价计费） */
+  cached_tokens: number;
+  /** 该组花费（USD） */
+  cost_usd: number;
+}
+
+/**
+ * 用量汇总。
+ * ## `total_cost_usd` 与 buckets 的关系
+ * 它是 buckets 的求和，但仍然单独返回：前端首屏只要一个数字，
+ * 不必等 buckets 渲染完再求和（也不必信任前端求和——浮点累加顺序
+ * 不同会差最后一位，用户会截图质疑"加起来对不上"）。
+ */
+export interface UsageSummary {
+  /** 统计窗口起点（含） */
+  since: string;
+  /** 统计窗口终点（不含），null 表示到现在 */
+  until?: string | null;
+  total_cost_usd: number;
+  total_calls: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  /** 缓存命中率 = 命中缓存的调用数 / 总调用数 */
+  cache_hit_rate: number;
+  buckets?: UsageBucket[];
+}
+
+/** 按天聚合的成本点（管理端趋势图）。 */
+export interface DailyCostPoint {
+  /** 日期（YYYY-MM-DD，按服务端时区归集） */
+  date: string;
+  call_count: number;
+  cost_usd: number;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+/**
+ * 看板的几个核心计数。
+ * 刻意**不包含 QPS / P95 / 错误率**：那些来自 Prometheus（进程内指标
+ * 在重启后归零，且多副本时单实例的数字没有意义）。
+ * 这里只放"只能从数据库回答"的业务计数。
+ */
+export interface DashboardCounters {
+  /** active 知识库数 */
+  knowledge_base_count: number;
+  /** 未删除文档总数 */
+  document_count: number;
+  /** 按处理状态分组的文档数 */
+  documents_by_status?: Record<string, number>;
+  /** 按状态分组的任务数（看积压与死信） */
+  tasks_by_status?: Record<string, number>;
+  /** 死信任务数（需人工介入） */
+  dead_letter_count: number;
+  /** 统计窗口内被拒绝的操作数 */
+  denied_audit_count: number;
+  /** 统计窗口内的模型花费（USD） */
+  total_cost_usd: number;
+}
+
+/** 管理看板响应。 */
+export interface DashboardResponse {
+  /** 统计窗口起点 */
+  since: string;
+  counters: DashboardCounters;
+  /** 按功能拆解的成本（钱花在改写还是生成） */
+  cost_by_task_type?: UsageBucket[];
+  /** 本次统计的生成时间 */
+  generated_at: string;
+}
+
+/**
+ * 任务台账项（管理端）。
+ * 与用户面的 `TaskItem` 的差别：
+ * - 带 `tenant_id` 与 `locked_by`（跨租户排障必需）；
+ * - 带 `dead_at` 语义（status=dead 时可重试）。
+ */
+export interface AdminTaskItem {
+  id: string;
+  tenant_id: string;
+  task_type: TaskType;
+  status: TaskStatus;
+  progress: number;
+  retry_count: number;
+  max_retries: number;
+  /** 幂等键（排障时用来判断是否重复入队） */
+  idempotency_key: string;
+  document_id?: string | null;
+  knowledge_base_id?: string | null;
+  /** 认领该任务的 worker 标识 */
+  locked_by?: string | null;
+  locked_at?: string | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+/**
+ * 文档台账项。
+ * **不含正文**（见模块 docstring）。`error_message` 已由 worker
+ * 脱敏（`_safe_message`），可以展示给管理员排障。
+ */
+export interface AdminDocumentItem {
+  id: string;
+  knowledge_base_id: string;
+  title: string;
+  original_filename: string;
+  format: DocumentFormat;
+  status: DocumentStatus;
+  confidentiality: ConfidentialityLevel;
+  chunk_count: number;
+  page_count?: number | null;
+  size_bytes: number;
+  retry_count: number;
+  error_code?: string | null;
+  error_message?: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * 文档版本项（管理端，含快照配置）。
+ * 比用户面的 `DocumentVersionItem` 多三样管理端排障必需的字段：
+ * 切分策略快照、chunk 数、解析器实现名。
+ */
+export interface AdminDocumentVersionItem {
+  id: string;
+  version_no: number;
+  status: DocumentVersionStatus;
+  is_current: boolean;
+  chunk_count: number;
+  parser_name?: string | null;
+  chunking_strategy: string;
+  chunk_size: number;
+  chunk_overlap: number;
+  embedding_model?: string | null;
+  created_at: string;
+}
+
+/**
+ * chunk 预览项（切分质量检查）。
+ * **这是管理面唯一返回正文的接口**，且必须单独审计。
+ * `content` 会做长度截断（服务端配置上限），避免一次预览拉回整份文档。
+ */
+export interface AdminChunkItem {
+  id: string;
+  chunk_index: number;
+  chunk_type: string;
+  chunk_level: number;
+  /** chunk 正文（可能被截断，见 is_truncated） */
+  content: string;
+  /** 正文是否被截断（预览上限） */
+  is_truncated: boolean;
+  /** 原始字符数（截断前） */
+  char_count: number;
+  token_count?: number | null;
+  page_no?: number | null;
+  section_path?: string[];
+  /** 是否带版面坐标（前端能否框选） */
+  has_bbox: boolean;
+  embedding_model?: string | null;
+}
+
+/** 索引版本（零停机重建的状态机）。 */
+export interface IndexVersionItem {
+  id: string;
+  knowledge_base_id: string;
+  version_tag: string;
+  status: IndexVersionStatus;
+  embedding_model: string;
+  embedding_dim: number;
+  index_type: string;
+  distance_metric: string;
+  /** 已写入该版本的向量数 */
+  chunk_count: number;
+  /** 预期数量；chunk_count 达标才允许切换 */
+  expected_chunk_count?: number | null;
+  error_message?: string | null;
+  activated_at?: string | null;
+  created_at: string;
+}
+
+/**
+ * 审计链完整性验证结果。
+ * ## 为什么这个接口值得单独存在
+ * 审计表的哈希链只有在**被验证过**时才有意义。只写不验的链
+ * 等于"我们相信没人改过数据库"——而威胁模型里恰恰包含内部人员。
+ * 定期（或监管前）跑一次验证，是这条链存在的理由。
+ * 统计口径：`checked` 条数受 `limit` 限制，`is_complete=False`
+ * 时要明确告诉调用方"只验了前 N 条"，不能让 `verified=true` 被误读为
+ * "全表已验证"。
+ */
+export interface AuditChainVerification {
+  /** 已检查的区间内链是否完整 */
+  verified: boolean;
+  /** 本次实际验证的记录数 */
+  checked_records: number;
+  /** 是否覆盖了该租户的全部审计记录（false 表示只验了前 limit 条） */
+  is_complete: boolean;
+  /** 第一个断点的链内序号（verified=false 时有值） */
+  first_broken_seq?: number | null;
+  /** 断链原因的可读说明（不含记录内容） */
+  reason?: string | null;
 }

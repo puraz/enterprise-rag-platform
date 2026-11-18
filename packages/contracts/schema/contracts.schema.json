@@ -403,10 +403,14 @@
         "security.token_reused",
         "security.prompt_injection",
         "admin.index_rebuild",
+        "admin.index_activate",
         "admin.permission_change",
         "admin.provider_change",
         "admin.config_change",
-        "admin.audit_query"
+        "admin.task_retry",
+        "admin.audit_query",
+        "admin.audit_verify",
+        "admin.chunk_view"
       ],
       "description": "审计动作类型。\n\n    **命名规则**：`<资源>.<动词>`，全小写下划线连接资源名。\n    值是对外契约的一部分（管理端按此筛选），一旦发布不能改。"
     },
@@ -430,6 +434,8 @@
         "document",
         "document_version",
         "conversation",
+        "task",
+        "chunk",
         "provider",
         "config"
       ],
@@ -3557,6 +3563,1788 @@
         "created_at"
       ],
       "title": "DocumentVersionItem",
+      "type": "object"
+    },
+    "DocumentDownloadResponse": {
+      "description": "文档下载地址。\n\n## 为什么返回 URL 而不是直接流式返回文件\n\n两个后端（local / S3）的能力不同：\n\n| 后端 | 能签临时直链 | 说明 |\n|---|---|---|\n| S3 协议 | ✅ | 客户端直连存储，不经过 API 进程 |\n| local | ❌ | 只能由 API 代理读取 |\n\n统一契约用 `download_url` 表达：\"能拿到一个可 GET 的地址\"。\nlocal 后端给出的是本服务的代理地址（同源，前端无需区分）。\n**签名 URL 一旦发出，有效期内任何人可访问** —— 所以签发前\n必须已完成权限与密级校验（在 service 里做，不在路由里）。",
+      "properties": {
+        "document_id": {
+          "format": "uuid",
+          "title": "Document Id",
+          "type": "string"
+        },
+        "version_no": {
+          "description": "下载的是哪个版本",
+          "minimum": 1,
+          "title": "Version No",
+          "type": "integer"
+        },
+        "filename": {
+          "description": "下载时的文件名（原始文件名）",
+          "title": "Filename",
+          "type": "string"
+        },
+        "content_type": {
+          "description": "MIME 类型（以魔数校验结果为准）",
+          "title": "Content Type",
+          "type": "string"
+        },
+        "size_bytes": {
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "download_url": {
+          "description": "临时下载地址（GET 即可）",
+          "title": "Download Url",
+          "type": "string"
+        },
+        "expires_in_s": {
+          "description": "URL 有效期（秒）",
+          "minimum": 1,
+          "title": "Expires In S",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "document_id",
+        "version_no",
+        "filename",
+        "content_type",
+        "size_bytes",
+        "download_url",
+        "expires_in_s"
+      ],
+      "title": "DocumentDownloadResponse",
+      "type": "object"
+    },
+    "RollbackVersionRequest": {
+      "additionalProperties": false,
+      "description": "回滚到指定文档版本。\n\n## 为什么要显式传 version_id 而不是\"上一个版本\"\n\n\"回滚到上一版\"在多版本场景下语义含糊（上一版可能是失败版本）。\n显式指定目标版本，配合详情接口返回的版本列表，用户的选择是明确的。\n\n## 为什么这不是异步操作\n\n回滚只做三件事：把版本置 current、把旧版本的 chunk 置 `is_current=false`、\n把目标版本的 chunk 置回 `is_current=true`。**都是元数据操作，没有\n重新解析或向量化**——这正是 `DocumentVersion` 快照设计的价值。",
+      "properties": {
+        "version_id": {
+          "description": "目标版本 ID（必须是该文档的 ready 版本）",
+          "format": "uuid",
+          "title": "Version Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version_id"
+      ],
+      "title": "RollbackVersionRequest",
+      "type": "object"
+    },
+    "UpdateConversationRequest": {
+      "$defs": {
+        "ConversationStatus": {
+          "description": "会话状态。",
+          "enum": [
+            "active",
+            "archived"
+          ],
+          "title": "ConversationStatus",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "description": "会话更新：标题与状态（都可选，至少给一个）。\n\n## 为什么用 PATCH + status 而不是 POST /archive\n\n归档与取消归档是同一个属性上的两个值，不是一个动作的两种结果。\n用两个端点会让「取消归档」无处安放（它不属于 archive 语义）。\n\n## 为什么标题与状态放在同一个模型\n\n两者都是会话元数据，且前端「重命名」与「归档」是同一个右键菜单里的\n两个动作，共用一个 PATCH 端点可以减少一次路由（也避免\"改名时不小心\n把状态重置了\"这类分裂语义）。",
+      "properties": {
+        "title": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "新标题",
+          "title": "Title"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConversationStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "active（取消归档）/ archived（归档）"
+        }
+      },
+      "title": "UpdateConversationRequest",
+      "type": "object"
+    },
+    "OIDCAuthorizeResponse": {
+      "description": "OIDC 登录跳转信息。\n\n## 为什么不在服务端 302 直接跳\n\n前端 SPA 需要先把 `state` 与 `code_verifier` 存到 localStorage/sessionStorage\n（缓存住才能在校验回调时用）。服务端直接 302 的话，前端拿不到这两个值，\n回调时就无法完成 PKCE 校验。\n\n所以拆成两步：本接口返回 URL 与 state，前端自己跳。\n`code_verifier` **绝不出现在响应里**（它必须只留在浏览器）。",
+      "properties": {
+        "authorize_url": {
+          "description": "IdP 授权地址（含 state 与 PKCE challenge）",
+          "title": "Authorize Url",
+          "type": "string"
+        },
+        "state": {
+          "description": "CSRF 校验值，前端需原样带回回调接口",
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "authorize_url",
+        "state"
+      ],
+      "title": "OIDCAuthorizeResponse",
+      "type": "object"
+    },
+    "OIDCExchangeRequest": {
+      "additionalProperties": false,
+      "description": "授权码换取本系统 token。\n\n## 为什么 code_verifier 由前端传\n\nPKCE 的前提是\"只有发起授权的客户端持有 verifier\"。放在服务端状态里\n会被多副本/重启破坏，也会让服务端变成可被重放的中心。",
+      "properties": {
+        "code": {
+          "description": "IdP 回调带回的授权码",
+          "maxLength": 2048,
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "state": {
+          "description": "授权时下发的 state",
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "State",
+          "type": "string"
+        },
+        "code_verifier": {
+          "description": "前端保存的 PKCE code_verifier",
+          "maxLength": 128,
+          "minLength": 43,
+          "title": "Code Verifier",
+          "type": "string"
+        },
+        "redirect_uri": {
+          "description": "必须与授权时一致",
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Redirect Uri",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "state",
+        "code_verifier",
+        "redirect_uri"
+      ],
+      "title": "OIDCExchangeRequest",
+      "type": "object"
+    },
+    "LogoutRequest": {
+      "additionalProperties": false,
+      "description": "登出请求。\n\n`refresh_token` 可选：只传 access token 时按\"不报文\"处理（用户可能\n已经丢了本地存储）。带上时同时作废该 refresh token。",
+      "properties": {
+        "refresh_token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "要作废的 refresh token。只作废当前设备，不影响其它设备",
+          "title": "Refresh Token"
+        }
+      },
+      "title": "LogoutRequest",
+      "type": "object"
+    },
+    "LogoutResponse": {
+      "description": "登出响应。\n\n## 为什么不是 204\n\n登出是\"有结果的动作\"：前端要知道 refresh token 是否真的被作废\n（比如它已过期时，服务端只能返回 revoked=false）。用单对象表达，\n与\"无内容\"的三类形态不冲突。",
+      "properties": {
+        "revoked": {
+          "description": "是否成功作废了 refresh token（未提供时为 false）",
+          "title": "Revoked",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "revoked"
+      ],
+      "title": "LogoutResponse",
+      "type": "object"
+    },
+    "TenantMembershipItem": {
+      "description": "用户可访问的一个租户。\n\n## 为什么要有这个接口\n\n用户可能属于多个租户（外部顾问、跨部门协作）。但 access token 里\n只能带**一个** `tenant_id`，没有列表接口前端就不知道\"我还能切到哪\"，\n表现为\"登录后永远停在第一个租户\"。",
+      "properties": {
+        "tenant_id": {
+          "format": "uuid",
+          "title": "Tenant Id",
+          "type": "string"
+        },
+        "tenant_slug": {
+          "title": "Tenant Slug",
+          "type": "string"
+        },
+        "tenant_name": {
+          "title": "Tenant Name",
+          "type": "string"
+        },
+        "role": {
+          "description": "该租户内的角色：owner/admin/knowledge_admin/member/viewer",
+          "title": "Role",
+          "type": "string"
+        },
+        "is_active": {
+          "description": "该租户当前是否可用（暂停/删除的为 false）",
+          "title": "Is Active",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "tenant_id",
+        "tenant_slug",
+        "tenant_name",
+        "role",
+        "is_active"
+      ],
+      "title": "TenantMembershipItem",
+      "type": "object"
+    },
+    "TenantListResponse": {
+      "$defs": {
+        "TenantMembershipItem": {
+          "description": "用户可访问的一个租户。\n\n## 为什么要有这个接口\n\n用户可能属于多个租户（外部顾问、跨部门协作）。但 access token 里\n只能带**一个** `tenant_id`，没有列表接口前端就不知道\"我还能切到哪\"，\n表现为\"登录后永远停在第一个租户\"。",
+          "properties": {
+            "tenant_id": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            },
+            "tenant_slug": {
+              "title": "Tenant Slug",
+              "type": "string"
+            },
+            "tenant_name": {
+              "title": "Tenant Name",
+              "type": "string"
+            },
+            "role": {
+              "description": "该租户内的角色：owner/admin/knowledge_admin/member/viewer",
+              "title": "Role",
+              "type": "string"
+            },
+            "is_active": {
+              "description": "该租户当前是否可用（暂停/删除的为 false）",
+              "title": "Is Active",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "tenant_id",
+            "tenant_slug",
+            "tenant_name",
+            "role",
+            "is_active"
+          ],
+          "title": "TenantMembershipItem",
+          "type": "object"
+        }
+      },
+      "description": "`GET /me/tenants` 响应。",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/TenantMembershipItem"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "active_tenant_id": {
+          "description": "当前 token 生效的租户",
+          "format": "uuid",
+          "title": "Active Tenant Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "items",
+        "active_tenant_id"
+      ],
+      "title": "TenantListResponse",
+      "type": "object"
+    },
+    "SwitchTenantRequest": {
+      "additionalProperties": false,
+      "description": "切换租户。\n\n**tenant_id 只用于校验成员关系**：新 token 的 tenant 来自服务端\n校验通过的成员关系，绝不直接采信请求参数。",
+      "properties": {
+        "tenant_id": {
+          "description": "目标租户（必须是当前用户的 active 成员关系）",
+          "format": "uuid",
+          "title": "Tenant Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tenant_id"
+      ],
+      "title": "SwitchTenantRequest",
+      "type": "object"
+    },
+    "TaskItem": {
+      "$defs": {
+        "TaskStatus": {
+          "description": "任务执行状态。\n\n与 `DocumentStatus` 分开：任务表记录\"某次执行的进展\"，\n文档表记录\"业务上的最终状态\"。一次文档处理可能产生多次任务执行\n（每次重试一条），管理端需要看到历史。",
+          "enum": [
+            "pending",
+            "running",
+            "succeeded",
+            "failed",
+            "dead",
+            "cancelled"
+          ],
+          "title": "TaskStatus",
+          "type": "string"
+        },
+        "TaskType": {
+          "description": "异步任务类型。\n\n值必须与 worker 侧的任务注册表一致——不一致时报错是\n\"未知任务类型\"，但实际是名字拼写不同，很难定位。",
+          "enum": [
+            "parse_document",
+            "chunk_document",
+            "embed_document",
+            "index_document",
+            "rebuild_index",
+            "cleanup_upload_sessions",
+            "cleanup_orphan_blobs",
+            "dispatch_outbox"
+          ],
+          "title": "TaskType",
+          "type": "string"
+        }
+      },
+      "description": "一个任务的状态快照。\n\n## `progress=100` 的语义\n\n只由 worker 的 `complete()` 设置。handler 上报上限 99 —— 否则\n\"仍在跑（甚至马上失败）\"的任务会显示已完成，用户看到 100 却等不到结果。",
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "task_type": {
+          "$ref": "#/$defs/TaskType"
+        },
+        "status": {
+          "$ref": "#/$defs/TaskStatus"
+        },
+        "progress": {
+          "description": "0-100。100 表示任务已成功结束",
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Progress",
+          "type": "integer"
+        },
+        "retry_count": {
+          "description": "已重试次数",
+          "minimum": 0,
+          "title": "Retry Count",
+          "type": "integer"
+        },
+        "max_retries": {
+          "minimum": 0,
+          "title": "Max Retries",
+          "type": "integer"
+        },
+        "document_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "关联文档（如有）",
+          "title": "Document Id"
+        },
+        "knowledge_base_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "关联知识库（如有）",
+          "title": "Knowledge Base Id"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "失败错误码（仅 failed/dead 有值）",
+          "title": "Error Code"
+        },
+        "error_message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "失败原因（已脱敏，不含文档正文）",
+          "title": "Error Message"
+        },
+        "queued_at": {
+          "description": "入队时间（= created_at）",
+          "format": "date-time",
+          "title": "Queued At",
+          "type": "string"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Started At"
+        },
+        "finished_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Finished At"
+        }
+      },
+      "required": [
+        "id",
+        "task_type",
+        "status",
+        "progress",
+        "retry_count",
+        "max_retries",
+        "queued_at"
+      ],
+      "title": "TaskItem",
+      "type": "object"
+    },
+    "RetryTaskResponse": {
+      "$defs": {
+        "TaskStatus": {
+          "description": "任务执行状态。\n\n与 `DocumentStatus` 分开：任务表记录\"某次执行的进展\"，\n文档表记录\"业务上的最终状态\"。一次文档处理可能产生多次任务执行\n（每次重试一条），管理端需要看到历史。",
+          "enum": [
+            "pending",
+            "running",
+            "succeeded",
+            "failed",
+            "dead",
+            "cancelled"
+          ],
+          "title": "TaskStatus",
+          "type": "string"
+        }
+      },
+      "description": "死信任务重试的响应（202 语义）。\n\n## 为什么重试是\"新建任务\"而不是\"复活旧任务\"\n\n复用同一行会抹掉 `error_message` 与 `retry_count` 历史——而管理端\n恰恰要看\"这个任务失败过 3 次、每次为什么\"。所以重试插入一条新任务，\n旧任务保持 `dead` 状态供追溯。\n\n幂等键用 `retry:{task_id}:{uuid4}`：同一死信可以被重试多次，\n每次都是独立的执行记录（人工重试是显式动作，不需要去重）。",
+      "properties": {
+        "task_id": {
+          "description": "新任务 ID",
+          "format": "uuid",
+          "title": "Task Id",
+          "type": "string"
+        },
+        "original_task_id": {
+          "description": "被重试的原死信任务",
+          "format": "uuid",
+          "title": "Original Task Id",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/TaskStatus",
+          "description": "新任务状态，正常为 pending"
+        },
+        "poll_url": {
+          "description": "轮询地址，前端可直接 GET",
+          "title": "Poll Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "original_task_id",
+        "status",
+        "poll_url"
+      ],
+      "title": "RetryTaskResponse",
+      "type": "object"
+    },
+    "UsageBucket": {
+      "$defs": {
+        "ModelTaskType": {
+          "description": "模型调用的任务类型。\n\n成本按任务类型拆分是必需的：`docs/PROMPT.md` 要求\"按租户-功能-模型\n三维成本拆解\"。没有这个字段，就无法回答\"钱主要花在检索改写还是回答生成上\"。",
+          "enum": [
+            "chat",
+            "query_rewrite",
+            "multi_query",
+            "hyde",
+            "context_compress",
+            "embedding",
+            "rerank",
+            "evaluation"
+          ],
+          "title": "ModelTaskType",
+          "type": "string"
+        }
+      },
+      "description": "一组同维度调用的用量与花费。\n\n`provider` / `model` 在个人视图里可为 None（用户不关心内部模型名，\n只看\"这个功能花了我多少额度\"）——聚合维度由查询参数决定。",
+      "properties": {
+        "task_type": {
+          "$ref": "#/$defs/ModelTaskType"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "call_count": {
+          "description": "调用次数",
+          "minimum": 0,
+          "title": "Call Count",
+          "type": "integer"
+        },
+        "input_tokens": {
+          "minimum": 0,
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "output_tokens": {
+          "minimum": 0,
+          "title": "Output Tokens",
+          "type": "integer"
+        },
+        "cached_tokens": {
+          "description": "其中命中供应商 prompt cache 的 token 数（按更低单价计费）",
+          "minimum": 0,
+          "title": "Cached Tokens",
+          "type": "integer"
+        },
+        "cost_usd": {
+          "description": "该组花费（USD）",
+          "minimum": 0,
+          "title": "Cost Usd",
+          "type": "number"
+        }
+      },
+      "required": [
+        "task_type",
+        "call_count",
+        "input_tokens",
+        "output_tokens",
+        "cached_tokens",
+        "cost_usd"
+      ],
+      "title": "UsageBucket",
+      "type": "object"
+    },
+    "UsageSummary": {
+      "$defs": {
+        "ModelTaskType": {
+          "description": "模型调用的任务类型。\n\n成本按任务类型拆分是必需的：`docs/PROMPT.md` 要求\"按租户-功能-模型\n三维成本拆解\"。没有这个字段，就无法回答\"钱主要花在检索改写还是回答生成上\"。",
+          "enum": [
+            "chat",
+            "query_rewrite",
+            "multi_query",
+            "hyde",
+            "context_compress",
+            "embedding",
+            "rerank",
+            "evaluation"
+          ],
+          "title": "ModelTaskType",
+          "type": "string"
+        },
+        "UsageBucket": {
+          "description": "一组同维度调用的用量与花费。\n\n`provider` / `model` 在个人视图里可为 None（用户不关心内部模型名，\n只看\"这个功能花了我多少额度\"）——聚合维度由查询参数决定。",
+          "properties": {
+            "task_type": {
+              "$ref": "#/$defs/ModelTaskType"
+            },
+            "provider": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Provider"
+            },
+            "model": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Model"
+            },
+            "call_count": {
+              "description": "调用次数",
+              "minimum": 0,
+              "title": "Call Count",
+              "type": "integer"
+            },
+            "input_tokens": {
+              "minimum": 0,
+              "title": "Input Tokens",
+              "type": "integer"
+            },
+            "output_tokens": {
+              "minimum": 0,
+              "title": "Output Tokens",
+              "type": "integer"
+            },
+            "cached_tokens": {
+              "description": "其中命中供应商 prompt cache 的 token 数（按更低单价计费）",
+              "minimum": 0,
+              "title": "Cached Tokens",
+              "type": "integer"
+            },
+            "cost_usd": {
+              "description": "该组花费（USD）",
+              "minimum": 0,
+              "title": "Cost Usd",
+              "type": "number"
+            }
+          },
+          "required": [
+            "task_type",
+            "call_count",
+            "input_tokens",
+            "output_tokens",
+            "cached_tokens",
+            "cost_usd"
+          ],
+          "title": "UsageBucket",
+          "type": "object"
+        }
+      },
+      "description": "用量汇总。\n\n## `total_cost_usd` 与 buckets 的关系\n\n它是 buckets 的求和，但仍然单独返回：前端首屏只要一个数字，\n不必等 buckets 渲染完再求和（也不必信任前端求和——浮点累加顺序\n不同会差最后一位，用户会截图质疑\"加起来对不上\"）。",
+      "properties": {
+        "since": {
+          "description": "统计窗口起点（含）",
+          "format": "date-time",
+          "title": "Since",
+          "type": "string"
+        },
+        "until": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "统计窗口终点（不含），null 表示到现在",
+          "title": "Until"
+        },
+        "total_cost_usd": {
+          "minimum": 0,
+          "title": "Total Cost Usd",
+          "type": "number"
+        },
+        "total_calls": {
+          "minimum": 0,
+          "title": "Total Calls",
+          "type": "integer"
+        },
+        "total_input_tokens": {
+          "minimum": 0,
+          "title": "Total Input Tokens",
+          "type": "integer"
+        },
+        "total_output_tokens": {
+          "minimum": 0,
+          "title": "Total Output Tokens",
+          "type": "integer"
+        },
+        "cache_hit_rate": {
+          "description": "缓存命中率 = 命中缓存的调用数 / 总调用数",
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Cache Hit Rate",
+          "type": "number"
+        },
+        "buckets": {
+          "items": {
+            "$ref": "#/$defs/UsageBucket"
+          },
+          "title": "Buckets",
+          "type": "array"
+        }
+      },
+      "required": [
+        "since",
+        "total_cost_usd",
+        "total_calls",
+        "total_input_tokens",
+        "total_output_tokens",
+        "cache_hit_rate"
+      ],
+      "title": "UsageSummary",
+      "type": "object"
+    },
+    "DailyCostPoint": {
+      "description": "按天聚合的成本点（管理端趋势图）。",
+      "properties": {
+        "date": {
+          "description": "日期（YYYY-MM-DD，按服务端时区归集）",
+          "title": "Date",
+          "type": "string"
+        },
+        "call_count": {
+          "minimum": 0,
+          "title": "Call Count",
+          "type": "integer"
+        },
+        "cost_usd": {
+          "minimum": 0,
+          "title": "Cost Usd",
+          "type": "number"
+        },
+        "input_tokens": {
+          "minimum": 0,
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "output_tokens": {
+          "minimum": 0,
+          "title": "Output Tokens",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "date",
+        "call_count",
+        "cost_usd",
+        "input_tokens",
+        "output_tokens"
+      ],
+      "title": "DailyCostPoint",
+      "type": "object"
+    },
+    "DashboardCounters": {
+      "description": "看板的几个核心计数。\n\n刻意**不包含 QPS / P95 / 错误率**：那些来自 Prometheus（进程内指标\n在重启后归零，且多副本时单实例的数字没有意义）。\n这里只放\"只能从数据库回答\"的业务计数。",
+      "properties": {
+        "knowledge_base_count": {
+          "description": "active 知识库数",
+          "minimum": 0,
+          "title": "Knowledge Base Count",
+          "type": "integer"
+        },
+        "document_count": {
+          "description": "未删除文档总数",
+          "minimum": 0,
+          "title": "Document Count",
+          "type": "integer"
+        },
+        "documents_by_status": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "description": "按处理状态分组的文档数",
+          "title": "Documents By Status",
+          "type": "object"
+        },
+        "tasks_by_status": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "description": "按状态分组的任务数（看积压与死信）",
+          "title": "Tasks By Status",
+          "type": "object"
+        },
+        "dead_letter_count": {
+          "description": "死信任务数（需人工介入）",
+          "minimum": 0,
+          "title": "Dead Letter Count",
+          "type": "integer"
+        },
+        "denied_audit_count": {
+          "description": "统计窗口内被拒绝的操作数",
+          "minimum": 0,
+          "title": "Denied Audit Count",
+          "type": "integer"
+        },
+        "total_cost_usd": {
+          "description": "统计窗口内的模型花费（USD）",
+          "minimum": 0,
+          "title": "Total Cost Usd",
+          "type": "number"
+        }
+      },
+      "required": [
+        "knowledge_base_count",
+        "document_count",
+        "dead_letter_count",
+        "denied_audit_count",
+        "total_cost_usd"
+      ],
+      "title": "DashboardCounters",
+      "type": "object"
+    },
+    "DashboardResponse": {
+      "$defs": {
+        "DashboardCounters": {
+          "description": "看板的几个核心计数。\n\n刻意**不包含 QPS / P95 / 错误率**：那些来自 Prometheus（进程内指标\n在重启后归零，且多副本时单实例的数字没有意义）。\n这里只放\"只能从数据库回答\"的业务计数。",
+          "properties": {
+            "knowledge_base_count": {
+              "description": "active 知识库数",
+              "minimum": 0,
+              "title": "Knowledge Base Count",
+              "type": "integer"
+            },
+            "document_count": {
+              "description": "未删除文档总数",
+              "minimum": 0,
+              "title": "Document Count",
+              "type": "integer"
+            },
+            "documents_by_status": {
+              "additionalProperties": {
+                "type": "integer"
+              },
+              "description": "按处理状态分组的文档数",
+              "title": "Documents By Status",
+              "type": "object"
+            },
+            "tasks_by_status": {
+              "additionalProperties": {
+                "type": "integer"
+              },
+              "description": "按状态分组的任务数（看积压与死信）",
+              "title": "Tasks By Status",
+              "type": "object"
+            },
+            "dead_letter_count": {
+              "description": "死信任务数（需人工介入）",
+              "minimum": 0,
+              "title": "Dead Letter Count",
+              "type": "integer"
+            },
+            "denied_audit_count": {
+              "description": "统计窗口内被拒绝的操作数",
+              "minimum": 0,
+              "title": "Denied Audit Count",
+              "type": "integer"
+            },
+            "total_cost_usd": {
+              "description": "统计窗口内的模型花费（USD）",
+              "minimum": 0,
+              "title": "Total Cost Usd",
+              "type": "number"
+            }
+          },
+          "required": [
+            "knowledge_base_count",
+            "document_count",
+            "dead_letter_count",
+            "denied_audit_count",
+            "total_cost_usd"
+          ],
+          "title": "DashboardCounters",
+          "type": "object"
+        },
+        "ModelTaskType": {
+          "description": "模型调用的任务类型。\n\n成本按任务类型拆分是必需的：`docs/PROMPT.md` 要求\"按租户-功能-模型\n三维成本拆解\"。没有这个字段，就无法回答\"钱主要花在检索改写还是回答生成上\"。",
+          "enum": [
+            "chat",
+            "query_rewrite",
+            "multi_query",
+            "hyde",
+            "context_compress",
+            "embedding",
+            "rerank",
+            "evaluation"
+          ],
+          "title": "ModelTaskType",
+          "type": "string"
+        },
+        "UsageBucket": {
+          "description": "一组同维度调用的用量与花费。\n\n`provider` / `model` 在个人视图里可为 None（用户不关心内部模型名，\n只看\"这个功能花了我多少额度\"）——聚合维度由查询参数决定。",
+          "properties": {
+            "task_type": {
+              "$ref": "#/$defs/ModelTaskType"
+            },
+            "provider": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Provider"
+            },
+            "model": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Model"
+            },
+            "call_count": {
+              "description": "调用次数",
+              "minimum": 0,
+              "title": "Call Count",
+              "type": "integer"
+            },
+            "input_tokens": {
+              "minimum": 0,
+              "title": "Input Tokens",
+              "type": "integer"
+            },
+            "output_tokens": {
+              "minimum": 0,
+              "title": "Output Tokens",
+              "type": "integer"
+            },
+            "cached_tokens": {
+              "description": "其中命中供应商 prompt cache 的 token 数（按更低单价计费）",
+              "minimum": 0,
+              "title": "Cached Tokens",
+              "type": "integer"
+            },
+            "cost_usd": {
+              "description": "该组花费（USD）",
+              "minimum": 0,
+              "title": "Cost Usd",
+              "type": "number"
+            }
+          },
+          "required": [
+            "task_type",
+            "call_count",
+            "input_tokens",
+            "output_tokens",
+            "cached_tokens",
+            "cost_usd"
+          ],
+          "title": "UsageBucket",
+          "type": "object"
+        }
+      },
+      "description": "管理看板响应。",
+      "properties": {
+        "since": {
+          "description": "统计窗口起点",
+          "format": "date-time",
+          "title": "Since",
+          "type": "string"
+        },
+        "counters": {
+          "$ref": "#/$defs/DashboardCounters"
+        },
+        "cost_by_task_type": {
+          "description": "按功能拆解的成本（钱花在改写还是生成）",
+          "items": {
+            "$ref": "#/$defs/UsageBucket"
+          },
+          "title": "Cost By Task Type",
+          "type": "array"
+        },
+        "generated_at": {
+          "description": "本次统计的生成时间",
+          "format": "date-time",
+          "title": "Generated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "since",
+        "counters",
+        "generated_at"
+      ],
+      "title": "DashboardResponse",
+      "type": "object"
+    },
+    "AdminTaskItem": {
+      "$defs": {
+        "TaskStatus": {
+          "description": "任务执行状态。\n\n与 `DocumentStatus` 分开：任务表记录\"某次执行的进展\"，\n文档表记录\"业务上的最终状态\"。一次文档处理可能产生多次任务执行\n（每次重试一条），管理端需要看到历史。",
+          "enum": [
+            "pending",
+            "running",
+            "succeeded",
+            "failed",
+            "dead",
+            "cancelled"
+          ],
+          "title": "TaskStatus",
+          "type": "string"
+        },
+        "TaskType": {
+          "description": "异步任务类型。\n\n值必须与 worker 侧的任务注册表一致——不一致时报错是\n\"未知任务类型\"，但实际是名字拼写不同，很难定位。",
+          "enum": [
+            "parse_document",
+            "chunk_document",
+            "embed_document",
+            "index_document",
+            "rebuild_index",
+            "cleanup_upload_sessions",
+            "cleanup_orphan_blobs",
+            "dispatch_outbox"
+          ],
+          "title": "TaskType",
+          "type": "string"
+        }
+      },
+      "description": "任务台账项（管理端）。\n\n与用户面的 `TaskItem` 的差别：\n- 带 `tenant_id` 与 `locked_by`（跨租户排障必需）；\n- 带 `dead_at` 语义（status=dead 时可重试）。",
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "tenant_id": {
+          "format": "uuid",
+          "title": "Tenant Id",
+          "type": "string"
+        },
+        "task_type": {
+          "$ref": "#/$defs/TaskType"
+        },
+        "status": {
+          "$ref": "#/$defs/TaskStatus"
+        },
+        "progress": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Progress",
+          "type": "integer"
+        },
+        "retry_count": {
+          "minimum": 0,
+          "title": "Retry Count",
+          "type": "integer"
+        },
+        "max_retries": {
+          "minimum": 0,
+          "title": "Max Retries",
+          "type": "integer"
+        },
+        "idempotency_key": {
+          "description": "幂等键（排障时用来判断是否重复入队）",
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "document_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Document Id"
+        },
+        "knowledge_base_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Knowledge Base Id"
+        },
+        "locked_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "认领该任务的 worker 标识",
+          "title": "Locked By"
+        },
+        "locked_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Locked At"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Code"
+        },
+        "error_message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Message"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Started At"
+        },
+        "finished_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Finished At"
+        }
+      },
+      "required": [
+        "id",
+        "tenant_id",
+        "task_type",
+        "status",
+        "progress",
+        "retry_count",
+        "max_retries",
+        "idempotency_key",
+        "created_at"
+      ],
+      "title": "AdminTaskItem",
+      "type": "object"
+    },
+    "AdminDocumentItem": {
+      "$defs": {
+        "ConfidentialityLevel": {
+          "description": "密级。数值越大越敏感。\n\n密级与 ACL 是**正交**的两道门：\n- ACL 回答\"你能不能看这个库/文档\"；\n- 密级回答\"你这个人的密级够不够\"。\n缺任何一道都会出事：只有 ACL 时，\"有权限的人\"可能是实习生；\n只有密级时，\"够级的人\"可能不在这个部门。",
+          "enum": [
+            "public",
+            "internal",
+            "confidential",
+            "secret"
+          ],
+          "title": "ConfidentialityLevel",
+          "type": "string"
+        },
+        "DocumentFormat": {
+          "description": "文档格式。决定用哪个 parser 实现。\n\n新增格式时必须同步：\n1. `rag_adapters.parsers` 下的解析器实现；\n2. 前端上传组件的 `accept` 白名单；\n3. 本文档的注释（说明该格式的已知坑）。",
+          "enum": [
+            "pdf",
+            "docx",
+            "pptx",
+            "xlsx",
+            "csv",
+            "markdown",
+            "html",
+            "text",
+            "image"
+          ],
+          "title": "DocumentFormat",
+          "type": "string"
+        },
+        "DocumentStatus": {
+          "description": "文档处理状态机。\n\n完整流转：\n\n    PENDING ──▶ PARSING ──▶ CHUNKING ──▶ EMBEDDING ──▶ INDEXING ──▶ READY\n       │           │           │            │            │\n       └───────────┴───────────┴────────────┴────────────┴──▶ FAILED\n                                                              │\n                                                          (重试) ──▶ PENDING\n\n约束（A3-4 的任务表会用同样的状态集）：\n- 只有 READY 的文档能参与检索；\n- FAILED 的文档保留原始 blob，允许重试而不必重新上传；\n- 状态流转必须走乐观锁（`version`），否则并发重试会互相覆盖。",
+          "enum": [
+            "pending",
+            "parsing",
+            "chunking",
+            "embedding",
+            "indexing",
+            "ready",
+            "failed"
+          ],
+          "title": "DocumentStatus",
+          "type": "string"
+        }
+      },
+      "description": "文档台账项。\n\n**不含正文**（见模块 docstring）。`error_message` 已由 worker\n脱敏（`_safe_message`），可以展示给管理员排障。",
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "knowledge_base_id": {
+          "format": "uuid",
+          "title": "Knowledge Base Id",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "original_filename": {
+          "title": "Original Filename",
+          "type": "string"
+        },
+        "format": {
+          "$ref": "#/$defs/DocumentFormat"
+        },
+        "status": {
+          "$ref": "#/$defs/DocumentStatus"
+        },
+        "confidentiality": {
+          "$ref": "#/$defs/ConfidentialityLevel"
+        },
+        "chunk_count": {
+          "minimum": 0,
+          "title": "Chunk Count",
+          "type": "integer"
+        },
+        "page_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page Count"
+        },
+        "size_bytes": {
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "retry_count": {
+          "minimum": 0,
+          "title": "Retry Count",
+          "type": "integer"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Code"
+        },
+        "error_message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Message"
+        },
+        "created_by": {
+          "format": "uuid",
+          "title": "Created By",
+          "type": "string"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "knowledge_base_id",
+        "title",
+        "original_filename",
+        "format",
+        "status",
+        "confidentiality",
+        "chunk_count",
+        "size_bytes",
+        "retry_count",
+        "created_by",
+        "created_at",
+        "updated_at"
+      ],
+      "title": "AdminDocumentItem",
+      "type": "object"
+    },
+    "AdminDocumentVersionItem": {
+      "$defs": {
+        "DocumentVersionStatus": {
+          "description": "文档版本状态。\n\n与 `DocumentStatus` 分开：文档整体状态取\"当前版本\"的状态，\n但历史版本有独立生命周期（可能已归档、已被新版本取代）。",
+          "enum": [
+            "processing",
+            "ready",
+            "failed",
+            "superseded"
+          ],
+          "title": "DocumentVersionStatus",
+          "type": "string"
+        }
+      },
+      "description": "文档版本项（管理端，含快照配置）。\n\n比用户面的 `DocumentVersionItem` 多三样管理端排障必需的字段：\n切分策略快照、chunk 数、解析器实现名。",
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "version_no": {
+          "minimum": 1,
+          "title": "Version No",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/DocumentVersionStatus"
+        },
+        "is_current": {
+          "title": "Is Current",
+          "type": "boolean"
+        },
+        "chunk_count": {
+          "minimum": 0,
+          "title": "Chunk Count",
+          "type": "integer"
+        },
+        "parser_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parser Name"
+        },
+        "chunking_strategy": {
+          "title": "Chunking Strategy",
+          "type": "string"
+        },
+        "chunk_size": {
+          "minimum": 1,
+          "title": "Chunk Size",
+          "type": "integer"
+        },
+        "chunk_overlap": {
+          "minimum": 0,
+          "title": "Chunk Overlap",
+          "type": "integer"
+        },
+        "embedding_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Embedding Model"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "version_no",
+        "status",
+        "is_current",
+        "chunk_count",
+        "chunking_strategy",
+        "chunk_size",
+        "chunk_overlap",
+        "created_at"
+      ],
+      "title": "AdminDocumentVersionItem",
+      "type": "object"
+    },
+    "AdminChunkItem": {
+      "description": "chunk 预览项（切分质量检查）。\n\n**这是管理面唯一返回正文的接口**，且必须单独审计。\n`content` 会做长度截断（服务端配置上限），避免一次预览拉回整份文档。",
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "chunk_index": {
+          "minimum": 0,
+          "title": "Chunk Index",
+          "type": "integer"
+        },
+        "chunk_type": {
+          "title": "Chunk Type",
+          "type": "string"
+        },
+        "chunk_level": {
+          "minimum": 0,
+          "title": "Chunk Level",
+          "type": "integer"
+        },
+        "content": {
+          "description": "chunk 正文（可能被截断，见 is_truncated）",
+          "title": "Content",
+          "type": "string"
+        },
+        "is_truncated": {
+          "description": "正文是否被截断（预览上限）",
+          "title": "Is Truncated",
+          "type": "boolean"
+        },
+        "char_count": {
+          "description": "原始字符数（截断前）",
+          "minimum": 0,
+          "title": "Char Count",
+          "type": "integer"
+        },
+        "token_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Token Count"
+        },
+        "page_no": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page No"
+        },
+        "section_path": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Section Path",
+          "type": "array"
+        },
+        "has_bbox": {
+          "description": "是否带版面坐标（前端能否框选）",
+          "title": "Has Bbox",
+          "type": "boolean"
+        },
+        "embedding_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Embedding Model"
+        }
+      },
+      "required": [
+        "id",
+        "chunk_index",
+        "chunk_type",
+        "chunk_level",
+        "content",
+        "is_truncated",
+        "char_count",
+        "has_bbox"
+      ],
+      "title": "AdminChunkItem",
+      "type": "object"
+    },
+    "IndexVersionItem": {
+      "$defs": {
+        "IndexVersionStatus": {
+          "description": "索引版本状态（A10 零停机重建用）。\n\n双版本 + alias 切换的完整生命周期：\n\n    BUILDING → READY → ACTIVE → RETIRED\n                 │                 ▲\n                 └──(切换前可回滚)──┘\n\n重建期间双写两个版本，切换瞬间只改 alias 指向。",
+          "enum": [
+            "building",
+            "ready",
+            "active",
+            "retired",
+            "failed"
+          ],
+          "title": "IndexVersionStatus",
+          "type": "string"
+        }
+      },
+      "description": "索引版本（零停机重建的状态机）。",
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "knowledge_base_id": {
+          "format": "uuid",
+          "title": "Knowledge Base Id",
+          "type": "string"
+        },
+        "version_tag": {
+          "title": "Version Tag",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/IndexVersionStatus"
+        },
+        "embedding_model": {
+          "title": "Embedding Model",
+          "type": "string"
+        },
+        "embedding_dim": {
+          "minimum": 1,
+          "title": "Embedding Dim",
+          "type": "integer"
+        },
+        "index_type": {
+          "title": "Index Type",
+          "type": "string"
+        },
+        "distance_metric": {
+          "title": "Distance Metric",
+          "type": "string"
+        },
+        "chunk_count": {
+          "description": "已写入该版本的向量数",
+          "minimum": 0,
+          "title": "Chunk Count",
+          "type": "integer"
+        },
+        "expected_chunk_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "预期数量；chunk_count 达标才允许切换",
+          "title": "Expected Chunk Count"
+        },
+        "error_message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Message"
+        },
+        "activated_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Activated At"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "knowledge_base_id",
+        "version_tag",
+        "status",
+        "embedding_model",
+        "embedding_dim",
+        "index_type",
+        "distance_metric",
+        "chunk_count",
+        "created_at"
+      ],
+      "title": "IndexVersionItem",
+      "type": "object"
+    },
+    "AuditChainVerification": {
+      "description": "审计链完整性验证结果。\n\n## 为什么这个接口值得单独存在\n\n审计表的哈希链只有在**被验证过**时才有意义。只写不验的链\n等于\"我们相信没人改过数据库\"——而威胁模型里恰恰包含内部人员。\n定期（或监管前）跑一次验证，是这条链存在的理由。\n\n统计口径：`checked` 条数受 `limit` 限制，`is_complete=False`\n时要明确告诉调用方\"只验了前 N 条\"，不能让 `verified=true` 被误读为\n\"全表已验证\"。",
+      "properties": {
+        "verified": {
+          "description": "已检查的区间内链是否完整",
+          "title": "Verified",
+          "type": "boolean"
+        },
+        "checked_records": {
+          "description": "本次实际验证的记录数",
+          "minimum": 0,
+          "title": "Checked Records",
+          "type": "integer"
+        },
+        "is_complete": {
+          "description": "是否覆盖了该租户的全部审计记录（false 表示只验了前 limit 条）",
+          "title": "Is Complete",
+          "type": "boolean"
+        },
+        "first_broken_seq": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "第一个断点的链内序号（verified=false 时有值）",
+          "title": "First Broken Seq"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "断链原因的可读说明（不含记录内容）",
+          "title": "Reason"
+        }
+      },
+      "required": [
+        "verified",
+        "checked_records",
+        "is_complete"
+      ],
+      "title": "AuditChainVerification",
       "type": "object"
     }
   }

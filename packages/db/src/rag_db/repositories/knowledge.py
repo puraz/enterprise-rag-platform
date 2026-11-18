@@ -277,12 +277,39 @@ class KnowledgeBaseRepository:
             .values(document_count=KnowledgeBase.document_count + delta)
         )
 
+    async def count_active(self, *, tenant_id: uuid.UUID) -> int:
+        """active 知识库数量（管理看板）。
+
+        直接数表，不读缓存字段：看板要的是事实，且这个方法本身就是
+        用来交叉验证 `document_count` 那类缓存是否漂移的。
+        """
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(KnowledgeBase)
+            .where(
+                KnowledgeBase.tenant_id == tenant_id,
+                KnowledgeBase.status == KnowledgeBaseStatus.ACTIVE.value,
+            )
+        )
+        return int(result.scalar_one())
+
 
 class BlobRepository:
     """物理文件数据访问。秒传逻辑在这里。"""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def get(self, *, tenant_id: uuid.UUID, blob_id: uuid.UUID) -> Blob | None:
+        """按 ID 取 blob（下载时定位对象存储键用）。
+
+        **必须带 tenant_id**：只按 blob_id 查会让"知道 blob ID"就能拿到
+        别的租户的文件存储键，进而下载它（存储层不认租户）。
+        """
+        result = await self._session.execute(
+            select(Blob).where(Blob.id == blob_id, Blob.tenant_id == tenant_id).limit(1)
+        )
+        return result.scalar_one_or_none()
 
     async def get_or_create(
         self,
@@ -723,6 +750,91 @@ class DocumentRepository:
             .limit(1)
         )
         return result.scalar_one_or_none()
+
+    async def get_version(
+        self, *, doc_id: uuid.UUID, version_id: uuid.UUID
+    ) -> DocumentVersion | None:
+        """按 ID 取某文档的指定版本。
+
+        **必须同时校验 doc_id**：只按 version_id 查会让"知道版本 ID"
+        就能拿到别的文档的版本（进而回滚别人的文档）。
+        """
+        result = await self._session.execute(
+            select(DocumentVersion)
+            .where(
+                DocumentVersion.id == version_id,
+                DocumentVersion.document_id == doc_id,
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def count_active_documents(self, *, tenant_id: uuid.UUID) -> int:
+        """未删除文档总数（管理看板）。"""
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(Document)
+            .where(Document.tenant_id == tenant_id, Document.deleted_at.is_(None))
+        )
+        return int(result.scalar_one())
+
+    async def count_ready_versions(self, *, document_id: uuid.UUID) -> int:
+        """该文档有几个 ready 版本（回滚可用性判断）。"""
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(DocumentVersion)
+            .where(
+                DocumentVersion.document_id == document_id,
+                DocumentVersion.status == DocumentVersionStatus.READY.value,
+            )
+        )
+        return int(result.scalar_one())
+
+    async def list_for_admin(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        limit: int = 50,
+        offset: int = 0,
+        kb_id: uuid.UUID | None = None,
+        status: str | None = None,
+        include_total: bool = False,
+    ) -> tuple[list[Document], int | None]:
+        """管理端文档台账。
+
+        ## 与 `list_by_kb_filtered` 的关系
+
+        两者都查文档，但**权限语义不同**：
+        - `list_by_kb_filtered` 接收 `access_filter`（用户面，ACL 必须生效）；
+        - 本方法**不接收** access_filter —— 管理端看的是"系统里有什么"，
+          不是"我能读什么"。管理员可能没有某文档的读权限，但仍要能看到
+          它的处理状态（否则无法排障）。
+
+        这就是为什么它是独立方法而不是让调用方给 `list_by_kb_filtered`
+        传 `access_filter=None`：那种写法下，下一个改代码的人很容易在
+        用户面误传 None，直接打开越权泄漏。方法名不同 = 误用会被 review 抓住。
+        """
+        conditions = [Document.tenant_id == tenant_id, Document.deleted_at.is_(None)]
+        if kb_id is not None:
+            conditions.append(Document.knowledge_base_id == kb_id)
+        if status is not None:
+            conditions.append(Document.status == status)
+
+        stmt = (
+            select(Document)
+            .where(*conditions)
+            .order_by(Document.updated_at.desc(), Document.id.desc())
+            .limit(limit)
+        )
+        if offset > 0:
+            stmt = stmt.offset(offset)
+        rows = list((await self._session.execute(stmt)).scalars())
+
+        total: int | None = None
+        if include_total:
+            count_stmt = select(func.count()).select_from(Document).where(*conditions)
+            total = int((await self._session.execute(count_stmt)).scalar_one())
+        return rows, total
 
     async def reset_for_retry(self, *, tenant_id: uuid.UUID, doc_id: uuid.UUID) -> Document | None:
         """把失败文档重置为 PENDING，返回更新后的行。

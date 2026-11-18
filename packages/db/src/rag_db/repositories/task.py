@@ -492,6 +492,98 @@ class TaskRepository:
         )
         return {str(row[0]): int(row[1]) for row in result}
 
+    async def get_for_tenant(self, *, tenant_id: uuid.UUID, task_id: uuid.UUID) -> Task | None:
+        """按 ID 取任务（用户面轮询进度用）。
+
+        **必须带 tenant_id**：任务 ID 是 UUID（不可枚举），但只靠它查询
+        就等于"知道 ID 就能看"，而任务行里有 document_id / 错误详情。
+        租户条件让跨租户探测返回 None（上层转 404）。
+
+        与 `claim()` 的区别：那个是跨租户认领（必须看到全部租户），
+        本方法是租户内读取，语义完全不同，不能合并。
+        """
+        result = await self._session.execute(
+            select(Task).where(Task.id == task_id, Task.tenant_id == tenant_id).limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def list_filtered(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        limit: int = 50,
+        offset: int = 0,
+        status: str | None = None,
+        task_type: str | None = None,
+        document_id: uuid.UUID | None = None,
+        include_total: bool = False,
+    ) -> tuple[list[Task], int | None]:
+        """管理端任务台账：按状态/类型/文档过滤。
+
+        ## 为什么状态过滤在 SQL 里而不是查出来再筛
+
+        任务表在活跃系统上是增长最快的表之一（每个文档 4+ 个任务，
+        每次重试一条新行）。查出来再筛会让 limit 20 变成"扫 20 条但
+        留下 2 条"，前端看到的分页全是空洞。
+
+        排序用 `created_at DESC`：排障时最近的任务最有价值。
+        """
+        conditions = [Task.tenant_id == tenant_id]
+        if status is not None:
+            conditions.append(Task.status == status)
+        if task_type is not None:
+            conditions.append(Task.task_type == task_type)
+        if document_id is not None:
+            conditions.append(Task.document_id == document_id)
+
+        stmt = (
+            select(Task)
+            .where(*conditions)
+            .order_by(Task.created_at.desc(), Task.id.desc())
+            .limit(limit)
+        )
+        if offset > 0:
+            stmt = stmt.offset(offset)
+
+        rows = list((await self._session.execute(stmt)).scalars())
+
+        total: int | None = None
+        if include_total:
+            count_stmt = select(func.count()).select_from(Task).where(*conditions)
+            total = int((await self._session.execute(count_stmt)).scalar_one())
+
+        return rows, total
+
+    async def list_dead_paginated(
+        self, *, tenant_id: uuid.UUID, limit: int = 50, offset: int = 0
+    ) -> tuple[list[Task], int | None]:
+        """死信列表（带分页）。
+
+        `list_dead` 是内部脚本用的（固定 limit、无分页）；
+        管理端需要翻页与总数，所以单独一个方法——把两者合并会让
+        "脚本只想取最近 50 条"也触发 COUNT(*)。
+        """
+        return await self.list_filtered(
+            tenant_id=tenant_id,
+            limit=limit,
+            offset=offset,
+            status=TaskStatus.DEAD.value,
+            include_total=True,
+        )
+
+    async def count_dead(self, *, tenant_id: uuid.UUID) -> int:
+        """死信数量（看板红点）。
+
+        独立方法而不是复用 `count_by_status()[dead]`：看板首屏只要这一个
+        数字时不值得 GROUP BY 全表。
+        """
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(Task)
+            .where(Task.tenant_id == tenant_id, Task.status == TaskStatus.DEAD.value)
+        )
+        return int(result.scalar_one())
+
 
 class OutboxRepository:
     """发件箱数据访问。"""

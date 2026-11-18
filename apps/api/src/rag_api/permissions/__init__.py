@@ -28,6 +28,14 @@ from rag_api.permissions.acl import (
     knowledge_base_visibility_filter,
     verify_citations_visible,
 )
+from rag_api.permissions.admin import (
+    AdminCapability,
+    AdminContext,
+    get_admin_context,
+    get_admin_db,
+    require_admin_capability,
+    to_permission_context,
+)
 from rag_api.permissions.deps import (
     ensure_own_resource,
     get_permission_context,
@@ -39,16 +47,22 @@ from rag_api.permissions.deps import (
 __all__ = [
     "LEVEL_RANK",
     "ROLE_MAX_LEVEL",
+    "AdminCapability",
+    "AdminContext",
     "PermissionContext",
     "assert_document_readable",
     "assert_same_tenant",
     "confidentiality_filter_for_chunks",
     "document_access_filter",
     "ensure_own_resource",
+    "get_admin_context",
+    "get_admin_db",
     "get_permission_context",
     "knowledge_base_visibility_filter",
+    "require_admin_capability",
     "require_kb_write",
     "require_member_manage",
     "require_tenant_role",
+    "to_permission_context",
     "verify_citations_visible",
 ]

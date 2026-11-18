@@ -115,18 +115,25 @@ class ConversationRepository:
         limit: int = 20,
         offset: int = 0,
         include_total: bool = False,
+        status: str | None = None,
     ) -> tuple[Sequence[Conversation], int | None]:
         """会话列表（按最后消息时间倒序）。
 
         走 `ix_conversations_tenant_user_last` 部分索引（`deleted_at IS NULL`）。
         `last_message_at` 为 NULL 的新会话（还没提问）排在最后——
         用 `NULLS LAST`，否则 PG 默认把 NULL 排在最前（DESC 时）。
+
+        `status` 过滤：归档的会话默认不出现（调用方传 active），
+        但要能通过 `status=archived` 查回来——否则"归档"就等于"永久看不见"。
         """
-        base = select(Conversation).where(
+        conditions = [
             Conversation.tenant_id == tenant_id,
             Conversation.user_id == user_id,
             Conversation.deleted_at.is_(None),
-        )
+        ]
+        if status is not None:
+            conditions.append(Conversation.status == status)
+        base = select(Conversation).where(*conditions)
 
         stmt = (
             base.order_by(
@@ -194,11 +201,29 @@ class ConversationRepository:
         )
 
     async def archive(self, *, conversation_id: uuid.UUID) -> None:
-        """归档（只读）。"""
+        """归档（只读）。
+
+        归档的会话默认不出现在列表里，但仍可通过 `status=archived` 查回——
+        它是"收起"而不是"删除"。
+        """
         await self._session.execute(
             update(Conversation)
             .where(Conversation.id == conversation_id)
-            .values(status=ConversationStatus.ARCHIVED, updated_at=func.now())
+            .values(status=ConversationStatus.ARCHIVED.value, updated_at=func.now())
+        )
+
+    async def unarchive(self, *, conversation_id: uuid.UUID) -> None:
+        """取消归档（恢复为 active）。
+
+        与 `archive` 成对：只用一个端点做"归档"，就没有地方安放"恢复"，
+        而用户误点归档后必须能撤回。写成两个方法而不是传一个布尔参数，
+        是因为调用点用 `if archived: archive() else: unarchive()` 时，
+        意图比 `set_status(not archived)` 清楚得多。
+        """
+        await self._session.execute(
+            update(Conversation)
+            .where(Conversation.id == conversation_id)
+            .values(status=ConversationStatus.ACTIVE.value, updated_at=func.now())
         )
 
     async def soft_delete(self, *, conversation_id: uuid.UUID) -> bool:
