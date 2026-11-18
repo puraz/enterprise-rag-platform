@@ -23,9 +23,11 @@
 #   docker compose --profile observability up -d
 #   → Prometheus :9090、Grafana :3000（自动导入 dashboard.json）
 #
-# ## GPU（可选）
+# ## GPU（已不再需要）
 #
-#   docker compose -f compose.yaml -f deploy/docker/compose.gpu.yml up -d --build
+# 本地 embedding 已换成远程 OpenAI 兼容 API，镜像不再包含 torch/CUDA，
+# 因此不再需要把 NVIDIA 设备透传进容器。若将来要接本地模型，
+# 应作为独立的 provider 实现 + 单独的镜像，而不是让默认镜像背 2GB CUDA。
 #
 # ## 环境变量
 #
@@ -45,6 +47,20 @@ x-python-image: &python-image
 x-python-build: &python-build
   context: .
   dockerfile: deploy/docker/python.Dockerfile
+  # 构建期用宿主网络。
+  #
+  # 实测：同一个镜像源，容器桥接网络只命中 25~130KB/s 的 CDN 节点，
+  # 而宿主网络能到 30MB/s（同一台机、同一分钟）。骨架里下载 100MB 依赖，
+  # 差异是"十几分钟"与"十几小时"。构建阶段不需要隔离网络，
+  # 运行期仍然是默认桥接网络。
+  network: host
+  args:
+    # PyPI 镜像（可选）：国内直连 pypi.org 可能只有几百 B/s。
+    # 在 .env 里写 PYPI_MIRROR / PIP_INDEX_URL 即可生效。
+    PYPI_MIRROR: "${PYPI_MIRROR:-}"
+    PIP_INDEX_URL: "${PIP_INDEX_URL:-}"
+    # 可选：把镜像站 CDN 固定到某个快节点（国内 CDN 节点间速度差异极大）
+    PYPI_MIRROR_IP: "${PYPI_MIRROR_IP:-}"
 
 # API 与 Worker 共用的业务配置。
 x-app-env: &app-env
@@ -91,28 +107,101 @@ x-app-env: &app-env
   RAG_LLM__CHAT_MODEL: "${RAG_LLM__CHAT_MODEL:-deepseek-v4-pro}"
   RAG_LLM__CHEAP_MODEL: "${RAG_LLM__CHEAP_MODEL:-deepseek-flash}"
 
-  # ---- Embedding：默认 CPU；GPU 用 compose.gpu.yml 覆盖 ----
-  RAG_EMBEDDING__PROVIDER: "local_bge"
-  RAG_EMBEDDING__MODEL_NAME: "BAAI/bge-m3"
+  # ---- Embedding：智谱 OpenAI 兼容 /embeddings（远程）----
+  #
+  # 不再需要 torch / sentence-transformers / HF 模型缓存：
+  # 本地 bge-m3 会拉 PyPI 的 CUDA 版 torch（含 nvidia-* ~2GB），
+  # 而推理跑在 CPU 上——构建慢且镜像巨大。
+  # 换供应商只改这几行（任何提供 /embeddings 的服务都可以）。
+  RAG_EMBEDDING__PROVIDER: "${RAG_EMBEDDING__PROVIDER:-zhipu}"
+  RAG_EMBEDDING__MODEL_NAME: "${RAG_EMBEDDING__MODEL_NAME:-embedding-3}"
   RAG_EMBEDDING__DIMENSION: "1024"
-  RAG_EMBEDDING__DEVICE: "cpu"
-  RAG_EMBEDDING__CACHE_DIR: "/home/rag/.cache/huggingface"
-  RAG_EMBEDDING__HF_ENDPOINT: "https://hf-mirror.com"
-  HF_ENDPOINT: "https://hf-mirror.com"
+  RAG_EMBEDDING__BASE_URL: "${RAG_EMBEDDING__BASE_URL:-https://open.bigmodel.cn/api/paas/v4}"
+  # key 只从宿主 .env / shell 读，不写默认值（不能把密钥提交进仓库）
+  RAG_EMBEDDING__API_KEY: "${RAG_EMBEDDING__API_KEY:-}"
+  RAG_EMBEDDING__BATCH_SIZE: "32"
+  RAG_EMBEDDING__MAX_CONCURRENCY: "4"
 
   # ---- 检索链路 ----
   RAG_RETRIEVAL__USE_KEYWORD: "true"
   RAG_RETRIEVAL__USE_REWRITE: "true"
-  # 打开重排需要同时把 RAG_RERANKER__PROVIDER 改成 local_bge，
-  # 并确保容器能下载/访问模型（见 README 的 GPU/OOM 说明）。
-  RAG_RETRIEVAL__USE_RERANK: "false"
+  # 重排：SiliconFlow 的 Cohere 风格 /rerank（换家只改 base_url + model）
+  RAG_RETRIEVAL__USE_RERANK: "${RAG_RETRIEVAL__USE_RERANK:-true}"
   RAG_RETRIEVAL__USE_SELF_CHECK: "false"
-  RAG_RERANKER__PROVIDER: "none"
+  RAG_RERANKER__PROVIDER: "${RAG_RERANKER__PROVIDER:-siliconflow}"
+  RAG_RERANKER__MODEL_NAME: "${RAG_RERANKER__MODEL_NAME:-Qwen/Qwen3-Reranker-4B}"
+  RAG_RERANKER__BASE_URL: "${RAG_RERANKER__BASE_URL:-https://api.siliconflow.cn/v1}"
+  # key 只从宿主 .env / shell 读（不要提交进仓库）
+  RAG_RERANKER__API_KEY: "${RAG_RERANKER__API_KEY:-}"
+  RAG_RERANKER__BATCH_SIZE: "8"
+  RAG_RERANKER__MAX_CONCURRENCY: "2"
 
   # Worker 指标端口（Prometheus 抓取 worker:9101/metrics）。
   # API 与迁移不使用这个变量，但共用同一份环境，设了也无害。
   RAG_WORKER__METRICS_PORT: "9101"
   RAG_WORKER__METRICS_HOST: "0.0.0.0"
+
+  # ---- 链路追踪（Langfuse，可选）----
+  # 默认关闭：没起 `--profile langfuse` 时开启只会持续发送失败、
+  # 在日志里刷 warning。`make lf-up` 会把它置 true 并重建 api/worker。
+  #
+  # host 用容器服务名（不是 localhost）：容器里的 localhost 是它自己。
+  # 端口 3030 是映射到宿主的端口，容器内 Langfuse 仍监听 3000。
+  RAG_TRACING__ENABLED: "${RAG_TRACING__ENABLED:-false}"
+  RAG_TRACING__HOST: "http://langfuse-web:3000"
+  RAG_TRACING__PUBLIC_KEY: "${LANGFUSE_PUBLIC_KEY:-pk-lf-local-dev}"
+  RAG_TRACING__SECRET_KEY: "${LANGFUSE_SECRET_KEY:-sk-lf-local-dev}"
+  RAG_TRACING__ENVIRONMENT: "local"
+  RAG_TRACING__SAMPLE_RATE: "1.0"
+
+# Langfuse v3 自托管所需的全部环境。web 与 worker 共用。
+#
+# v3 的架构是：Postgres（元数据）+ ClickHouse（事件）+ Redis（队列）
+# + S3（事件块）。少了任何一项都起不来，且报错往往在 worker 里。
+x-langfuse-env: &langfuse-env
+  DATABASE_URL: "postgresql://rag_admin:${POSTGRES_PASSWORD:-rag_local_dev_only}@postgres:5432/langfuse"
+  # 以下三个是会话/加密用途的静态密钥，开发默认值不得用于生产。
+  SALT: "${LANGFUSE_SALT:-rag-local-salt-change-me}"
+  ENCRYPTION_KEY: "${LANGFUSE_ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}"
+  NEXTAUTH_SECRET: "${LANGFUSE_NEXTAUTH_SECRET:-rag-local-nextauth-change-me}"
+  NEXTAUTH_URL: "http://localhost:3030"
+  TELEMETRY_ENABLED: "false"
+
+  CLICKHOUSE_MIGRATION_URL: "clickhouse://langfuse-clickhouse:9000"
+  CLICKHOUSE_URL: "http://langfuse-clickhouse:8123"
+  CLICKHOUSE_USER: "clickhouse"
+  CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:-rag_clickhouse_dev}"
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+
+  REDIS_CONNECTION_STRING: "redis://redis:6379"
+
+  # 事件块存储：用 SeaweedFS 做 S3 兼容层。
+  # 为什么不用 MinIO：本机的镜像加速器把 `minio/*` 列入黑名单（denied），
+  # 一条命令起不来的开发栈没有意义。
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: "langfuse"
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: "us-east-1"
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: "${LANGFUSE_S3_ACCESS_KEY_ID:-raglangfuse}"
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: "${LANGFUSE_S3_SECRET_ACCESS_KEY:-raglangfuse123}"
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: "http://langfuse-seaweedfs:8333"
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: "langfuse"
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: "us-east-1"
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: "${LANGFUSE_S3_ACCESS_KEY_ID:-raglangfuse}"
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: "${LANGFUSE_S3_SECRET_ACCESS_KEY:-raglangfuse123}"
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: "http://langfuse-seaweedfs:8333"
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+
+  # 首次启动自动创建组织/项目/账号，并**固定** API key，
+  # 这样 compose 里的 RAG_TRACING__* 不需要人工去 UI 里抄。
+  LANGFUSE_INIT_ORG_ID: "rag-local"
+  LANGFUSE_INIT_ORG_NAME: "RAG Local"
+  LANGFUSE_INIT_PROJECT_ID: "rag-local"
+  LANGFUSE_INIT_PROJECT_NAME: "RAG Platform"
+  LANGFUSE_INIT_PROJECT_PUBLIC_KEY: "${LANGFUSE_PUBLIC_KEY:-pk-lf-local-dev}"
+  LANGFUSE_INIT_PROJECT_SECRET_KEY: "${LANGFUSE_SECRET_KEY:-sk-lf-local-dev}"
+  LANGFUSE_INIT_USER_EMAIL: "${LANGFUSE_ADMIN_EMAIL:-admin@rag.local}"
+  LANGFUSE_INIT_USER_NAME: "Admin"
+  LANGFUSE_INIT_USER_PASSWORD: "${LANGFUSE_ADMIN_PASSWORD:-raglangfuse123}"
 
 services:
   # ------------------------------------------------------------------ 依赖
@@ -220,7 +309,6 @@ services:
       # 容器内仍是 8000；Web 的 Nginx 通过服务名 api:8000 反代。
       - "8010:8000"
     volumes:
-      - hfcache:/home/rag/.cache/huggingface
       - appstorage:/app/.data/storage
     depends_on:
       postgres:
@@ -247,7 +335,6 @@ services:
     expose:
       - "9101"
     volumes:
-      - hfcache:/home/rag/.cache/huggingface
       - appstorage:/app/.data/storage
     depends_on:
       postgres:
@@ -265,6 +352,8 @@ services:
     build:
       context: .
       dockerfile: deploy/docker/web.Dockerfile
+      # 同 Python 镜像：构建期走宿主网络，避免 npm 源被慢节点拖死
+      network: host
     ports:
       - "8080:80"
     depends_on:
@@ -301,11 +390,133 @@ services:
       - prometheus
     restart: unless-stopped
 
+  # ------------------------------------------------------------------ Langfuse（可选）
+  #
+  # `docker compose --profile langfuse up -d` 或 `make lf-up`。
+  # 宿主端口 3030（刻意避开 Grafana 的 3000）。
+  langfuse-seaweedfs:
+    image: chrislusf/seaweedfs:latest
+    profiles: ["langfuse"]
+    command:
+      - server
+      - -dir=/data
+      - -s3
+      - -s3.port=8333
+      - -s3.config=/etc/seaweedfs/s3.json
+    volumes:
+      - langfuse-blobs:/data
+      - ./deploy/docker/langfuse/s3.json:/etc/seaweedfs/s3.json:ro
+    restart: unless-stopped
+
+  # 建 bucket。SeaweedFS 对 Admin 身份也会在 PutObject 时自动建桶，
+  # 但 Langfuse 启动时会先探测桶，桶不存在会直接报错退出，
+  # 所以这里显式建一次（幂等：已存在返回 409，视为成功）。
+  langfuse-bucket-init:
+    image: chrislusf/seaweedfs:latest
+    profiles: ["langfuse"]
+    depends_on:
+      - langfuse-seaweedfs
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until curl -s -o /dev/null --max-time 2 http://langfuse-seaweedfs:8333/; do
+          echo "waiting for seaweedfs s3..."; sleep 2;
+        done
+        code=$$(curl -s -o /dev/null -w '%{http_code}' -X PUT \
+          --aws-sigv4 'aws:amz:us-east-1:s3' \
+          --user "$${S3_ACCESS_KEY}:$${S3_SECRET_KEY}" \
+          http://langfuse-seaweedfs:8333/langfuse);
+        echo "bucket create -> HTTP $$code";
+        case "$$code" in 200|409) exit 0;; *) exit 1;; esac
+    environment:
+      S3_ACCESS_KEY: "${LANGFUSE_S3_ACCESS_KEY_ID:-raglangfuse}"
+      S3_SECRET_KEY: "${LANGFUSE_S3_SECRET_ACCESS_KEY:-raglangfuse123}"
+    restart: "no"
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:24.12
+    profiles: ["langfuse"]
+    environment:
+      CLICKHOUSE_USER: "clickhouse"
+      CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:-rag_clickhouse_dev}"
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - langfuse-chdata:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  # 在业务 PG 里建一个独立 database（不是独立 schema）：
+  # Langfuse 自己的迁移与业务迁移互不影响，且少起一个 PG 实例。
+  # 生产建议用独立实例（隔离故障域与备份策略）。
+  langfuse-db-init:
+    image: pgvector/pgvector:pg17
+    profiles: ["langfuse"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: "${POSTGRES_PASSWORD:-rag_local_dev_only}"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until pg_isready -h postgres -U rag_admin -d postgres; do sleep 2; done
+        if psql -h postgres -U rag_admin -d postgres -tAc \
+             "SELECT 1 FROM pg_database WHERE datname='langfuse'" | grep -q 1; then
+          echo "database langfuse already exists";
+        else
+          psql -h postgres -U rag_admin -d postgres -c 'CREATE DATABASE langfuse';
+        fi
+    restart: "no"
+
+  langfuse-web:
+    image: langfuse/langfuse:3
+    profiles: ["langfuse"]
+    depends_on:
+      langfuse-db-init:
+        condition: service_completed_successfully
+      langfuse-clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment: *langfuse-env
+    ports:
+      # 宿主 3030：Grafana 已占 3000，撞了会导致追踪静默失效。
+      - "3030:3000"
+    restart: unless-stopped
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    profiles: ["langfuse"]
+    depends_on:
+      langfuse-db-init:
+        condition: service_completed_successfully
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-bucket-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment: *langfuse-env
+    restart: unless-stopped
+
 volumes:
   pgdata:
   redisdata:
   miniodata:
-  hfcache:
   appstorage:
   promdata:
   grafanadata:
+  langfuse-blobs:
+  langfuse-chdata:

@@ -32,27 +32,30 @@ sudo systemctl enable --now docker
 # 或 Docker Desktop
 ```
 
-## 1. 配置 LLM Key
+## 1. 配置 Key
 
 Compose **不会**把宿主 `.env` 整体注入容器，只读取下面几个变量做插值：
 
 | 变量 | 必需 | 说明 |
 |---|---|---|
 | `RAG_LLM__API_KEY` | 是（否则问答 503） | DeepSeek / OpenAI 兼容 key |
+| `RAG_EMBEDDING__API_KEY` | 是（否则文档停在向量化） | 默认 provider 是智谱 `embedding-3` |
+| `RAG_RERANKER__API_KEY` | 是（否则重排降级为 RRF） | 默认 provider 是 SiliconFlow `/rerank` |
+| `PYPI_MIRROR` / `PIP_INDEX_URL` | 国内建议 | 构建期 PyPI 镜像（不是应用配置） |
 | `RAG_IDENTITY__JWT_SECRET` | 建议 | 不设则用镜像内的 dev 默认值 |
 | `POSTGRES_PASSWORD` | 生产必须 | 默认 `rag_local_dev_only` |
 | `RAG_APP_PASSWORD` | 生产必须 | 应用角色密码 |
 | `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | 生产必须 | 默认 `ragminio` / `ragminio123` |
 | `GRAFANA_ADMIN_PASSWORD` | 可选 | 默认 `admin` |
 
-仓库根的 `.env` 已被 compose 自动读取，所以本机开发通常只需要确认：
+仓库根的 `.env` 已被 compose 自动读取，本机开发通常只需要确认：
 
 ```bash
-grep RAG_LLM__API_KEY .env
+grep -E '^RAG_(LLM|EMBEDDING|RERANKER)__API_KEY=' .env
 ```
 
 不要用 `RAG_ENV=prod` 跑这套 compose：生产守卫会拒绝开发密码、
-dev 登录、HS256 等配置。
+dev 登录、HS256、以及缺失的 embedding key。
 
 ## 2. 启动
 
@@ -71,6 +74,7 @@ make logs        # 跟踪日志
 | 健康检查 | http://localhost:8010/health/ready |
 | Prometheus（profile） | http://localhost:9090 |
 | Grafana（profile） | http://localhost:3000 |
+| Langfuse（profile） | http://localhost:3030 |
 
 默认对象存储是本地卷 `appstorage`（`/app/.data/storage`），不启动 MinIO。
 需要验证 S3 时：
@@ -90,13 +94,12 @@ postgres 初始化（建 rag_app + pgvector）
   → web 启动
 ```
 
-首次向量化会下载 `BAAI/bge-m3`（约 2.2GB）到 `hfcache` 卷，
-之后复用。API 与 Worker 第一次用到时才加载模型，所以启动很快，
-但第一次上传/问答会明显变慢。
+**没有本地模型要下载**：embedding/rerank 都是远程 API，启动即可用。
+因此镜像不再包含 torch/CUDA，构建与启动都快得多。
 
-> 镜像按 `uv.lock` 安装 torch（当前锁是 PyPI 默认的 CUDA wheel），
-> 体积较大（数 GB）。CPU-only 机器仍可正常运行，只是构建/拉取更慢。
-> 若要显著减小镜像，需要单独维护 CPU torch 的 lock（当前未做）。
+> 换 embedding 模型/provider 后，旧向量属于另一个向量空间，**必须重算**：
+> `make docker-reembed`（或容器内 `python /app/scripts/reembed_all.py`）。
+> 详见 ADR 0010。
 
 登录：登录页输入 `dev:alice@example.com`，首次点「创建租户并登录」
 （`/api/v1/auth/dev-bootstrap`）。这是本地开发专用端点，
@@ -111,8 +114,11 @@ make ps
 make logs
 make docker-migrate       # 单独跑迁移
 make docker-backfill      # 回填 chunks.search_text（升级后执行一次）
+make docker-reembed       # 换 embedding provider 后重算全部向量
 make obs-up               # 起 Prometheus + Grafana
 make obs-down
+make lf-up                # 起 Langfuse 并开启追踪（宿主 :3030）
+make lf-down
 ```
 
 数据库：
@@ -125,44 +131,47 @@ psql -h 127.0.0.1 -p 5433 -U rag_admin -d rag
 docker compose exec api bash
 ```
 
-## 4. GPU
+## 4. GPU 与本地模型
 
-```bash
-docker compose -f compose.yaml -f deploy/docker/compose.gpu.yml up -d --build
-```
-
-这会：
-
-1. 给 api/worker 声明 NVIDIA 设备；
-2. 把 `RAG_EMBEDDING__DEVICE` 设为 `cuda`。
-
-镜像按 `uv.lock` 安装，torch wheel 已包含 CUDA 运行时，不需要额外换 lock。
-显存预算按 **api + worker 各一份模型** 计算。
-
-## 5. 打开重排 / 自省
-
-改 `compose.yaml`（或写一个本地 override 文件，不要提交）：
+**已不再需要**。镜像不包含 torch/CUDA，embedding 走远程 OpenAI 兼容 API。
+需要自建模型时（数据不能出境），任何提供 `/embeddings` 的服务都可以：
 
 ```yaml
 services:
-  api:
-    environment:
-      RAG_RETRIEVAL__USE_RERANK: "true"
-      RAG_RERANKER__PROVIDER: "local_bge"
-      RAG_RERANKER__MODEL_NAME: "BAAI/bge-reranker-base"
   worker:
     environment:
-      RAG_RETRIEVAL__USE_RERANK: "true"
-      RAG_RERANKER__PROVIDER: "local_bge"
+      RAG_EMBEDDING__PROVIDER: "openai_compatible"
+      RAG_EMBEDDING__BASE_URL: "http://text-embeddings:8080/v1"
+      RAG_EMBEDDING__MODEL_NAME: "BAAI/bge-m3"
+      RAG_EMBEDDING__DIMENSION: "1024"
 ```
 
-自省同理：`RAG_RETRIEVAL__USE_SELF_CHECK=true`，
+不需要重新引入 `sentence-transformers`/`torch`：TEI、vLLM 都自带
+OpenAI 兼容端点。
+
+## 5. 重排 / 自省
+
+重排默认**开启**（SiliconFlow 的 Cohere 风格 `/rerank`）：
+
+```yaml
+RAG_RETRIEVAL__USE_RERANK: "true"
+RAG_RERANKER__PROVIDER: "siliconflow"
+RAG_RERANKER__MODEL_NAME: "Qwen/Qwen3-Reranker-4B"
+RAG_RERANKER__API_KEY: "..."
+```
+
+换供应商（Cohere / Jina / 其它同形状端点）只改 `BASE_URL` 与 `MODEL_NAME`。
+缺 key 或 provider=none 时，重排会**显式降级为 RRF 顺序**，
+启动日志有对应 warning。
+
+自省：`RAG_RETRIEVAL__USE_SELF_CHECK=true`，
 `RAG_RETRIEVAL__SELF_CHECK_ACTION=flag|refuse`。
 
 ## 6. 可观测性
 
 ```bash
-make obs-up
+make obs-up   # Prometheus + Grafana
+make lf-up    # Langfuse（并让 api/worker 开始上报 trace）
 ```
 
 - Prometheus 同时抓取：
@@ -172,13 +181,33 @@ make obs-up
 - Grafana 自动加载 `deploy/observability/grafana/dashboard.json`，
   datasource UID 固定为 `prometheus`，dashboard 用 `${DS_PROMETHEUS}` 变量引用。
 
+### Langfuse
+
+`--profile langfuse` 会起：`langfuse-web`（宿主 3030）、`langfuse-worker`、
+ClickHouse、SeaweedFS（S3 兼容，替代 MinIO——本机镜像加速器拒绝 `minio/*`）。
+元数据用业务 PG 的独立 database `langfuse`，不影响业务迁移。
+
+首次启动自动创建组织/项目/账号，并**固定** API key：
+
+| 项 | 值 |
+|---|---|
+| UI | http://localhost:3030 |
+| 账号 | `admin@rag.local` / `raglangfuse123` |
+| public key | `pk-lf-local-dev` |
+| secret key | `sk-lf-local-dev` |
+
+`make lf-keys` 可随时回看这些默认值。
+追踪走 OpenTelemetry 上报（`/api/public/otel/v1/traces`），
+启动时用 `auth_check` 主动探活：host/key 配错会在日志里明确告警，
+而不是\"服务正常但一张图都没有\"。
+
 ## 7. 没内置什么，为什么
 
 | 组件 | 状态 | 原因 |
 |---|---|---|
 | MinIO | 可选 `s3` profile | 默认本地存储避免镜像拉取成为启动阻塞；需要验证 S3 时显式开启 |
 | Keycloak | 未内置 | 仓库目前没有 realm 导入配置；本地用 dev 登录。接 OIDC 时按 `RAG_OIDC__*` 配置真实 IdP 即可 |
-| Langfuse | 未内置 | v3 依赖 ClickHouse 等一整套组件，单机 compose 会显著变重；先用 Prometheus + 结构化日志 |
+| Langfuse | 可选 `langfuse` profile | v3 依赖 ClickHouse/Redis/S3，已随 profile 提供；默认不启动以控制资源占用 |
 | Admin 前端 | 未内置 | 仓库当前只有 `apps/web`，没有 admin 应用，不虚构服务 |
 
 ## 8. 故障排查
@@ -190,7 +219,10 @@ make obs-up
 | migrate 一直失败 | `make logs` 看是否连错库；确认 `RAG_APP_PASSWORD` 与 postgres 初始化时一致。**首次启动后改密码不会自动同步到已初始化的数据卷**，需 `make down-v` 重建 |
 | api 启动即退出 | 检查 `RAG_DATABASE__*`；compose 已硬编码容器服务名，不要再注入宿主 `.env` 的整体内容 |
 | 问答 503 | 没配 `RAG_LLM__API_KEY`；其它接口不受影响（惰性构造） |
+| 文档一直停在「向量化」 | 检查 `RAG_EMBEDDING__API_KEY` / `BASE_URL` / `MODEL_NAME`；`make logs` 看 `embedding_*` 与 `task_failed` |
+| 重排没生效 | `RAG_RERANKER__PROVIDER` 为 `none` 或缺 key 时会降级为 RRF；启动日志有 `rerank_*` warning |
+| 检索结果相关性突然变差 | 换过 embedding 模型但没重算向量：`make docker-reembed` |
 | 上传失败 | 默认使用本地卷；若开了 `s3` profile，检查 `minio-init` 与 bucket；S3 必须 path-style |
-| 端口已被占用 | 宿主已有 PG(5432)/API(8000) 时，本栈用 5433/8010；停掉本地 API 或改 compose 端口映射 |
-| 第一次问答很慢 | 在下载/加载 bge-m3（约 2.2GB）；看 `make logs` 的 `embedding_model_loaded` |
-| OOM | api/worker 各加载一份 bge-m3，建议 ≥8GB 内存；也可先只起 api 做问答验证 |
+| 端口已被占用 | 宿主已有 PG(5432)/API(8000) 时，本栈用 5433/8010；Langfuse 用 3030（避开 Grafana 3000） |
+| Langfuse 里没有数据 | 先 `make lf-up`（它会带上 `RAG_TRACING__ENABLED=true` 重建 api/worker）；再看启动日志的 `langfuse_auth_check_failed` |
+| 构建卡在下载依赖 | 国内直连 pypi 很慢；在 `.env` 设 `PYPI_MIRROR` / `PIP_INDEX_URL`（默认已配阿里云镜像） |

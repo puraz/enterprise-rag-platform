@@ -4,7 +4,8 @@ UV ?= uv
 
 .PHONY: help sync lint fmt typecheck test check config check-deps test-int test-all \
         migrate migrate-new migrate-down migrate-check gen-contracts gen-contracts-check verify-rls \
-        up down down-v ps logs docker-check docker-migrate docker-backfill obs-up obs-down s3-up
+        up down down-v ps logs docker-check docker-migrate docker-backfill obs-up obs-down s3-up \
+        lf-up lf-down lf-logs lf-keys docker-reembed
 
 # Compose v2（插件形态）。若本机只有 docker-compose 独立二进制，
 # 用法：make up COMPOSE="docker-compose"
@@ -102,8 +103,29 @@ docker-migrate: docker-check  ## 在容器内跑 alembic upgrade head
 docker-backfill: docker-check  ## 容器内回填 chunks.search_text（升级后跑一次）
 	$(COMPOSE) exec api python /app/scripts/backfill_search_text.py
 
+docker-reembed: docker-check  ## 换 embedding provider 后重算全部向量
+	$(COMPOSE) exec api python /app/scripts/reembed_all.py
+
 obs-up: docker-check  ## 起 Prometheus + Grafana（profile）
 	$(COMPOSE) --profile observability up -d prometheus grafana
 
 obs-down: docker-check  ## 停可观测性组件（保留数据卷）
 	$(COMPOSE) --profile observability stop prometheus grafana
+
+lf-up: docker-check  ## 起 Langfuse 全栈并开启 api/worker 追踪（宿主 :3030）
+	# 传环境变量让 compose 重建 api/worker 时带上 RAG_TRACING__ENABLED=true。
+	RAG_TRACING__ENABLED=true $(COMPOSE) --profile langfuse up -d
+
+lf-down: docker-check  ## 停 Langfuse 组件（保留数据卷）并关掉追踪
+	RAG_TRACING__ENABLED=false $(COMPOSE) --profile langfuse stop \
+		langfuse-web langfuse-worker langfuse-clickhouse langfuse-seaweedfs
+	RAG_TRACING__ENABLED=false $(COMPOSE) up -d api worker
+
+lf-logs: docker-check  ## 看 Langfuse web/worker 日志
+	$(COMPOSE) --profile langfuse logs -f --tail=100 langfuse-web langfuse-worker
+
+lf-keys:  ## 打印本地 Langfuse 的 UI 入口与固定 API Key（开发默认值）
+	@echo "UI:         http://127.0.0.1:3030"
+	@echo "账号:       admin@rag.local / raglangfuse123"
+	@echo "public key: pk-lf-local-dev"
+	@echo "secret key: sk-lf-local-dev"

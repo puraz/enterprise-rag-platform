@@ -143,12 +143,18 @@ Worker 没有 HTTP 端点。两种方案各有代价：
 
 ## 4. 遗留
 
-1. **Langfuse 未实测**：`LangfuseTracer` 已实现（失败自动降级 LocalTracer），
-   但本机无 Langfuse 服务端，只验证了降级路径。真实打点需起 Langfuse。
-2. **追踪未接入业务链路**：`LocalTracer` 可用于测试，但检索图与
-   LLM 调用还没有真正 `span()` 包裹。接入点明确（A11 的
-   `RetrievalGraph.run` 与 A5 的 `ModelGateway.complete`），
-   但需要一次专门的接线改动。
+1. **Langfuse 已接入并实测（2026-11-17）**：
+   `--profile langfuse` 提供完整自托管栈（web + worker + ClickHouse + SeaweedFS），
+   API/Worker 启动时构造 tracer 并 `auth_check` 探活；一次问答的 span 树为
+   `chat.turn → retrieval.pipeline → {rewrite,vector,keyword,fuse,rerank}`
+   + `answerability` + `llm.stream`（generation）+ `support_check`；
+   `model_calls.trace_id/request_id` 已回填，用户反馈会作为 score 写回 trace。
+   **踩过的坑**：SDK v3 时代的 `start_as_current_span` 在 v5 已是 `None`，
+   初版每次开 span 都 `AttributeError` 被吞掉 → 全部降级为本地记录，
+   外部表现为“一条数据都没有”。现已改用 `start_as_current_observation`，
+   并由 `tests/test_tracing.py` 的假 SDK 锁住接口名。
+2. **追踪已接入业务链路**：检索图每个节点一个 span，
+   worker 每个任务一个 span（`task_type` 区分 parse/chunk/embed）。
 3. **告警未接入 Alertmanager**：规则写好了，但路由/分组/静默策略
    需要实际部署环境决定。
 4. **成本指标与对账可能不一致**：`rag_llm_cost_usd` 是 Histogram（观测分布），

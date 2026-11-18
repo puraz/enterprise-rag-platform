@@ -1,0 +1,20 @@
+{
+  "identities": [
+    {
+      "name": "langfuse",
+      "credentials": [
+        {
+          "accessKey": "raglangfuse",
+          "secretKey": "raglangfuse123"
+        }
+      ],
+      "actions": [
+        "Admin",
+        "Read",
+        "Write",
+        "List",
+        "Tagging"
+      ]
+    }
+  ]
+}
