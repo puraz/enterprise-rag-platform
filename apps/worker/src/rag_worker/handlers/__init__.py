@@ -27,7 +27,7 @@ handler 通常持有重资源（存储后端、embedding 模型）。
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from rag_core.logging import get_logger
 from rag_worker.handlers.chunk import ChunkDocumentHandler
@@ -37,6 +37,7 @@ from rag_worker.handlers.parse import ParseDocumentHandler
 if TYPE_CHECKING:
     from rag_adapters.providers.embedding import EmbeddingProvider
     from rag_adapters.storages import StorageBackend
+    from rag_core.settings.embedding import EmbeddingSettings
     from rag_worker.engine import TaskHandler
 
 log = get_logger(__name__)
@@ -46,6 +47,8 @@ def build_handlers(
     *,
     storages: dict[str, StorageBackend],
     embedding_provider: EmbeddingProvider,
+    embedding_settings: EmbeddingSettings,
+    tracer: Any = None,
 ) -> dict[str, TaskHandler]:
     """构造"任务类型 → handler"注册表。
 
@@ -58,7 +61,9 @@ def build_handlers(
     handlers: dict[str, TaskHandler] = {
         TaskType.PARSE_DOCUMENT.value: ParseDocumentHandler(storages=storages),
         TaskType.CHUNK_DOCUMENT.value: ChunkDocumentHandler(storages=storages),
-        TaskType.EMBED_DOCUMENT.value: EmbedDocumentHandler(provider=embedding_provider),
+        TaskType.EMBED_DOCUMENT.value: EmbedDocumentHandler(
+            provider=embedding_provider, settings=embedding_settings, tracer=tracer
+        ),
     }
 
     # 尚未实现的任务类型在这里显式列出，启动日志会打出"缺哪些"。

@@ -40,20 +40,16 @@ LangChain 默认重试 2 次。与 `ResilientCaller` 叠加会变成
 默认共享模块级 client；某个实例 `aclose()` 会让其它实例抛
 `Event loop is closed`（本项目在 LLM 侧踩过同样的坑）。
 
-## 三、一个已知取舍（已实测）
+## 三、一个必须自己解析响应的理由（已实测）
 
-LangChain 在 `check_embedding_ctx_length=False` 时，**按响应 `data` 的顺序**
-装配向量，不按 `index` 归位（`langchain_openai/embeddings/base.py:750`）。
+`aembed_documents` 只返回向量列表：**既没有 `usage`，也不读 `index`**
+（`langchain_openai/embeddings/base.py:750` 按响应顺序装配）。而成本对账需要
+`usage.prompt_tokens`，排序正确性需要 `index`。
 
-这意味着我们依赖一个**协议未强制、但所有 OpenAI 兼容端点都遵守**的约定：
-`data` 与输入同序。`index` 字段存在的意义就是让客户端能归位，
-但 LangChain 没用它。
-
-为什么不自己接管：一旦自己解析响应，就不再用 LangChain 了，
-而鉴权/批量/重试开关/维度参数这些反而要再写一遍。
-这里的取舍是：**保留框架、把假设写成文档与测试**。
-`tests/test_embedding_provider.py` 里有一条用例锁住"按响应顺序返回"，
-将来 LangChain 改行为会立刻被发现。
+所以这里用 LangChain 实例持有的 `async_client`（鉴权/base_url/超时/
+连接池都由 LangChain 配好）发请求，只把“响应 → 领域对象”的十几个字段
+自己解析。这不是重写 HTTP 客户端，而是补齐框架没暴露的两个字段。
+顺带修掉了旧实现"依赖响应顺序"的隐含假设。
 
 ## 归一化必须自己做
 
@@ -66,6 +62,7 @@ from __future__ import annotations
 
 import math
 import time
+from typing import Any
 
 import httpx
 
@@ -159,12 +156,15 @@ class LangChainEmbedding(EmbeddingProvider):
         prepared = self._apply_instruction(texts, task)
         started = time.perf_counter()
         vectors: list[list[float]] = []
+        input_tokens = 0
 
         # 显式分批：失败只重试当前批，不会把整份文档的所有批再算一遍。
         size = self._settings.batch_size
         for offset in range(0, len(prepared), size):
             batch = prepared[offset : offset + size]
-            vectors.extend(await self._embed_batch(batch))
+            batch_vectors, batch_tokens = await self._embed_batch(batch)
+            vectors.extend(self._finalize(vector) for vector in batch_vectors)
+            input_tokens += batch_tokens
 
         latency_ms = int((time.perf_counter() - started) * 1000)
         self._validate(vectors, expected_count=len(texts))
@@ -174,6 +174,7 @@ class LangChainEmbedding(EmbeddingProvider):
             count=len(vectors),
             batches=math.ceil(len(texts) / size),
             latency_ms=latency_ms,
+            input_tokens=input_tokens,
             task=str(task),
         )
         return EmbeddingResult(
@@ -181,20 +182,34 @@ class LangChainEmbedding(EmbeddingProvider):
             dimension=self._expected_dimension,
             model=self.name,
             latency_ms=latency_ms,
+            input_tokens=input_tokens,
         )
 
     # ------------------------------------------------------------ 内部
 
-    async def _embed_batch(self, batch: list[str]) -> list[list[float]]:
-        async def _call() -> list[list[float]]:
+    async def _embed_batch(self, batch: list[str]) -> tuple[list[list[float]], int]:
+        """发一次请求，返回 `(向量, 输入 token 数)`。
+
+        **用 `async_client.create` 而不是 `aembed_documents`**：
+        后者丢掉 `usage` 与 `index`（见模块 docstring 第三节）。
+        """
+        payload: dict[str, Any] = {"input": batch, "model": self._settings.model_name}
+        if self._settings.send_dimensions:
+            payload["dimensions"] = self._expected_dimension
+
+        async def _call() -> Any:
             try:
-                raw = await self._embeddings.aembed_documents(batch)
+                return await self._embeddings.async_client.create(**payload)
             except Exception as exc:
                 raise _classify(exc) from exc
-            return [[float(value) for value in vector] for vector in raw]
 
-        vectors, _stats = await self._caller.call(_call, operation="embeddings")
-        return [self._finalize(vector) for vector in vectors]
+        response, _stats = await self._caller.call(_call, operation="embeddings")
+
+        data = list(getattr(response, "data", None) or [])
+        vectors = [_as_vector(item) for item in _order_by_index(data, expected=len(batch))]
+        usage = getattr(response, "usage", None)
+        tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        return vectors, tokens
 
     def _finalize(self, vector: list[float]) -> list[float]:
         if not self._settings.normalize:
@@ -245,6 +260,42 @@ class LangChainEmbedding(EmbeddingProvider):
     async def aclose(self) -> None:
         """关闭连接池（worker 优雅退出时必须调用）。"""
         await self._http.aclose()
+
+
+def _order_by_index(items: list[Any], *, expected: int) -> list[Any]:
+    """按 `index` 把返回项归位到输入顺序。
+
+    `index` 是请求内的 0-based 下标。若服务端没给（或不是 0..n-1 的排列），
+    退化为按返回顺序使用并留 debug 日志：**静默接受一个可能乱序的结果，
+    等于把不确定性埋进检索质量里**。
+    """
+    if len(items) != expected:
+        raise EmbeddingProviderError(
+            f"embedding 返回 {len(items)} 条，期望 {expected} 条", retryable=True
+        )
+
+    indices: list[int] = []
+    for item in items:
+        index = item.get("index") if isinstance(item, dict) else getattr(item, "index", None)
+        if not isinstance(index, int):
+            break
+        indices.append(index)
+
+    if len(indices) == expected and sorted(indices) == list(range(expected)):
+        order = sorted(range(expected), key=lambda position: indices[position])
+        return [items[position] for position in order]
+
+    log.debug("embedding_index_missing_or_unexpected", indices=indices)
+    return items
+
+
+def _as_vector(item: Any) -> list[float]:
+    embedding = (
+        item.get("embedding") if isinstance(item, dict) else getattr(item, "embedding", None)
+    )
+    if not isinstance(embedding, list) or not embedding:
+        raise EmbeddingProviderError("embedding 响应缺少向量", retryable=True)
+    return [float(value) for value in embedding]
 
 
 def _classify(exc: Exception) -> EmbeddingProviderError:

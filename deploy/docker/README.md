@@ -97,9 +97,12 @@ postgres 初始化（建 rag_app + pgvector）
 **没有本地模型要下载**：embedding/rerank 都是远程 API，启动即可用。
 因此镜像不再包含 torch/CUDA，构建与启动都快得多。
 
-> 换 embedding 模型/provider 后，旧向量属于另一个向量空间，**必须重算**：
-> `make docker-reembed`（或容器内 `python /app/scripts/reembed_all.py`）。
-> 详见 ADR 0010。
+> 换 embedding 模型/provider 后，旧向量属于另一个向量空间，**必须重建**：
+> `make docker-reembed`。它走 A10 的零停机流程：
+> 新建 building 版本 → 回填（检索仍用旧 ACTIVE）→ 校验条数 → 切换 ACTIVE。
+> 超时/失败不会切换；旧版本置 retired，向量保留可回滚。
+> 模型未变但想重建索引（调参/演练）加 `--force-new-version`；
+> 只建版本不切换用 `--no-wait`。详见 ADR 0010。
 
 登录：登录页输入 `dev:alice@example.com`，首次点「创建租户并登录」
 （`/api/v1/auth/dev-bootstrap`）。这是本地开发专用端点，
@@ -166,6 +169,17 @@ RAG_RERANKER__API_KEY: "..."
 
 自省：`RAG_RETRIEVAL__USE_SELF_CHECK=true`，
 `RAG_RETRIEVAL__SELF_CHECK_ACTION=flag|refuse`。
+
+成本：embedding / rerank 的 token 已写入 `model_calls`（与 LLM 同口径，
+含 trace_id）。单价默认不填（只记 token、成本 0），按合同设置：
+
+```yaml
+# 示例值（不是供应商报价！按你的合同填 USD / 1M tokens）
+RAG_EMBEDDING__UNIT_PRICE_INPUT: "0.5"
+RAG_RERANKER__UNIT_PRICE_INPUT: "0.5"
+```
+
+不填时历史记录仍可用后补单价重算（成本 = tokens × 单价）。
 
 ## 6. 可观测性
 

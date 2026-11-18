@@ -147,9 +147,31 @@ async def run(settings: Settings) -> int:
             base_url=settings.embedding.base_url,
         )
 
+        # 追踪器：未配置时用 LocalTracer（内存记录），
+        # 不会因为缺少 Langfuse 而起不来。
+        #
+        # **必须在构造 handler 之前**：handler 记录 `model_calls` 时要取
+        # 当前 trace id（引擎的 `worker.task` span 已包住它）。
+        # 与 API 一致：配置了就主动探测一次服务端（SDK 后台导出失败不抛异常）。
+        from rag_core.tracing import build_tracer
+
+        tracer = build_tracer(settings.tracing)
+        tracing_ready = False
+        if settings.tracing.configured:
+            tracing_ready = await tracer.averify()
+        log.info(
+            "worker_tracer_ready",
+            implementation=type(tracer).__name__,
+            verified=tracing_ready,
+            **settings.tracing.redacted_summary,
+        )
+
         handlers = build_handlers(
             storages=storages,
             embedding_provider=embedding_provider,
+            # 成本入账需要 provider 名/模型名/单价（provider.name 只是模型名）
+            embedding_settings=settings.embedding,
+            tracer=tracer,
         )
         engine = WorkerEngine(
             settings=settings,
@@ -196,24 +218,7 @@ async def run(settings: Settings) -> int:
             note="多副本场景建议 PROMETHEUS_MULTIPROC_DIR 或逐实例抓取",
         )
 
-        # 追踪器：未配置时用 LocalTracer（内存记录），
-        # 不会因为缺少 Langfuse 而起不来。
-        #
-        # 与 API 一致：配置了就**主动探测一次**服务端，
-        # SDK 后台导出失败不会抛异常，不探测的话"没数据"无从发现。
-        from rag_core.tracing import build_tracer
-
-        tracer = build_tracer(settings.tracing)
         engine.attach_tracer(tracer)
-        tracing_ready = False
-        if settings.tracing.configured:
-            tracing_ready = await tracer.averify()
-        log.info(
-            "worker_tracer_ready",
-            implementation=type(tracer).__name__,
-            verified=tracing_ready,
-            **settings.tracing.redacted_summary,
-        )
 
         loop = asyncio.get_running_loop()
         _install_signal_handlers(engine, loop)

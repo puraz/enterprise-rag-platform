@@ -121,6 +121,8 @@ x-app-env: &app-env
   RAG_EMBEDDING__API_KEY: "${RAG_EMBEDDING__API_KEY:-}"
   RAG_EMBEDDING__BATCH_SIZE: "32"
   RAG_EMBEDDING__MAX_CONCURRENCY: "4"
+  # 单价（USD / 1M tokens）。为空 = 记录 token 但不计成本（可事后重算）。
+  RAG_EMBEDDING__UNIT_PRICE_INPUT: "${RAG_EMBEDDING__UNIT_PRICE_INPUT:-}"
 
   # ---- 检索链路 ----
   RAG_RETRIEVAL__USE_KEYWORD: "true"
@@ -135,6 +137,8 @@ x-app-env: &app-env
   RAG_RERANKER__API_KEY: "${RAG_RERANKER__API_KEY:-}"
   RAG_RERANKER__BATCH_SIZE: "8"
   RAG_RERANKER__MAX_CONCURRENCY: "2"
+  # 单价（USD / 1M tokens，按 query+候选 token 计费）
+  RAG_RERANKER__UNIT_PRICE_INPUT: "${RAG_RERANKER__UNIT_PRICE_INPUT:-}"
 
   # Worker 指标端口（Prometheus 抓取 worker:9101/metrics）。
   # API 与迁移不使用这个变量，但共用同一份环境，设了也无害。

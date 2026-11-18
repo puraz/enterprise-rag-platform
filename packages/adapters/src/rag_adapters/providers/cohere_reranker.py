@@ -119,26 +119,32 @@ class CohereStyleReranker(RerankerProvider):
 
         started = time.perf_counter()
         scores: list[float] = []
+        input_tokens = 0
         size = min(self._settings.batch_size, self._settings.max_pairs)
         for offset in range(0, len(documents), size):
             batch = documents[offset : offset + size]
-            scores.extend(await self._rerank_batch(query, batch))
+            batch_scores, batch_tokens = await self._rerank_batch(query, batch)
+            scores.extend(batch_scores)
+            input_tokens += batch_tokens
 
         log.info(
             "rerank_completed",
             document_count=len(documents),
             batches=(len(documents) + size - 1) // size,
             latency_ms=int((time.perf_counter() - started) * 1000),
+            input_tokens=input_tokens,
         )
         return RerankResult(
             scores=scores,
             model=self.name,
             latency_ms=int((time.perf_counter() - started) * 1000),
+            input_tokens=input_tokens,
         )
 
     # ------------------------------------------------------------ 内部
 
-    async def _rerank_batch(self, query: str, batch: list[str]) -> list[float]:
+    async def _rerank_batch(self, query: str, batch: list[str]) -> tuple[list[float], int]:
+        """发一次请求，返回 `(分数, 输入 token 数)`。"""
         payload: dict[str, Any] = {
             "model": self._settings.model_name,
             "query": query,
@@ -164,7 +170,11 @@ class CohereStyleReranker(RerankerProvider):
         if not isinstance(results, list):
             raise RerankerProviderError("rerank 响应缺少 results", retryable=True)
 
-        return _order_scores(results, expected=len(batch))
+        # usage 因家而异，实测 SiliconFlow 放在 `meta.tokens.input_tokens`
+        # （Cohere 风格是 `meta.billed_units`），也有实现放在顶层 `usage`。
+        # 取不到就记 0，**不猜**：猜出来的成本比没有成本更危险。
+        tokens = _extract_input_tokens(body)
+        return _order_scores(results, expected=len(batch)), tokens
 
     async def health(self) -> bool:
         """探活：用两个极短文本验证鉴权与协议。"""
@@ -177,6 +187,29 @@ class CohereStyleReranker(RerankerProvider):
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+
+def _extract_input_tokens(body: dict[str, Any]) -> int:
+    """从 rerank 响应里取输入 token 数（兼容三种常见形状）。
+
+    实测 SiliconFlow：`meta.tokens.input_tokens`。
+    Cohere 风格：`meta.billed_units.input_tokens`。
+    部分实现：顶层 `usage.total_tokens` / `usage.prompt_tokens`。
+    均取不到时返回 0（记录调用但不计费，可事后补单价重算）。
+    """
+    usage = body.get("usage") or {}
+    meta = body.get("meta") or {}
+    candidates = [
+        usage.get("input_tokens"),
+        usage.get("prompt_tokens"),
+        usage.get("total_tokens"),
+        (meta.get("tokens") or {}).get("input_tokens"),
+        (meta.get("billed_units") or {}).get("input_tokens"),
+    ]
+    for value in candidates:
+        if isinstance(value, (int, float)) and value > 0:
+            return int(value)
+    return 0
 
 
 def _order_scores(results: list[Any], *, expected: int) -> list[float]:

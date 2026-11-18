@@ -66,6 +66,7 @@ import uuid
 from collections.abc import AsyncIterator, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import text
@@ -188,6 +189,9 @@ class ChatService:
         self._model_calls = ModelCallRepository(session)
         self._config = retrieval_config or RetrievalConfig(use_rewrite=True)
         self._metrics = metrics
+        # 本轮辅助调用（改写/判断/embedding/rerank）的累计成本。
+        # ChatService 是**每请求一个实例**（路由层构造），所以不存在跨请求串味。
+        self._turn_cost = Decimal("0")
 
     # ------------------------------------------------------------ 会话管理
 
@@ -393,6 +397,7 @@ class ChatService:
                 history=history,
                 knowledge_base_ids=knowledge_base_ids,
                 conversation=conversation,
+                message_id=assistant.id,
                 permission_ctx=permission_ctx,
             )
         except AppError as exc:
@@ -656,8 +661,11 @@ class ChatService:
 
         # ---- 落库：消息 + 成本 ----
         # 注意：`usage` 已在生成 span 内解析完（见上面），这里不再重复提取。
-        cost_usd = 0.0
-        await self._record_cost(
+        #
+        # 总成本 = 本次生成 + 本轮辅助调用（改写/判断/embedding/rerank）。
+        # 只记生成会让“检索很贵但回答很短”的场景在展示上几乎免费，
+        # 而对账以 `model_calls` 为准（两边口径必须一致）。
+        llm_cost = await self._record_cost(
             tenant_id=tenant_id,
             user_id=user_id,
             conversation_id=conversation_id,
@@ -666,11 +674,7 @@ class ChatService:
             output_tokens=usage[1],
             latency_ms=gen_latency_ms,
         )
-        cost_usd = await self._accumulate_cost(
-            conversation_id=conversation_id,
-            input_tokens=usage[0],
-            output_tokens=usage[1],
-        )
+        cost_usd = float(llm_cost + self._turn_cost)
 
         await self._messages.mark_completed(
             message_id=assistant.id,
@@ -805,6 +809,7 @@ class ChatService:
         history: list[tuple[str, str]],
         knowledge_base_ids: list[uuid.UUID] | None,
         conversation: Conversation,
+        message_id: uuid.UUID | None = None,
         permission_ctx: Any = None,
     ) -> tuple[Any, list[Material], set[uuid.UUID]]:
         """执行检索（向量 + 关键词 → RRF → 可选 rerank），回填成 `Material`。
@@ -875,7 +880,23 @@ class ChatService:
         async def vector_search(query: str, *, limit: int) -> list[tuple[str, str, float]]:
             """向量路：按知识库分别取 active 索引版本后检索。"""
             started = time.perf_counter()
-            query_vector = await self._embedder.embed_one(query, task=EmbeddingTask.QUERY)
+            # 用 `embed_batch` 而不是 `embed_one`：后者的返回值只有向量，
+            # 拿不到 usage → 成本记 0（对账会显示“有检索无成本”）。
+            query_result = await self._embedder.embed_batch([query], task=EmbeddingTask.QUERY)
+            if not query_result.vectors:
+                raise ValueError("embedding 未返回查询向量")
+            query_vector = query_result.vectors[0]
+            self._turn_cost += await self._record_aux_call(
+                tenant_id=tenant_id,
+                task_type=ModelTaskType.EMBEDDING,
+                provider=self._settings.embedding.provider,
+                model=self._settings.embedding.model_name,
+                input_tokens=query_result.input_tokens,
+                unit_price_input=self._settings.embedding.unit_price_input,
+                latency_ms=query_result.latency_ms,
+                conversation_id=conversation.id,
+                message_id=message_id,
+            )
 
             hits: list[tuple[Any, float]] = []
             if kb_ids:
@@ -958,6 +979,17 @@ class ChatService:
                     error=str(exc)[:200],
                 )
                 return [0.0] * len(documents)
+            self._turn_cost += await self._record_aux_call(
+                tenant_id=tenant_id,
+                task_type=ModelTaskType.RERANK,
+                provider=self._settings.reranker.provider,
+                model=self._settings.reranker.model_name,
+                input_tokens=result.input_tokens,
+                unit_price_input=self._settings.reranker.unit_price_input,
+                latency_ms=result.latency_ms,
+                conversation_id=conversation.id,
+                message_id=message_id,
+            )
             return list(result.scores)
 
         graph = RetrievalGraph(
@@ -1127,7 +1159,7 @@ class ChatService:
             return ""
 
         # 改写也产生成本，必须记账（否则账不平）
-        await self._record_cost(
+        self._turn_cost += await self._record_cost(
             tenant_id=tenant_id,
             user_id=None,
             conversation_id=None,
@@ -1166,7 +1198,7 @@ class ChatService:
                     max_tokens=200,
                 )
             except Exception as exc:
-                # 判断失败不能拦死问答：保守地"往下走"（让生成模型自己判断），
+                # 判断失败不能拦死问答：保守地“往下走”（让生成模型自己判断），
                 # 但记录日志——拒答机制失效是重要信号。
                 log.warning(
                     "answerability_check_failed",
@@ -1176,7 +1208,7 @@ class ChatService:
                     self._tracer.annotate(span, error_type=type(exc).__name__)
                 return None
 
-            await self._record_cost(
+            self._turn_cost += await self._record_cost(
                 tenant_id=tenant_id,
                 user_id=None,
                 conversation_id=None,
@@ -1242,7 +1274,7 @@ class ChatService:
                     self._tracer.annotate(span, error_type=type(exc).__name__)
                 return None
 
-            await self._record_cost(
+            self._turn_cost += await self._record_cost(
                 tenant_id=tenant_id,
                 user_id=None,
                 conversation_id=None,
@@ -1308,12 +1340,12 @@ class ChatService:
         output_tokens: int,
         latency_ms: int,
         task_type: ModelTaskType = ModelTaskType.CHAT,
-    ) -> None:
-        """把这次 LLM 调用写进 `model_calls`（对账的唯一真相）。"""
+    ) -> Decimal:
+        """把这次 LLM 调用写进 `model_calls`（对账的唯一真相），返回其成本。"""
         if input_tokens == 0 and output_tokens == 0:
-            return
+            return Decimal("0")
         price_in, price_cached, price_out = self._pricing_for(self._llm.name)
-        await self._model_calls.record(
+        record = await self._model_calls.record(
             tenant_id=tenant_id,
             task_type=task_type,
             provider=self._llm.name,
@@ -1330,13 +1362,49 @@ class ChatService:
             # ## 为什么这两列必须填
             #
             # 只有接口返回的 request_id，排障时能从日志找到 HTTP 请求，
-            # 但找不到"这次调用在 trace 里的那个 LLM span"；
+            # 但找不到“这次调用在 trace 里的那个 LLM span”；
             # 只有 trace_id，又看不到对应的访问日志。
             # 实测初版这两列全空（count(request_id)=count(trace_id)=0），
-            # 于是"成本涨了但不知道是哪一步"只能翻 Langfuse 手动对时间。
+            # 于是“成本涨了但不知道是哪一步”只能翻 Langfuse 手动对时间。
             request_id=_current_request_id(),
             trace_id=self._tracer.current_trace_id() if self._tracer is not None else None,
         )
+        return Decimal(record.cost_usd)
+
+    async def _record_aux_call(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        task_type: ModelTaskType,
+        provider: str,
+        model: str,
+        input_tokens: int,
+        unit_price_input: Decimal | None,
+        latency_ms: int | None,
+        conversation_id: uuid.UUID | None = None,
+        message_id: uuid.UUID | None = None,
+    ) -> Decimal:
+        """记录 embedding / rerank 这类“非 LLM 文本”的模型调用。
+
+        `input_tokens == 0` 时直接返回：表示服务端没返回 usage，
+        此时写 0-token 行只会让账本充满噪音（且无法区分“未计费”与“免费”）。
+        """
+        if input_tokens <= 0:
+            return Decimal("0")
+        record = await self._model_calls.record(
+            tenant_id=tenant_id,
+            task_type=task_type,
+            provider=provider,
+            model=model,
+            input_tokens=input_tokens,
+            unit_price_input=unit_price_input,
+            latency_ms=latency_ms,
+            conversation_id=conversation_id,
+            message_id=message_id,
+            request_id=_current_request_id(),
+            trace_id=self._tracer.current_trace_id() if self._tracer is not None else None,
+        )
+        return Decimal(record.cost_usd)
 
     def _pricing_for(self, provider: str) -> tuple[Any, Any, Any]:
         """取当前时刻适用的单价快照 `(input, cached_input, output)`。
@@ -1376,22 +1444,6 @@ class ChatService:
                 error=str(exc)[:100],
             )
         return None, None, None
-
-    async def _accumulate_cost(
-        self, *, conversation_id: uuid.UUID, input_tokens: int, output_tokens: int
-    ) -> float:
-        """算出本次成本（用于消息与会话的展示字段）。"""
-        price_in, _price_cached, price_out = self._pricing_for(self._llm.name)
-        if price_in is None and price_out is None:
-            return 0.0
-        from decimal import Decimal
-
-        total = Decimal("0")
-        if price_in is not None:
-            total += Decimal(input_tokens) / Decimal(1_000_000) * price_in
-        if price_out is not None:
-            total += Decimal(output_tokens) / Decimal(1_000_000) * price_out
-        return float(total)
 
 
 # ---------------------------------------------------------------- 辅助

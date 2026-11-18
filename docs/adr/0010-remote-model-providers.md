@@ -76,18 +76,34 @@ A11 的检索链路需要 embedding 与 rerank。原实现是本地模型：
 - 删除 `deploy/docker/compose.gpu.yml`（镜像已无 CUDA）；
 - 工厂注册表保留：新增 provider 仍是"一个实现 + 一行注册"。
 
-### 4. 换模型必须重算向量
+### 4. 换模型必须重建向量（零停机）
 
-不同模型产出不同向量空间，旧向量与新查询不可比较。提供
-`scripts/reembed_all.py`（`make docker-reembed`）：
+不同模型产出不同向量空间，旧向量与新查询不可比较。`scripts/reembed_all.py`
+（`make docker-reembed`）按 A10 做版本化重建：
 
-- 重置 `chunks.embedding` + 文档状态为 `embedding`；
-- 以 `reembed:{version}:{run_id}` 为幂等键入队，保证真的会重跑；
-- 由 worker 用当前 provider upsert 到 ACTIVE 索引版本。
+1. 新建索引版本（`building`，模型 = 当前配置）；
+2. embed 任务 payload 带 `index_version_id`，向量写入 building 版本，
+   **ACTIVE 不变**——回填期间检索完全不受影响；
+3. 轮询新版本的 chunk 覆盖数，达到当前 chunk 总数才切换 ACTIVE；
+4. 超时/失败**不切换**，旧索引继续服务；旧版本置 `retired` 可回滚。
 
-**局限**：这是原地覆盖，不是 A10 的零停机版本化重建。重算期间新旧向量
-混用，排序不可信。生产切换应走"新建 index_version → 回填 → 切换 → 保留旧
-版本"（ADR 0002）。
+模型未变但想重建（调索引参数/演练）用 `--force-new-version`；
+只建版本不切换用 `--no-wait`。
+
+## 成本入账
+
+embedding / rerank 与 LLM 走同一张 `model_calls` 明细表：
+
+| task_type | provider | 用量来源 | trace |
+|---|---|---|---|
+| `embedding` | `zhipu` | `usage.prompt_tokens` | 有（API 检索与 worker 任务都带） |
+| `rerank` | `siliconflow` | `meta.tokens.input_tokens`（兼容多种形状） | 有 |
+
+单价默认 `None`：只记 token、成本 0，避免拿错价格做对账；
+配置 `RAG_EMBEDDING__UNIT_PRICE_INPUT` / `RAG_RERANKER__UNIT_PRICE_INPUT`
+后计入成本，历史记录也能按新单价重算。
+消息/会话的 `cost_usd` 现在包含本轮全部辅助调用
+（改写、能否回答、查询 embedding、rerank），不再只算生成那一次。
 
 ## 后果
 
@@ -103,8 +119,11 @@ A11 的检索链路需要 embedding 与 rerank。原实现是本地模型：
   rerank 失败 → RRF 顺序；embedding 失败 → 任务重试（可恢复）或死信（配置错误）。
 - **数据出境**：文档正文会发给第三方。高敏场景需要单独评估或换自建 TEI/vLLM
   （它们同样兼容 `/embeddings`，只改配置）。
-- **成本模型变化**：从"一次性模型下载"变成"按 token 计费"。当前未把
-  embedding 成本写入 `model_calls`，后续应补（与 LLM 对账口径一致）。
+- **成本模型变化**：从"一次性模型下载"变成"按 token 计费"。
+  embedding / rerank 的用量已写入 `model_calls`（`task_type=embedding|rerank`，
+  带 trace_id），与 LLM 同口径；单价默认 `None`（只记 token、成本记 0），
+  按合同配置 `RAG_EMBEDDING__UNIT_PRICE_INPUT` / `RAG_RERANKER__UNIT_PRICE_INPUT`
+  （USD / 1M tokens）后即可计入消息与会话成本，并可按历史重算。
 
 ## 被否掉的替代方案
 

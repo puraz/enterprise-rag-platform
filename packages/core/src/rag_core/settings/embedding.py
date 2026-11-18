@@ -30,6 +30,8 @@ CUDA 构建，会连带拉 `nvidia-*` / `triton` 共 2GB+：一次镜像构建�
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 #: 默认的智谱（BigModel）OpenAI 兼容端点。
@@ -128,6 +130,14 @@ class EmbeddingSettings(BaseModel):
     远程 API 的瓶颈在服务端配额；并发过高只会换来 429。
     """
 
+    unit_price_input: Decimal | None = None
+    """输入 token 单价（USD / 1M tokens），用于 `model_calls` 成本入账。
+
+    **默认 None（成本记 0）而不是猜一个价**：单价随合同/阶梯/活动变化，
+    写死会在对账时造成系统性偏差。None 时仍记录 token 用量，
+    补上单价后可按历史重算（与 LLM 的 `TokenPricing` 口径一致）。
+    """
+
     @field_validator("base_url")
     @classmethod
     def _validate_base_url(cls, value: str) -> str:
@@ -135,6 +145,18 @@ class EmbeddingSettings(BaseModel):
         if not url.startswith(("http://", "https://")):
             raise ValueError(f"embedding.base_url 必须带协议，当前是 {value!r}")
         return url
+
+    @field_validator("unit_price_input", mode="before")
+    @classmethod
+    def _empty_price_is_none(cls, value: object) -> object:
+        """空字符串 → None。
+
+        compose/容器环境里测一个变量时通常只能传空字符串，
+        而 `Decimal | None` 不接受 ""。显式归一化避开了“配了个空价就起不来”。
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @property
     def configured(self) -> bool:

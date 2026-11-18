@@ -79,6 +79,13 @@ class EmbeddingResult:
 
     latency_ms: int | None = None
 
+    input_tokens: int = 0
+    """本次调用消耗的输入 token 数（服务端 usage）。
+
+    为 0 表示服务端没返回 usage（并非没消耗）。入账时据此判断是否写
+    `model_calls`：0 的层不写，避免账本里堆满“0 token”的噪音。
+    """
+
 
 @dataclass(frozen=True, slots=True)
 class EmbeddingCapabilities:
@@ -180,6 +187,9 @@ class RerankResult:
 
     model: str
     latency_ms: int | None = None
+
+    input_tokens: int = 0
+    """本次重排消耗的 token（query + 所有候选）。0 表示服务端未返回 usage。"""
 
 
 class RerankerProviderError(Exception):

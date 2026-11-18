@@ -137,7 +137,8 @@ async def test_remote_orders_scores_by_index() -> None:
                 "results": [
                     {"index": 1, "relevance_score": 0.9},
                     {"index": 0, "relevance_score": 0.1},
-                ]
+                ],
+                "usage": {"total_tokens": 42},
             },
         )
 
@@ -150,6 +151,8 @@ async def test_remote_orders_scores_by_index() -> None:
     # 分数与输入顺序对应：第 0 条 0.1、第 1 条 0.9
     assert result.scores == [0.1, 0.9]
     assert result.model == "Qwen/Qwen3-Reranker-4B"
+    # usage 透传，供 model_calls 成本入账
+    assert result.input_tokens == 42
 
     payload = requests[0]
     assert payload["model"] == "Qwen/Qwen3-Reranker-4B"

@@ -86,11 +86,14 @@ from sqlalchemy import func, select
 
 from rag_adapters.providers.embedding import EmbeddingProvider, EmbeddingTask
 from rag_contracts.enums import DocumentStatus, DocumentVersionStatus
+from rag_contracts.enums.audit import ModelTaskType
 from rag_core.errors import NotFoundError
 from rag_core.logging import get_logger
+from rag_core.settings.embedding import EmbeddingSettings
 from rag_db.models.chunk import Chunk
 from rag_db.models.document import Document, DocumentVersion
 from rag_db.repositories import ChunkRepository, DocumentRepository
+from rag_db.repositories.audit import ModelCallRepository
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -105,13 +108,24 @@ class EmbedDocumentHandler:
         {"document_id": "...", "document_version_id": "..."}
     """
 
-    def __init__(self, *, provider: EmbeddingProvider) -> None:
+    def __init__(
+        self,
+        *,
+        provider: EmbeddingProvider,
+        settings: EmbeddingSettings,
+        tracer: Any = None,
+    ) -> None:
         """
         Args:
-            provider: Embedding 实现。worker 进程持有单例——
-                本地模型加载要 2-5 秒、占 2GB 内存，每任务重建会拖死吞吐。
+            provider: Embedding 实现。worker 进程持有单例。
+            settings: 用于成本入账（provider 名、模型名、单价）。
+            tracer: 可选。用于给 `model_calls.trace_id` 提供任务 trace
+                （引擎已用 `worker.task` span 包住 handler，
+                这里能直接取到当前 trace id）。
         """
         self._provider = provider
+        self._settings = settings
+        self._tracer = tracer
 
     async def __call__(
         self,
@@ -123,6 +137,11 @@ class EmbedDocumentHandler:
         payload = dict(task.payload or {})
         document_id = _require_uuid(payload, "document_id")
         version_id = _require_uuid(payload, "document_version_id")
+        # 可选：把向量写入指定索引版本（零停机重建）。
+        # 不传时走原有逻辑（ACTIVE 版本，必要时自动创建）。
+        target_index_version_id = (
+            _require_uuid(payload, "index_version_id") if payload.get("index_version_id") else None
+        )
 
         await progress(5, "loading_chunks")
         version, document = await self._load(session, version_id=version_id)
@@ -155,13 +174,16 @@ class EmbedDocumentHandler:
             return
 
         await progress(15, "embedding")
-        # 先确定这批向量归属哪个索引版本（ACTIVE，必要时自动创建）
-        index_version_id = await self._ensure_active_index_version(session, document=document)
+        # 先确定这批向量归属哪个索引版本（ACTIVE，或重建时指定的目标版本）
+        index_version_id = await self._resolve_index_version(
+            session, document=document, target=target_index_version_id
+        )
         await self._embed_all(
             session=session,
             chunks=pending,
             total=len(chunks),
             tenant_id=version.tenant_id,
+            document_version_id=version_id,
             progress=progress,
             index_version_id=index_version_id,
         )
@@ -211,6 +233,7 @@ class EmbedDocumentHandler:
         chunks: list[Chunk],
         total: int,
         tenant_id: uuid.UUID,
+        document_version_id: uuid.UUID,
         progress: Any,
         index_version_id: uuid.UUID,
     ) -> None:
@@ -233,6 +256,20 @@ class EmbedDocumentHandler:
 
             result = await self._provider.embed_batch(texts, task=EmbeddingTask.DOCUMENT)
             vectors = result.vectors
+
+            # ---- 成本入账 ----
+            #
+            # **与向量写入同事务**：分两个事务时，若向量写成功而账没记，
+            # 对账会出现“有向量无成本”（且重跑不会补——幂等会让任务直接跳过）。
+            # `input_tokens=0` 表示服务端没返回 usage，此时不写 0-token 噪音行。
+            await self._record_embedding_cost(
+                session=session,
+                tenant_id=tenant_id,
+                document_version_id=document_version_id,
+                chunk_count=len(batch),
+                input_tokens=result.input_tokens,
+                latency_ms=result.latency_ms,
+            )
 
             # **长度必须严格一致**：embed_batch 的返回顺序对应输入顺序，
             # 长度不匹配说明实现有 bug（或部分失败被静默吞掉）。
@@ -261,6 +298,42 @@ class EmbedDocumentHandler:
                 total=total,
                 latency_ms=result.latency_ms,
             )
+
+    async def _resolve_index_version(
+        self,
+        session: AsyncSession,
+        *,
+        document: Document,
+        target: uuid.UUID | None,
+    ) -> uuid.UUID:
+        """决定向量写入哪个索引版本。
+
+        - `target is None`：原有行为——用 ACTIVE（首次自动创建）；
+        - `target` 给定：**允许写入非 ACTIVE 的 building 版本**，
+          这是零停机重建的关键：回填期间检索仍用旧 ACTIVE，
+          全部回填并校验后再由调用方切换。
+
+        指定版本仍必须校验模型/维度：把新模型的向量写进旧模型版本
+        会让两类向量混在一起，且不会报错。
+        """
+        if target is None:
+            return await self._ensure_active_index_version(session, document=document)
+
+        from rag_db.models.chunk import IndexVersion
+
+        version = await session.get(IndexVersion, target)
+        if version is None:
+            raise _permanent(f"目标索引版本 {target} 不存在")
+        if version.knowledge_base_id != document.knowledge_base_id:
+            raise _permanent(f"索引版本 {target} 不属于文档所在知识库")
+
+        expected_dim = self._provider.capabilities.dimension
+        if version.embedding_dim != expected_dim or version.embedding_model != self._provider.name:
+            raise _permanent(
+                f"目标索引版本使用 {version.embedding_model}/d{version.embedding_dim}，"
+                f"当前模型 {self._provider.name}/d{expected_dim}；不能混写"
+            )
+        return target
 
     async def _ensure_active_index_version(
         self, session: AsyncSession, *, document: Document
@@ -432,6 +505,39 @@ class EmbedDocumentHandler:
         )
         if not updated:
             raise _retryable("文档状态被并发修改，向量化结果未回写（将重试）")
+
+    async def _record_embedding_cost(
+        self,
+        *,
+        session: AsyncSession,
+        tenant_id: uuid.UUID,
+        document_version_id: uuid.UUID,
+        chunk_count: int,
+        input_tokens: int,
+        latency_ms: int | None,
+    ) -> None:
+        """把一次 embedding 调用写进 `model_calls`。
+
+        与 LLM 的 `_record_cost` 同口径：**明细表是成本对账的唯一真相**，
+        消息/会话上的 `cost_usd` 只是展示聚合。
+        """
+        if input_tokens <= 0:
+            return
+        await ModelCallRepository(session).record(
+            tenant_id=tenant_id,
+            task_type=ModelTaskType.EMBEDDING,
+            provider=self._settings.provider,
+            model=self._settings.model_name,
+            input_tokens=input_tokens,
+            unit_price_input=self._settings.unit_price_input,
+            latency_ms=latency_ms,
+            # 与 API 侧同口径：能关联到 trace 就填，方便从成本行跳到链路。
+            trace_id=(self._tracer.current_trace_id() if self._tracer is not None else None),
+            call_metadata={
+                "document_version_id": str(document_version_id),
+                "chunk_count": chunk_count,
+            },
+        )
 
     def _batch_size(self) -> int:
         """批大小。

@@ -334,13 +334,16 @@ def _provider(handler: Any, **overrides: Any) -> LangChainEmbedding:
 
 
 def _embedding_response(
-    vectors: list[list[float]], *, indexes: list[int] | None = None
+    vectors: list[list[float]],
+    *,
+    indexes: list[int] | None = None,
+    tokens: int = 1,
 ) -> dict[str, Any]:
     order = indexes or list(range(len(vectors)))
     return {
         "object": "list",
         "model": "embedding-3",
-        "usage": {"prompt_tokens": 1, "total_tokens": 1},
+        "usage": {"prompt_tokens": tokens, "total_tokens": tokens},
         "data": [
             {"object": "embedding", "index": index, "embedding": vectors[position]}
             for position, index in enumerate(order)
@@ -348,25 +351,23 @@ def _embedding_response(
     }
 
 
-async def test_remote_follows_response_order_and_normalizes() -> None:
-    """LangChain 在字符串模式下**按响应顺序**装配向量（已知取舍）。
+async def test_remote_maps_by_index_and_normalizes() -> None:
+    """按响应里的 `index` 归位，并自己做归一化。
 
-    实测 `langchain_openai/embeddings/base.py:750`：
-    `embeddings.extend(r["embedding"] for r in response["data"])`，
-    不读 `index`。所以这里锁定的是实际行为：服务端按输入顺序返回时，
-    我们按位对应；乱序返回不会被修正——这是保留框架的代价，
-    已写进 `langchain_embedding.py` 的模块 docstring。
-
-    归一化仍然是我们自己做的（服务端不保证单位向量）。
+    这是改用原始响应的直接收益：LangChain 的 `aembed_documents` 只按
+    返回顺序装配（`base.py:750`），服务端一旦乱序就会向量与文本错位。
+    乱序 + 未归一化都不会报错，只会让检索相关性变坏。
     """
     requests: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(json.loads(request.content))
-        # 按输入顺序返回；向量未归一化（模长 5 与 10）
+        # 故意把 index=1 放在前面；向量未归一化（模长 5 与 10）
         return httpx.Response(
             200,
-            json=_embedding_response([[3.0, 0.0, 4.0, 0.0], [0.0, 6.0, 0.0, 8.0]]),
+            json=_embedding_response(
+                [[0.0, 6.0, 0.0, 8.0], [3.0, 0.0, 4.0, 0.0]], indexes=[1, 0], tokens=12
+            ),
         )
 
     provider = _provider(handler)
@@ -380,10 +381,13 @@ async def test_remote_follows_response_order_and_normalizes() -> None:
     assert requests[0]["dimensions"] == 4
     assert requests[0]["input"] == ["第一条", "第二条"]
 
+    # index=0 对应"第一条"：[3,0,4,0] / 5 = [0.6,0,0.8,0]
     assert result.vectors[0] == pytest.approx([0.6, 0.0, 0.8, 0.0], abs=1e-6)
     assert result.vectors[1] == pytest.approx([0.0, 0.6, 0.0, 0.8], abs=1e-6)
     for vector in result.vectors:
         assert math.sqrt(sum(value * value for value in vector)) == pytest.approx(1.0)
+    # usage 必须透传到结果，供 model_calls 成本入账
+    assert result.input_tokens == 12
 
 
 async def test_remote_sends_strings_not_token_ids() -> None:
@@ -459,7 +463,8 @@ async def test_remote_rejects_wrong_count() -> None:
     finally:
         await provider.aclose()
 
-    assert excinfo.value.retryable is False
+    # 条数不符视为可重试的协议异常：可能是上游抖动，重试有机会恢复
+    assert excinfo.value.retryable is True
 
 
 async def test_remote_auth_error_is_not_retryable() -> None:

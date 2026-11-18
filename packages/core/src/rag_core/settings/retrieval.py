@@ -34,6 +34,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
@@ -184,6 +185,13 @@ class RerankerSettings(BaseModel):
     max_concurrency: int = Field(default=2, ge=1, le=32)
     """并发请求上限（ResilientCaller 信号量）。"""
 
+    unit_price_input: Decimal | None = None
+    """输入 token 单价（USD / 1M tokens），用于 `model_calls` 成本入账。
+
+    rerank 按 (query + 所有候选) 的 token 计费。
+    默认 None（成本记 0）——不臆造供应商单价，补上后可重算历史。
+    """
+
     @field_validator("base_url")
     @classmethod
     def _validate_base_url(cls, value: str) -> str:
@@ -191,6 +199,14 @@ class RerankerSettings(BaseModel):
         if not url.startswith(("http://", "https://")):
             raise ValueError(f"reranker.base_url 必须带协议，当前是 {value!r}")
         return url
+
+    @field_validator("unit_price_input", mode="before")
+    @classmethod
+    def _empty_price_is_none(cls, value: object) -> object:
+        """空字符串 → None（容器环境里只能传空值的情况）。"""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @property
     def configured(self) -> bool:
