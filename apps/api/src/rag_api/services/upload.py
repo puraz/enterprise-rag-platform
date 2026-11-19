@@ -353,9 +353,7 @@ class UploadService:
         from rag_core.errors import ConflictError, NotFoundError
         from rag_db.repositories import KnowledgeBaseRepository
 
-        kb = await KnowledgeBaseRepository(self._session).get(
-            tenant_id=tenant_id, kb_id=kb_id
-        )
+        kb = await KnowledgeBaseRepository(self._session).get(tenant_id=tenant_id, kb_id=kb_id)
         if kb is None:
             raise NotFoundError("知识库不存在")
         if kb.status != KnowledgeBaseStatus.ACTIVE.value:

@@ -184,9 +184,7 @@ def _create_kb(
     return response.json()
 
 
-def _upload_blob(
-    client: TestClient, headers: dict[str, str], content: bytes, filename: str
-) -> str:
+def _upload_blob(client: TestClient, headers: dict[str, str], content: bytes, filename: str) -> str:
     """上传一个文件，返回 blob_id。
 
     走完整的分片流程（init → part → complete）。**秒传命中时直接返回
@@ -215,9 +213,7 @@ def _upload_blob(
         return str(init_body["blob_id"])
 
     upload_id = init_body["upload_id"]
-    part = client.put(
-        f"/api/v1/uploads/{upload_id}/parts/1", headers=headers, content=content
-    )
+    part = client.put(f"/api/v1/uploads/{upload_id}/parts/1", headers=headers, content=content)
     assert part.status_code == 200, part.text
 
     complete = client.post(
@@ -277,9 +273,7 @@ def test_duplicate_kb_name_conflicts(client: TestClient) -> None:
     """同名知识库返回 409。"""
     headers = _login(client, f"kb-{uuid.uuid4().hex[:8]}")
     _create_kb(client, headers, name="唯一库名")
-    response = client.post(
-        "/api/v1/knowledge-bases", headers=headers, json={"name": "唯一库名"}
-    )
+    response = client.post("/api/v1/knowledge-bases", headers=headers, json={"name": "唯一库名"})
     assert response.status_code == 409, response.text
     assert response.json()["code_name"]
 
@@ -640,9 +634,7 @@ def test_retry_rejects_non_failed_document(client: TestClient) -> None:
     ).json()
 
     # 刚建出来是 pending，不是 failed
-    response = client.post(
-        f"/api/v1/documents/{created['document_id']}/retry", headers=headers
-    )
+    response = client.post(f"/api/v1/documents/{created['document_id']}/retry", headers=headers)
     assert response.status_code == 409, response.text
 
 

@@ -156,9 +156,7 @@ class IngestionService:
         kb = await self._require_kb(tenant_id=ctx.tenant_id, kb_id=knowledge_base_id)
         blob = await self._require_blob(tenant_id=ctx.tenant_id, blob_id=blob_id)
 
-        effective_level = self._resolve_confidentiality(
-            requested=confidentiality, kb=kb
-        )
+        effective_level = self._resolve_confidentiality(requested=confidentiality, kb=kb)
         doc_format = self._resolve_format(original_filename)
         doc_title = _derive_title(title, original_filename)
 
@@ -222,10 +220,7 @@ class IngestionService:
         # 为什么不用 ref_count：它把"上传会话持有" "文档持有" 混在一起，
         # 数值本身没有业务含义。文档侧计数才是用户理解的"重复"。
         deduplicated = (
-            await self._count_documents_for_blob(
-                tenant_id=ctx.tenant_id, blob_id=blob.id
-            )
-            > 1
+            await self._count_documents_for_blob(tenant_id=ctx.tenant_id, blob_id=blob.id) > 1
         )
 
         # ---- 入队解析任务 ----
@@ -281,9 +276,7 @@ class IngestionService:
 
     # ------------------------------------------------------------ 校验步骤
 
-    async def _count_documents_for_blob(
-        self, *, tenant_id: uuid.UUID, blob_id: uuid.UUID
-    ) -> int:
+    async def _count_documents_for_blob(self, *, tenant_id: uuid.UUID, blob_id: uuid.UUID) -> int:
         """数有多少个未删除文档引用这个 blob。
 
         "重复上传同一文件"的判据。**从文档侧数**而不是看 `ref_count`：
@@ -305,9 +298,7 @@ class IngestionService:
         )
         return int(result.scalar_one())
 
-    async def _require_kb(
-        self, *, tenant_id: uuid.UUID, kb_id: uuid.UUID
-    ) -> KnowledgeBase:
+    async def _require_kb(self, *, tenant_id: uuid.UUID, kb_id: uuid.UUID) -> KnowledgeBase:
         """取知识库并校验可用。
 
         ## 为什么"不存在"与"已归档"分别报错
@@ -349,9 +340,7 @@ class IngestionService:
         from sqlalchemy import select
 
         result = await self._session.execute(
-            select(Blob)
-            .where(Blob.id == blob_id, Blob.tenant_id == tenant_id)
-            .limit(1)
+            select(Blob).where(Blob.id == blob_id, Blob.tenant_id == tenant_id).limit(1)
         )
         blob = result.scalar_one_or_none()
         if blob is None:

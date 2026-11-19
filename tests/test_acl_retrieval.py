@@ -202,9 +202,7 @@ async def seeded_tenant(db_session: AsyncSession) -> AsyncIterator[dict[str, obj
                 },
             )
             await db_session.execute(
-                text(
-                    "UPDATE documents SET current_version_id = :v WHERE id = :d"
-                ),
+                text("UPDATE documents SET current_version_id = :v WHERE id = :d"),
                 {"v": version_id, "d": doc_id},
             )
             await db_session.execute(
@@ -291,8 +289,7 @@ async def test_search_vector_filters_by_confidentiality(
     assert any("ALPHAMARKER" in c for c in contents), "PUBLIC 文档应该能检索到"
     assert any("BETAMARKER" in c for c in contents), "INTERNAL 文档应该能检索到"
     assert not any("GAMMAMARKER" in c for c in contents), (
-        "**SECRET 文档不该被 MEMBER 检索到**——"
-        "过滤没接进 search_vector 时这条会红"
+        "**SECRET 文档不该被 MEMBER 检索到**——过滤没接进 search_vector 时这条会红"
     )
 
 
