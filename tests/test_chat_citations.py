@@ -142,14 +142,37 @@ class _FakeLLM(LLMProvider):
 
 
 class _FakeSettings:
-    """ChatService 只需要 `llm.pricing_for` 能返回 None（成本查不到就记 0）。"""
+    """ChatService 的 settings 替身。
 
+    ## 为什么不能只手写一个 `llm`
+
+    初版只有 `llm = _LLM()`（当时 ChatService 只用它查单价）。后来
+    `_retrieve` 开始记录 embedding / reranker 的成本，于是需要
+    `settings.embedding.provider`、`settings.embedding.model_name`、
+    `settings.embedding.unit_price_input` 等字段——
+    这些用例全部报 `'_FakeSettings' object has no attribute 'embedding'`，
+    而栈顶指向业务代码，看不出是测试替身漏了字段。
+
+    修法不是把它们一个个手写出来（下次再加一个字段又会坏），
+    而是直接用**真实的子配置对象**：它们都是纯 Pydantic 模型，
+    不连库不连网，构造零成本。这样 ChatService 用到任何字段都有值，
+    且默认值与生产一致（成本记 0 是因为 unit_price 默认 None，
+    正是这些测试想要的语义）。
+    """
+
+    from rag_core.settings import EmbeddingSettings, LLMSettings, RerankerSettings
+
+    # llm 用替身：真实 LLMSettings 的 pricing_for 会查单价表，
+    # 而这些测试要的是"查不到单价 → 成本记 0"的确定行为。
     class _LLM:
         @staticmethod
         def pricing_for(_model: str) -> None:
             return None
 
     llm = _LLM()
+    # 这两个用真实配置对象：字段齐全，且 unit_price_* 默认 None（成本记 0）
+    embedding = EmbeddingSettings()
+    reranker = RerankerSettings()
 
 
 class _FakeSelfCheckLLM(_FakeLLM):

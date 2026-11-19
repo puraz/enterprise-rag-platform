@@ -30,14 +30,26 @@ from rag_core.settings import get_settings
 pytestmark = pytest.mark.integration
 
 APP_ROLE = "rag_app"
-APP_PASSWORD = "123456"
 
 
 def _app_engine():
-    """创建以 rag_app（非超级用户）连接的引擎。"""
+    """创建以 rag_app（非超级用户）连接的引擎。
+
+    ## 密码为什么必须从 Settings 读，不能硬编码
+
+    这里原先写死了 `APP_PASSWORD = "123456"`（当时本机 PG 里 rag_app
+    恰好就是这个密码）。换到 Docker compose 后容器里的 rag_app 密码来自
+    `RAG_APP_PASSWORD`（默认 `rag_local_dev_only`），于是本文件所有用例
+    全部报 `password authentication failed for user "rag_app"`——
+    而错误信息完全指向不到"测试写死了密码"这个根因。
+
+    AGENTS.md 的约定是「连接信息统一从 `Settings` 读」：同一份测试代码
+    要在本机 PG（角色 puraz 建库）与 compose（rag_admin 建库）两种环境
+    都能跑，不能有两套连接参数。
+    """
     settings = get_settings()
     return create_async_engine(
-        f"postgresql+asyncpg://{APP_ROLE}:{APP_PASSWORD}"
+        f"postgresql+asyncpg://{APP_ROLE}:{settings.database.password.get_secret_value()}"
         f"@{settings.database.host}:{settings.database.port}/{settings.database.name}",
         pool_size=5,
         max_overflow=0,

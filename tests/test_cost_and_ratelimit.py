@@ -139,22 +139,58 @@ async def test_tokens_refill_over_time(limiter: RateLimiter) -> None:
 
 
 async def test_bucket_does_not_overflow_burst(limiter: RateLimiter) -> None:
-    """长时间空闲后不该累积超过 burst。"""
+    """长时间空闲后不该累积超过 burst。
+
+    ## 这个测试为什么这样写（初版是错的）
+
+    初版：耗尽桶 → sleep 1 秒 → 连发 10 个 cost=1 → 断言放行数 == burst。
+
+    断言在 `rate=100/s` 下**恒不成立**：10 次调用本身要花几毫秒，
+    而 rate=100/s 意味着每 10ms 补回 1 个令牌，放行数 =
+    burst + 调用期补的量（实测 6 而不是 3）。
+
+    那是**测试假设错了**，不是桶的 bug：令牌桶按速率持续补充，
+    你没法在一个持续补充的桶上数出恰好 burst 个。
+
+    ## 现在的写法：把「补桶」从变量里消掉
+
+    用一次 `cost > burst` 的调用：若补桶没封顶，1 秒空闲能攒 100 个，
+    这次调用会被放行；封顶正确（最多 burst 个）时必然被拒。
+    一次调用只吃一个时间点，不受"多次调用期间又补了多少"影响。
+
+    反向验证（额度确实补满了、不是一直为 0）改用 `rate` 极低的 policy：
+    rate 越小，补桶对断言的影响越小，测试就不再依赖调度时序。
+    """
+
+    # ---- ① 封顶校验：cost 远大于 burst 必须被拒 ----
     policy = RateLimitPolicy("test_overflow", rate=100.0, burst=3)
     key = tenant_key(uuid.uuid4())
 
-    # 先耗尽
-    for _ in range(3):
+    for _ in range(policy.burst):  # 先耗尽
         await limiter.check(policy=policy, key=key)
 
-    # 等 1 秒：rate=100/s 理论上能补 100 个，但桶容量是 3
-    await asyncio.sleep(1.0)
+    await asyncio.sleep(1.0)  # 空闲 1 秒：rate=100/s 能攒 100 个，但必须封顶 3
 
-    allowed_count = 0
-    for _ in range(10):
-        if (await limiter.check(policy=policy, key=key)).allowed:
-            allowed_count += 1
-    assert allowed_count == 3, f"桶容量应封顶 3，实际放行 {allowed_count}"
+    result = await limiter.check(policy=policy, key=key, cost=float(policy.burst * 3))
+    assert not result.allowed, (
+        f"空闲累积必须封顶 burst={policy.burst}：一次消耗 {policy.burst * 3} 个应被拒绝。"
+        "放行说明补桶没有上限，长时间空闲后可瞬间放出远超 burst 的请求。"
+    )
+
+    # ---- ② 反向验证：额度确实补到了 burst（不是一直为 0）----
+    #
+    # 用 rate 极低的 policy：补桶速度慢到在测试的几毫秒内可忽略，
+    # 于是"放行 N 次后第 N+1 次被拒"是确定的。用高 rate 会引入
+    # 时序依赖（这正是初版 flaky 的来源）。
+    slow = RateLimitPolicy("test_refill_slow", rate=0.001, burst=3)
+    slow_key = tenant_key(uuid.uuid4())
+    assert (await limiter.check(policy=slow, key=slow_key)).allowed, "首次访问应满桶放行"
+
+    # 新桶首次为满（burst=3）：连续 3 次都能过，第 4 次被拒。
+    # 因为 rate≈0，期间补的令牌远小于 1 个，不影响判定。
+    for i in range(policy.burst - 1):
+        assert (await limiter.check(policy=slow, key=slow_key)).allowed, f"第 {i + 2} 次应放行"
+    assert not (await limiter.check(policy=slow, key=slow_key)).allowed, "额度耗尽后应被拒"
 
 
 async def test_cost_greater_than_one(limiter: RateLimiter) -> None:

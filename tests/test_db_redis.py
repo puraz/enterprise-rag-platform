@@ -188,7 +188,12 @@ def test_real_postgres_roundtrip() -> None:
             await db.close()
 
     version, extensions = asyncio.run(scenario())
-    assert version.startswith("18")
+    # 只断言**主版本下限**，不钉死具体版本：
+    # 本机可能是 PG 18，compose 用的是 pgvector/pgvector:pg17。
+    # 钉死 "18" 会让换到 compose 环境时这条用例误报——而它真正要证明的
+    # 是"连得上、PG 版本够新（支持我们用的 SQL 特性）且装了 pgvector"。
+    major = int(version.split(".")[0])
+    assert major >= 17, f"PG 主版本需 >= 17，实际 {version}"
     assert "vector" in extensions, "缺少 pgvector 扩展，A3 建向量表会失败"
 
 
